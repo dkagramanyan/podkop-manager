@@ -3,6 +3,18 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.27.0 — 2026-10-25
+
+- **Rules that share another rule's servers** (podkop-agent 0.7.0). A rule of
+  type sing-box JSON with `{"type": "selector", "outbounds": ["main-out"]}`
+  sends its domains through main's servers: same servers, same switching,
+  nothing more for the router to test or keep connected. Such rules split
+  main's domains into segments (Anthropic, Meta, GitHub, ...).
+  - The agent's check of a rule's sing-box JSON accepts the outbounds of
+    other rules; before, it refused `main-out` as unknown, and with it every
+    apply of such a config.
+  - Exit IP in Now routing follows the rule to main and to main's server now.
+
 ## 1.26.0 — 2026-10-19
 
 - **No minutes-long hang when a server dies** (podkop-agent 0.6.0). When a

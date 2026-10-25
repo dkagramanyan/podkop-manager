@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.6.0"
+AGENT_VERSION="0.7.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -168,13 +168,16 @@ check_links() (
   rm -f "$RUN/chk.$$.err" "$RUN/chk.$$.out"
 )
 
-# check_outbounds <config file>: outbound_json of each section through sing-box check
+# check_outbounds <config file>: outbound_json of each section through sing-box check;
+# it may name the outbounds of other sections (a selector of main-out), here stand-ins
 check_outbounds() {
   jq -r '.sections[] | select(.type == "section" and .options.connection_type == "proxy"
            and .options.proxy_config_type == "outbound") | .name' "$1" |
   while IFS= read -r _s; do
     jq -c --arg s "$_s" '{log: {disabled: true},
-        outbounds: [.sections[] | select(.name == $s) | .options.outbound_json | fromjson | .tag = "x"]}' \
+        outbounds: ([.sections[] | select(.name == $s) | .options.outbound_json | fromjson | .tag = "x"]
+          + [.sections[] | select(.type == "section" and .name != $s) | .name
+             | ("\(.)-out", "\(.)-urltest-out") | {type: "direct", tag: .}])}' \
       "$1" > "$RUN/chk.$$.json"
     if ! _m=$(sing-box check -c "$RUN/chk.$$.json" 2>&1); then
       jq -nc --arg s "$_s" --arg m "$(printf '%s' "$_m" | tail -n 1)" \
@@ -864,9 +867,10 @@ cmd_exit_ip() {
   case "$(printf '%s' "$_o" | jq -r '.connection_type // ""')" in
     proxy)
       _p=$(proxies); [ -n "$_p" ] || fail podkop_down "the Clash API does not answer (is podkop running?)"
-      # the group's choice; through the urltest group, that group's choice
-      _t=$(printf '%s' "$_p" | jq -r --arg s "$_s" '.proxies as $p | ($p["\($s)-out"].now // "\($s)-out") as $n
-        | if $n == "\($s)-urltest-out" then ($p[$n].now // "") else $n end')
+      # the group's choice, and the choice of each group behind it (a urltest group, or
+      # main-out behind a section's selector of it)
+      _t=$(printf '%s' "$_p" | jq -r --arg s "$_s" '.proxies as $p
+        | [limit(8; "\($s)-out" | recurse($p[.].now // empty))] | last')
       case "$_t" in ""|*[!A-Za-z0-9_-]*) fail not_found "section $_s has no server now" ;; esac
       _cfg=$(uci -q get podkop.settings.config_path); [ -n "$_cfg" ] || _cfg=/etc/sing-box/config.json
       # the outbound and the ones it goes through (detour); podkop's DNS servers are not there
