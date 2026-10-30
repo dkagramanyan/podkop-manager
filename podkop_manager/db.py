@@ -113,6 +113,12 @@ class DB:
                 rows = self.conn.execute("SELECT id, line FROM logs").fetchall()
                 parsed = [(p["source"], p["level"], r[0]) for r in rows for p in [parse_log(r[1])]]
                 self.conn.executemany("UPDATE logs SET source = ?, level = ? WHERE id = ?", parsed)
+        # lines stored before they counted as noise
+        noise = [(r["id"],) for r in self.q("SELECT id, line FROM logs WHERE level != 'noise' AND line LIKE '%arpa% IN PTR%'")
+                 if parse_log(r["line"])["level"] == "noise"]
+        if noise:
+            with self.lock:
+                self.conn.executemany("UPDATE logs SET level = 'noise' WHERE id = ?", noise)
         # 1.28.0 kept a rule's keys with its probe parameters
         for r in self.q("SELECT router_id, section, keys FROM auto_rules WHERE keys != '[]'"):
             if r["section"] not in self.rule_keys(r["router_id"]):

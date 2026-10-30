@@ -125,6 +125,11 @@ def test_login_and_header_check(tmp_path):
         # a write without the manager's own header (e.g. from another site) is refused
         assert c.post("/api/routers", json={"host": "x"}).status_code == 403
         assert c.get("/api/routers/5/config").status_code == 404
+        # the web interface's files are checked on every load, so an update shows without clearing the cache
+        for path in ("/", "/login", "/static/app.js", "/static/app.css"):
+            assert c.get(path).headers["cache-control"] == "no-cache", path
+        etag = c.get("/static/app.js").headers["etag"]
+        assert c.get("/static/app.js", headers={"If-None-Match": etag}).status_code == 304
 
 
 def test_draft_api(tmp_path):
@@ -150,6 +155,18 @@ def test_logs_filters_and_parsed_fields(tmp_path):
         rows = c.get("/api/routers/1/logs?source=sing-box&level=warn,error").json()
         assert [r["msg"] for r in rows] == ["slow", "dead"] and rows[0]["time"] == "23:18:48"
         assert [r["msg"] for r in c.get("/api/routers/1/logs?source=podkop,agent").json()] == ["Stopping"]
+
+
+def test_stored_reverse_lookup_failures_become_noise(tmp_path):
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA host")
+    ptr = ("Sat Oct 31 01:22:38 2026 daemon.err sing-box[1]: ERROR[0000] dns: server dns-server: "
+           "exchange failed for lb._dns-sd._udp.113.65.7.12.in-addr.arpa. IN PTR: context deadline exceeded")
+    db.add_log(rid, ptr, "sing-box", "error")                       # stored by 1.30.1 or older
+    db.add_log(rid, "Sat Oct 31 01:22:40 2026 daemon.err sing-box[1]: ERROR[0000] dead", "sing-box", "error")
+    db = DB(tmp_path / "m.db")
+    assert [r["level"] for r in db.logs(rid)] == ["noise", "error"]
+    assert [r["level"] for r in db.logs(rid, levels=["debug", "info", "warn", "error"])] == ["error"]   # Logs' "All"
 
 
 def test_versions_trigger_reason_and_paging(tmp_path):

@@ -797,11 +797,13 @@ const probeIsNew = (probe) => (probe.auto_rules || []).some((r) => r.differs);
 // --- logs ------------------------------------------------------------------------------------------
 
 const LOG_SOURCES = [["podkop", "podkop"], ["sing-box", "sing-box"], ["engine", "engine"], ["agent", "agent"]];
-const LOG_LEVELS = { all: [], warn: ["warn", "error"], error: ["error"] };
+const LOG_LEVELS = { all: ["debug", "info", "warn", "error"], warn: ["warn", "error"], error: ["error"] };
 
 async function viewLogs(main, id) {
   const rt = getRouter(id);
-  const f = { q: "", sources: new Set(), level: "all", follow: true, buffer: null };
+  // noise: failed reverse lookups devices ask by themselves (see _NOISE in podkop.py), hidden unless asked
+  const f = { q: "", sources: new Set(), level: "all", noise: false, follow: true, buffer: null };
+  const levels = () => [...LOG_LEVELS[f.level], ...(f.noise ? ["noise"] : [])];
   const box = h("div", { class: "logbox", tabindex: "0", "aria-label": "Log lines" });
   const lines = h("div", { class: "loglines" });
   box.append(lines);
@@ -817,7 +819,7 @@ async function viewLogs(main, id) {
     h("span", {}, r.time || (r.t ? new Date(r.t * 1000).toLocaleTimeString([], { hourCycle: "h23" }) : "")),
     h("span", {}, r.source || "–"), h("span", {}, r.level), h("span", {}, r.msg));
   const matches = (r) => (!f.sources.size || f.sources.has(r.source))
-    && (f.level === "all" || LOG_LEVELS[f.level].includes(r.level))
+    && levels().includes(r.level)
     && (!f.q || r.line.toLowerCase().includes(f.q.toLowerCase()));
   const toBottom = () => { box.scrollTop = box.scrollHeight; };
 
@@ -827,7 +829,7 @@ async function viewLogs(main, id) {
     toBottom();
   };
   const load = async () => {
-    const qs = new URLSearchParams({ limit: "1000", q: f.q, source: [...f.sources].join(","), level: LOG_LEVELS[f.level].join(",") });
+    const qs = new URLSearchParams({ limit: "1000", q: f.q, source: [...f.sources].join(","), level: levels().join(",") });
     fill(await api("GET", `/api/routers/${id}/logs?${qs}`));
   };
 
@@ -855,6 +857,9 @@ async function viewLogs(main, id) {
         } }, label))),
     seg([["all", "All"], ["warn", "Warnings"], ["error", "Errors"]], f.level, (v) => { f.level = v; drawTools(); load(); },
       { label: "Level", disabled: !!f.buffer }),
+    h("label", { class: "check inline", title: "Failed reverse lookups (in-addr.arpa) that devices ask by themselves: nothing breaks" },
+      h("input", { type: "checkbox", checked: f.noise, disabled: !!f.buffer, onchange: (e) => { f.noise = e.target.checked; load(); } }),
+      "Show unimportant lines"),
     h("div", { class: "row", style: "margin-left: auto; gap: 12px" },
       h("label", { class: "check inline" }, h("input", { type: "checkbox", checked: f.follow, onchange: (e) => {
         f.follow = e.target.checked; drawFoot(); if (f.follow) toBottom();

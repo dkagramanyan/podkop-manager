@@ -61,6 +61,18 @@ def test_tag_names():
     assert n["main-urltest-out"] == "automatic"
 
 
+def test_failed_reverse_lookups_are_noise():
+    ptr = ("Sat Oct 31 01:22:38 2026 daemon.err sing-box[1]: ERROR[0000] [2769742888 6.50s] dns: server dns-server: "
+           "exchange failed for lb._dns-sd._udp.113.65.7.12.in-addr.arpa. IN PTR: context deadline exceeded")
+    assert podkop.parse_log(ptr)["level"] == "noise"
+    more = ("Sat Oct 31 01:23:09 2026 daemon.err sing-box[1]: ERROR[0000] dns: server dns-server: 3 more exchanges "
+            "failed in 10s, the last for 1.0.0.0.ip6.arpa. IN PTR: context deadline exceeded")
+    assert podkop.parse_log(more)["level"] == "noise"
+    real = ("Sat Oct 31 01:23:09 2026 daemon.err sing-box[1]: ERROR[0000] dns: server dns-server: "
+            "exchange failed for claude.ai. IN A: context deadline exceeded")
+    assert podkop.parse_log(real)["level"] == "error"
+
+
 def test_parse_log_sources_and_levels():
     p = podkop.parse_log("Sat Oct 17 23:18:40 2026 user.notice podkop: [info] Stopping the podkop")
     assert p == {"time": "23:18:40", "source": "podkop", "level": "info", "msg": "Stopping the podkop"}

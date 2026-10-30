@@ -24,6 +24,16 @@ from .db import DB
 from .hub import Hub
 
 STATIC = Path(__file__).parent / "static"
+# the web interface's files: the browser asks each time whether they changed (a 304 when not),
+# so after an update it never runs yesterday's app.js with today's server
+NO_CACHE = {"Cache-Control": "no-cache"}
+
+
+class _Static(StaticFiles):
+    def file_response(self, *args, **kwargs):
+        r = super().file_response(*args, **kwargs)
+        r.headers.update(NO_CACHE)
+        return r
 
 
 def hash_password(password: str, salt: str | None = None) -> str:
@@ -90,17 +100,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(404, "no such router") from None
 
     # --- pages ----------------------------------------------------------------------
-    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+    app.mount("/static", _Static(directory=STATIC), name="static")
 
     @app.get("/")
     async def index(request: Request):
         if not request.session.get("auth"):
             return RedirectResponse("/login", status_code=303)
-        return FileResponse(STATIC / "app.html")
+        return FileResponse(STATIC / "app.html", headers=NO_CACHE)
 
     @app.get("/login")
     async def login_page():
-        return FileResponse(STATIC / "login.html")
+        return FileResponse(STATIC / "login.html", headers=NO_CACHE)
 
     @app.post("/login")
     async def login(request: Request):
