@@ -165,7 +165,7 @@ class DB:
         self.x("DELETE FROM probe_settings WHERE router_id = ?", rid)
         # the hub's per-router settings, so a router that gets this id later starts clean
         for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
-                     "rule_keys", "rule_keys_base", "keys_synced"):
+                     "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -391,6 +391,18 @@ class DB:
         else:
             rk.pop(section, None)
         self.set_setting(f"rule_keys:{rid}", rk)
+
+    # --- your own servers a rule with keys takes too: {section: [links]} ----------------------
+    def rule_links(self, rid: int) -> dict:
+        return self.get_setting(f"rule_links:{rid}") or {}
+
+    def set_rule_links(self, rid: int, section: str, links: list) -> None:
+        rl = self.rule_links(rid)
+        if links:
+            rl[section] = links
+        else:
+            rl.pop(section, None)
+        self.set_setting(f"rule_links:{rid}", rl)
 
     # --- saved configs (not tied to a router) ------------------------------------
     def configs(self) -> list[dict]:

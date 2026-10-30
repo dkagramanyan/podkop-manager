@@ -3,6 +3,17 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.30.0 — 2026-10-31
+
+- **Your own servers in a rule with keys** (manager 0.18.0). Under "Servers,
+  3 from VPN Service #11521" there is **Add your own servers**: paste links
+  that are not in any key. They go into the URLTest after the keys' servers,
+  tagged "yours", with a remove button.
+  - When a provider changes its servers, the new list keeps your own (also
+    a server the provider dropped, if you added it yourself).
+  - Saved at once, like the keys; Discard puts them back. A rule whose own
+    servers changed in a draft not applied yet waits for it.
+
 ## 1.29.0 — 2026-10-31
 
 - **Servers from keys, without the probe** (manager 0.17.0). The Keys choice

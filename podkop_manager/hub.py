@@ -405,6 +405,7 @@ class Hub:
                 self.db.delete_draft(rt.id)
                 self.db.set_setting(f"rules_base:{rt.id}", None)
                 self.db.set_setting(f"rule_keys_base:{rt.id}", None)
+                self.db.set_setting(f"rule_links_base:{rt.id}", None)
                 rt.draft = None
         rt.wake.set()
         return data
@@ -751,20 +752,23 @@ class Hub:
         return self.db.probe_settings(rt.id)
 
     def keep_rules(self, rid: int) -> None:
-        """Before the first change of a router's probe rules or rules' keys
-        since its last apply: remember them, so discarding the draft puts them back."""
+        """Before the first change of a router's probe rules or rules' keys and
+        own servers since its last apply: remember them, so discarding the
+        draft puts them back."""
         if self.db.get_setting(f"rules_base:{rid}") is None:
             self.db.set_setting(f"rules_base:{rid}", [
                 {k: r[k] for k in r if k not in ("router_id", "section")} | {"section": r["section"]}
                 for r in self.db.auto_rules(rid)])
-        if self.db.get_setting(f"rule_keys_base:{rid}") is None:
-            self.db.set_setting(f"rule_keys_base:{rid}", self.db.rule_keys(rid))
+        for name in ("rule_keys", "rule_links"):
+            if self.db.get_setting(f"{name}_base:{rid}") is None:
+                self.db.set_setting(f"{name}_base:{rid}", self.db.get_setting(f"{name}:{rid}") or {})
 
     def restore_rules(self, rid: int) -> None:
-        """Discard: the probe rules and rules' keys as they were before the draft."""
-        if (keys := self.db.get_setting(f"rule_keys_base:{rid}")) is not None:
-            self.db.set_setting(f"rule_keys:{rid}", keys)
-            self.db.set_setting(f"rule_keys_base:{rid}", None)
+        """Discard: the probe rules and rules' keys and own servers as they were before the draft."""
+        for name in ("rule_keys", "rule_links"):
+            if (kept := self.db.get_setting(f"{name}_base:{rid}")) is not None:
+                self.db.set_setting(f"{name}:{rid}", kept)
+                self.db.set_setting(f"{name}_base:{rid}", None)
         base = self.db.get_setting(f"rules_base:{rid}")
         if base is None:
             return
@@ -807,16 +811,16 @@ class Hub:
 
     def key_rule_links(self, rid: int) -> dict:
         """{section: links} of the rules that take every server of their keys:
-        the keys' servers, each once. Rules that take links from the probe
-        use their keys there instead."""
+        the keys' servers, then the rule's own servers, each once. Rules that
+        take links from the probe use their keys there instead."""
         subs = {k["id"]: k["links"] for k in self.sub_links(rid)}
-        probe = {r["section"] for r in self.db.auto_rules(rid)}
+        probe, own = {r["section"] for r in self.db.auto_rules(rid)}, self.db.rule_links(rid)
         out = {}
         for section, ids in self.db.rule_keys(rid).items():
             if section in probe:
                 continue
             seen, links = set(), []
-            for x in (x for i in ids for x in subs.get(i, [])):
+            for x in [x for i in ids for x in subs.get(i, [])] + own.get(section, []):
                 if usage.norm(x) not in seen:
                     seen.add(usage.norm(x))
                     links.append(x)
@@ -825,13 +829,16 @@ class Hub:
 
     async def sync_key_rules(self, rt: RouterRuntime) -> None:
         """When a provider changed its servers, the rules that take every
-        server of its key get the new list on the router (once per list, so
-        a failed apply is not tried again and again), and an open draft gets
-        it too, so applying the draft doesn't put the old servers back. Not
-        rules whose keys were changed in a draft not applied yet."""
-        base, rk = self.db.get_setting(f"rule_keys_base:{rt.id}"), self.db.rule_keys(rt.id)
-        wanted = {s: links for s, links in self.key_rule_links(rt.id).items()
-                  if links and (base is None or base.get(s) == rk.get(s))}
+        server of its key get the new list (with their own servers) on the
+        router (once per list, so a failed apply is not tried again and
+        again), and an open draft gets it too, so applying the draft doesn't
+        put the old servers back. Not rules whose keys or own servers were
+        changed in a draft not applied yet."""
+        def unchanged(s: str) -> bool:
+            return all((base := self.db.get_setting(f"{name}_base:{rt.id}")) is None
+                       or base.get(s) == (self.db.get_setting(f"{name}:{rt.id}") or {}).get(s)
+                       for name in ("rule_keys", "rule_links"))
+        wanted = {s: links for s, links in self.key_rule_links(rt.id).items() if links and unchanged(s)}
         if not wanted:
             return
         cur = await self.config(rt.id)
