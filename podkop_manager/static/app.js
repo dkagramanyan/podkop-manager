@@ -563,12 +563,13 @@ const EVENT_TEXT = {
   probe_apply_failed: (d) => `Probe result not applied: ${d.message}`,
   probe_not_started: (d) => `Nightly probe not started: ${d.message}`,
   auto_rule_empty: (d) => `${d.section}: no server matched after the probe, the rule keeps its last servers`,
+  keys_sync_failed: (d) => `A provider's new servers were not applied: ${d.message}`,
   usage_threshold: (d) => `${d.key} used ${Math.round(d.pct)}% of today's traffic${d.action === "avoid" ? ", rules move to other keys" : ""}`,
   usage_move_failed: (d) => `Rules not moved for the traffic limit: ${d.message}`,
 };
 const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", probe_apply_failed: "bad", probe_not_started: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
 };
@@ -954,6 +955,7 @@ const VERSION_STATE = {
 function versionWho(v) {
   if (v.trigger === "probe") return /nightly/i.test(v.note || "") ? "nightly probe" : "probe result, by you";
   if (v.trigger === "usage") return "traffic limit";
+  if (v.trigger === "keys") return "provider's new servers";
   return "by you";
 }
 
@@ -1351,16 +1353,16 @@ async function loadWork(id) {
   const prev = S.work[id];
   if (prev && prev.saving) saveWork(prev);
   if (prev && prev.inflight) await prev.inflight;      // its saves first, or they would look like someone else's
-  const [cur, draft, versions, rules] = await Promise.all([api("GET", `/api/routers/${id}/config`),
+  const [cur, draft, versions, rules, keys] = await Promise.all([api("GET", `/api/routers/${id}/config`),
     api("GET", `/api/routers/${id}/draft`), api("GET", `/api/routers/${id}/versions?limit=50`).catch(() => []),
-    api("GET", `/api/routers/${id}/auto-rules`).catch(() => [])]);
+    api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {} }))]);
   const old = S.work[id];
   const w = {
     id, orig: cur.config, fp: cur.fingerprint,
     ctx: { lists: cur.community_lists || [], devices: cur.devices || [], interfaces: cur.interfaces || [] },
     config: draft ? draft.config : clone(cur.config), base: draft ? draft.base : cur.fingerprint,
     rev: draft ? draft.updated : null,     // the draft this page started from, see saveWork
-    versions, auto: Object.fromEntries(rules.map((r) => [r.section, r])),
+    versions, auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
     problems: old && old.problems && draft && same(old.config, draft.config) ? old.problems : null,
     saving: null, inflight: null, loaded: Date.now(), redraw: () => {},
   };
@@ -1737,7 +1739,8 @@ async function viewRules(main, id, sub) {
         h("span", { class: "n" }, i + 1),
         h("div", { class: "col grow", style: "gap: 6px" },
           h("div", { class: "row" }, h("span", { class: "name" }, s.name), tag,
-            auto ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, "from probe") : null),
+            auto ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, "from probe")
+              : keyRule(w, s) ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, `from ${keyLabels(w, s.name)}`) : null),
           h("div", { class: "what" }, h("span", {}, ruleMatches(s)), icon("arrow", 14, { stroke: "var(--muted)" }),
             auto ? h("span", { class: "dest" }, autoDest(auto, s)) : destChip(s))));
       }),
@@ -1801,7 +1804,14 @@ function ruleEditor(w, s, { onRename }) {
     const old = s.name;
     s.name = name;
     touch(w);
-    // the probe parameters move first: the page that opens next reads them
+    // the probe parameters and keys move first: the page that opens next reads them
+    if (ruleKeys(w, old).length) {
+      try {
+        await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, old) });
+        await api("PUT", `/api/routers/${w.id}/rule-keys/${old}`, { keys: [] });
+        w.keys.rules[name] = ruleKeys(w, old); delete w.keys.rules[old];
+      } catch (e) { toast(e.message, true); }
+    }
     if (w.auto[old]) {
       try {
         const r = await api("PUT", `/api/routers/${w.id}/auto-rules/${name}`, w.auto[old]);
@@ -1821,6 +1831,9 @@ function ruleEditor(w, s, { onRename }) {
     if (auto) {
       try { w.auto[name] = await api("PUT", `/api/routers/${w.id}/auto-rules/${name}`, auto); } catch (e) { toast(e.message, true); }
     }
+    if (ruleKeys(w, s.name).length) {
+      try { w.keys.rules[name] = (await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, s.name) })).keys; } catch (e) { toast(e.message, true); }
+    }
     onRename(name);
   };
 
@@ -1833,6 +1846,7 @@ function ruleEditor(w, s, { onRename }) {
           m.close();
           w.config.sections = sectionsOf(w.config).filter((x) => x !== s);
           if (auto) api("DELETE", `/api/routers/${w.id}/auto-rules/${s.name}`).then(() => { delete w.auto[s.name]; }).catch(() => {});
+          if (ruleKeys(w, s.name).length) api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: [] }).then(() => { delete w.keys.rules[s.name]; }).catch(() => {});
           touch(w);
           location.hash = `#/r/${w.id}/rules`;
         } }, "Delete rule"))] });
@@ -1895,6 +1909,7 @@ function ruleEditor(w, s, { onRename }) {
       }, { label: "Servers" })) : null,
     b.problemEls("proxy_config_type"),
     ct === "proxy" ? h("p", { class: "xs muted", style: "margin-top: -6px" }, PROXY_HELP[pt]) : null,
+    ct === "proxy" && pt === "urltest" ? ruleKeysField(w, s) : null,
     ct === "proxy" && pt === "urltest" ? h("label", { class: "check" },
       h("input", { type: "checkbox", role: "switch", checked: !!auto, onchange: (e) => toggleAuto(w, s, e.target.checked) }),
       h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Take links from probe"),
@@ -1902,7 +1917,7 @@ function ruleEditor(w, s, { onRename }) {
     ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
-    ct === "proxy" && pt === "urltest" && !auto ? serversField(w, b, "urltest_proxy_links", { title: "Servers" }) : null,
+    ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,
     ct === "proxy" && pt === "urltest" && !auto ? serversField(w, b, "urltest_fallback_links", { title: "Fallback servers",
       help: "Used only when every server above fails", collapsible: true }) : null,
     ct === "proxy" && pt === "outbound" ? h("div", { class: "field" }, lbl(b, "outbound_json", "sing-box outbound (JSON)"),
@@ -1984,6 +1999,75 @@ function proxyAdvanced(w, b, s, ct, pt) {
   return det;
 }
 
+// --- URLTest rules that take the servers of chosen keys (subscriptions) ---------------------------------------------------
+// Without the probe the rule gets every server of its keys, and the manager
+// keeps them up to date when a provider changes its servers; with the probe,
+// the probe picks only from those keys.
+
+// a rule's keys, without keys removed since
+const ruleKeys = (w, name) => (w.keys.rules[name] || []).filter((id) => w.keys.subs.some((k) => k.id === id));
+const keyLabels = (w, name) => w.keys.subs.filter((k) => ruleKeys(w, name).includes(k.id)).map((k) => k.label).join(", ");
+const keyRule = (w, s) => !w.auto[s.name] && ruleKeys(w, s.name).length > 0
+  && ((s.options || {}).connection_type || "proxy") === "proxy" && (s.options || {}).proxy_config_type === "urltest";
+
+// the keys' servers, each once (a link without its name and fingerprint), as the manager counts them
+function keyLinks(w, name) {
+  const seen = new Set(), out = [];
+  for (const k of w.keys.subs) {
+    if (!ruleKeys(w, name).includes(k.id)) continue;
+    for (const l of k.links) {
+      const n = l.split("#")[0].replace(/([?&])fp=[^&#]*&?/, "$1").replace(/[?&]$/, "");
+      if (!seen.has(n)) { seen.add(n); out.push(l); }
+    }
+  }
+  return out;
+}
+
+// the draft gets the keys' servers (a key whose servers were not read yet has none: nothing changes)
+function fillKeyServers(w, s) {
+  if (!keyRule(w, s)) return;
+  const links = keyLinks(w, s.name), o = s.options;
+  if (!links.length || same(asList(o.urltest_proxy_links), links)) return;
+  o.urltest_proxy_links = links;
+  touch(w);
+}
+
+function ruleKeysField(w, s) {
+  if (!w.keys.subs.length) return null;
+  const chosen = ruleKeys(w, s.name), auto = w.auto[s.name];
+  const set = async (ids) => {
+    try {
+      w.keys.rules[s.name] = (await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ids })).keys;
+      if (auto) { const ui = w.ui[`${s.name}:auto`]; if (ui) ui.preview = null; } else fillKeyServers(w, s);
+    } catch (e) { toast(e.message, true); }
+    w.redraw();
+  };
+  return h("div", { class: "field", role: "group", "aria-label": "Servers from keys" },
+    h("span", { class: "label xs muted", style: "font-size: 12px" }, "Servers from keys"),
+    h("div", { class: "row", style: "gap: 6px" }, w.keys.subs.map((k) =>
+      h("button", { type: "button", class: "toggle", "aria-pressed": String(chosen.includes(k.id)), title: plural(k.links.length, "server"),
+        onclick: () => set(chosen.includes(k.id) ? chosen.filter((x) => x !== k.id) : [...chosen, k.id]) }, k.label))),
+    h("span", { class: "help" }, !chosen.length ? (auto ? "None chosen: the probe picks from all keys" : "None chosen: the servers you add below")
+      : auto ? "The probe picks only from these keys"
+        : "Every server of these keys. When a provider changes its servers, the manager applies the new ones by itself"));
+}
+
+// the servers a rule without the probe has from its keys: as in the draft, not edited by hand
+function keyServers(w, s) {
+  const links = asList(s.options.urltest_proxy_links);
+  const ui = w.ui[`${s.name}:keys`] || (w.ui[`${s.name}:keys`] = { all: false });
+  const shown = ui.all ? links : links.slice(0, 6);
+  return h("div", { class: "servers" },
+    h("div", { class: "servers-head" }, h("span", {}, `Servers, ${links.length} from ${keyLabels(w, s.name)}`)),
+    links.length ? null : h("p", { class: "empty" }, "The manager has not read these keys' servers yet. They come within 10 minutes."),
+    shown.map((l) => h("div", { class: "srv" },
+      h("div", { class: "col" },
+        h("div", {}, h("span", { class: "nm" }, linkName(l)), h("span", { class: "proto" }, linkProto(l))),
+        h("span", { class: "host ellipsis", title: linkDetails(l) }, linkDetails(l))))),
+    links.length > 6 ? h("div", { class: "servers-more" }, h("button", { type: "button", class: "link-btn", onclick: () => { ui.all = !ui.all; w.redraw(); } },
+      ui.all ? "Show fewer" : `Show ${links.length - 6} more`)) : null);
+}
+
 // --- rules whose servers the probe picks from the subscriptions ----------------------------------------------------------
 
 async function toggleAuto(w, s, on) {
@@ -1997,6 +2081,7 @@ async function toggleAuto(w, s, on) {
     } else {
       await api("DELETE", `/api/routers/${w.id}/auto-rules/${s.name}`);
       delete w.auto[s.name];
+      fillKeyServers(w, s);
     }
   } catch (e) { toast(e.message, true); }
   w.redraw();
@@ -2132,13 +2217,6 @@ function autoRuleEditor(w, s, rule) {
         h("div", { class: "part-head" }, h("span", { style: "font-size: 13.5px; font-weight: 600" }, "Probe parameters"),
           h("a", { href: `#/r/${w.id}/usage`, class: "xs" }, p ? `Tests ${plural(p.keys, "subscription")} from Keys and usage` : "Keys and usage")),
         h("div", { class: "form-grid", style: "grid-template-columns: minmax(110px, 140px) minmax(0, 1fr); align-items: start" },
-          p && p.subs.length ? [
-            h("span", { class: "lbl", style: "font-weight: 500; padding-top: 6px" }, "Keys"),
-            h("div", { class: "ctl", style: "gap: 6px" },
-              h("div", { class: "row", style: "gap: 6px" }, p.subs.map((k) =>
-                h("button", { type: "button", class: "toggle", "aria-pressed": String(rule.keys.includes(k.id)),
-                  onclick: () => update({ keys: rule.keys.includes(k.id) ? rule.keys.filter((x) => x !== k.id) : [...rule.keys, k.id] }, true) }, k.label))),
-              h("span", { class: "help" }, rule.keys.some((id) => p.subs.some((k) => k.id === id)) ? "Servers only from these keys" : "None chosen: servers from all keys"))] : null,
           h("span", { class: "lbl", style: "font-weight: 500; padding-top: 6px" }, "Exit country"),
           h("div", { class: "ctl", style: "gap: 6px" },
             h("div", { class: "row", style: "gap: 6px" },

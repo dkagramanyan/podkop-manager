@@ -51,8 +51,12 @@ that already runs there are taken into **Keys and usage** and the rules.
 ## Good to know
 
 - Changes collect in a draft until **Review and apply**.
-- A **Fastest (URLTest)** rule can **Take links from probe**: keys,
-  region, protocol, exit IP, name, ping, speed, YouTube and how many to keep. Its
+- A **Fastest (URLTest)** rule can take **Servers from keys**: every
+  server of the subscriptions you pick (e.g. one provider). When a provider
+  changes its servers, the manager applies the new list by itself.
+- A **Fastest (URLTest)** rule can **Take links from probe**: region,
+  protocol, exit IP, name, ping, speed, YouTube and how many to keep, from
+  the rule's keys if it has some. Its
   servers are refreshed after every probe run; **Run probe** is in the rule.
 - **Nightly probe** (time, apply by itself, TLS fingerprint, where servers
   are tested): in every rule that takes links from the probe, under its

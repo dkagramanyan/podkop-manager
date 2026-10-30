@@ -74,6 +74,11 @@ def _utc() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _list(v) -> list:
+    """A UCI option as a list: one value or a list."""
+    return v if isinstance(v, list) else [v] if v else []
+
+
 def manager_minutes(router_minutes: int, utc_offset: str) -> int:
     """A time of day on the router's clock (minutes; its UTC offset like
     "+0300") on the manager's clock. Unknown offset: the same clock."""
@@ -399,6 +404,7 @@ class Hub:
             if draft and version and not podkop.diff(draft["config"], version["config"]):
                 self.db.delete_draft(rt.id)
                 self.db.set_setting(f"rules_base:{rt.id}", None)
+                self.db.set_setting(f"rule_keys_base:{rt.id}", None)
                 rt.draft = None
         rt.wake.set()
         return data
@@ -620,10 +626,10 @@ class Hub:
             status = dict(status, rows=[r for r in status.get("rows") or [] if usage.norm(r.get("link") or "") not in avoided])
         # each server's key, for rules that take only some keys; ids of keys removed since don't count,
         # so a rule whose keys are all gone takes every key's servers again
-        keys = self.db.keys(rid)
+        keys, rk = self.db.keys(rid), self.db.rule_keys(rid)
         subs, index = {k["id"] for k in keys if k["kind"] == "sub"}, usage.link_index(keys)
         rows = [dict(r, key=index.get(usage.norm(r.get("link") or ""))) for r in status.get("rows") or []]
-        picks = {r["section"]: podkop.auto_pick(rows, dict(r, keys=[k for k in r["keys"] if k in subs]))
+        picks = {r["section"]: podkop.auto_pick(rows, dict(r, keys=[k for k in rk.get(r["section"], []) if k in subs]))
                  for r in self.db.auto_rules(rid)}
         if self.db.probe_settings(rid).get("fix_fingerprint"):
             for p in picks.values():
@@ -745,15 +751,20 @@ class Hub:
         return self.db.probe_settings(rt.id)
 
     def keep_rules(self, rid: int) -> None:
-        """Before the first change of a router's probe rules since its last
-        apply: remember them, so discarding the draft puts them back."""
+        """Before the first change of a router's probe rules or rules' keys
+        since its last apply: remember them, so discarding the draft puts them back."""
         if self.db.get_setting(f"rules_base:{rid}") is None:
             self.db.set_setting(f"rules_base:{rid}", [
                 {k: r[k] for k in r if k not in ("router_id", "section")} | {"section": r["section"]}
                 for r in self.db.auto_rules(rid)])
+        if self.db.get_setting(f"rule_keys_base:{rid}") is None:
+            self.db.set_setting(f"rule_keys_base:{rid}", self.db.rule_keys(rid))
 
     def restore_rules(self, rid: int) -> None:
-        """Discard: the probe rules as they were before the draft."""
+        """Discard: the probe rules and rules' keys as they were before the draft."""
+        if (keys := self.db.get_setting(f"rule_keys_base:{rid}")) is not None:
+            self.db.set_setting(f"rule_keys:{rid}", keys)
+            self.db.set_setting(f"rule_keys_base:{rid}", None)
         base = self.db.get_setting(f"rules_base:{rid}")
         if base is None:
             return
@@ -784,6 +795,75 @@ class Hub:
         self.update_draft(rt)
         self.publish({"type": "router", "router": rt.snapshot()})
         return config
+
+    # --- URLTest rules that take every server of their keys (keys chosen, no probe) -----------
+    def sub_links(self, rid: int) -> list:
+        """The router's subscriptions, each with its servers podkop can build
+        (with the chrome fingerprint, if the probe uses it)."""
+        fix = self.db.probe_settings(rid).get("fix_fingerprint")
+        return [{"id": k["id"], "label": usage.key_label(k),
+                 "links": [podkop.fix_fingerprint(x) if fix else x for x in k["links"] if podkop.link_protocol(x) in podkop.PROTOCOLS]}
+                for k in self.db.keys(rid) if k["kind"] == "sub"]
+
+    def key_rule_links(self, rid: int) -> dict:
+        """{section: links} of the rules that take every server of their keys:
+        the keys' servers, each once. Rules that take links from the probe
+        use their keys there instead."""
+        subs = {k["id"]: k["links"] for k in self.sub_links(rid)}
+        probe = {r["section"] for r in self.db.auto_rules(rid)}
+        out = {}
+        for section, ids in self.db.rule_keys(rid).items():
+            if section in probe:
+                continue
+            seen, links = set(), []
+            for x in (x for i in ids for x in subs.get(i, [])):
+                if usage.norm(x) not in seen:
+                    seen.add(usage.norm(x))
+                    links.append(x)
+            out[section] = links
+        return out
+
+    async def sync_key_rules(self, rt: RouterRuntime) -> None:
+        """When a provider changed its servers, the rules that take every
+        server of its key get the new list on the router (once per list, so
+        a failed apply is not tried again and again), and an open draft gets
+        it too, so applying the draft doesn't put the old servers back. Not
+        rules whose keys were changed in a draft not applied yet."""
+        base, rk = self.db.get_setting(f"rule_keys_base:{rt.id}"), self.db.rule_keys(rt.id)
+        wanted = {s: links for s, links in self.key_rule_links(rt.id).items()
+                  if links and (base is None or base.get(s) == rk.get(s))}
+        if not wanted:
+            return
+        cur = await self.config(rt.id)
+        new = json.loads(json.dumps(cur["config"]))
+        secs = podkop.sections_by_name(new)
+        synced = self.db.get_setting(f"keys_synced:{rt.id}") or {}
+        changed = []
+        for name, links in wanted.items():
+            o = (secs.get(name) or {}).get("options") or {}
+            if (o.get("connection_type") or "proxy") != "proxy" or o.get("proxy_config_type") != "urltest":
+                continue
+            have, want = sorted({usage.norm(x) for x in _list(o.get("urltest_proxy_links"))}), sorted({usage.norm(x) for x in links})
+            if want != have and want != synced.get(name):
+                o["urltest_proxy_links"] = links
+                changed.append(name)
+            synced[name] = want
+        if changed:
+            rk, labels = self.db.rule_keys(rt.id), {k["id"]: k["label"] for k in self.sub_links(rt.id)}
+            names = sorted({labels[i] for s in changed for i in rk.get(s, []) if i in labels})
+            try:
+                await self.apply(rt.id, cur["fingerprint"], new, f"new servers of {', '.join(names)}: {', '.join(changed)}", "keys")
+                if d := self.db.draft(rt.id):
+                    ds = podkop.sections_by_name(d["config"])
+                    for name in changed:
+                        if name in ds:
+                            ds[name].setdefault("options", {})["urltest_proxy_links"] = wanted[name]
+                    self.db.set_draft(rt.id, d["config"], d["base"])
+                    self.update_draft(rt)
+                    self.publish({"type": "router", "router": rt.snapshot()})
+            except (AgentError, ValueError) as e:
+                self._event(rt, "keys_sync_failed", {"message": str(e)})
+        self.db.set_setting(f"keys_synced:{rt.id}", synced)
 
     def _avoided_links(self, rid: int) -> set:
         """Links of the keys that passed their traffic threshold and are set to
@@ -818,6 +898,7 @@ class Hub:
                 if time.time() - last >= USAGE_SECONDS:
                     last = time.time()
                     await self.read_usage(rt)
+                    await self.sync_key_rules(rt)
             except AgentError as e:
                 log.info("usage %s: %s", rt.row["host"], e.message)
             except Exception:  # noqa: BLE001 - keep counting whatever happens

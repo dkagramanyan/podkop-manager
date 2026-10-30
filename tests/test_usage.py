@@ -434,7 +434,7 @@ def test_rules_never_get_servers_of_keys_moved_away_from(tmp_path: Path):
     assert hub.auto_picks(rid, st)["main"]["links"] == ["vless://c@h:3#C"]     # what the rule's preview shows too
 
 
-def test_rule_takes_servers_only_of_its_keys(tmp_path: Path):
+def test_probe_rule_takes_servers_only_of_its_keys(tmp_path: Path):
     db = DB(tmp_path / "m.db")
     rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
     subs = ["https://gas.example.com/abc", "https://free.example.com/def"]
@@ -443,14 +443,79 @@ def test_rule_takes_servers_only_of_its_keys(tmp_path: Path):
     gas, free = (k["id"] for k in db.keys(rid))
     db.update_key(gas, links=["vless://a@h:1#A"])
     db.update_key(free, links=["vless://b@h:2#B"])
-    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "fallback": 0, "keys": [gas]}))
-    assert db.auto_rule(rid, "main")["keys"] == [gas]
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "fallback": 0}))
+    db.set_rule_keys(rid, "main", [gas])
     hub = Hub(db, tmp_path / "key", tmp_path)
     st = {"rows": [ROW("vless://b@h:2#B", "0.1"), ROW("vless://a@h:1&fp=qq#A", "0.2"), ROW("vless://c@h:3#C", "0.3")]}
     p = hub.auto_picks(rid, st)["main"]
     assert p["links"] == ["vless://a@h:1&fp=qq#A"] and p["left_out"] == []    # other keys' servers are not "left out"
+    assert hub.key_rule_links(rid) == {}                                        # the probe's rule: not synced by keys
     db.delete_key(gas)                                                          # its key gone: every key's servers again
     assert hub.auto_picks(rid, st)["main"]["links"] == ["vless://b@h:2#B", "vless://a@h:1&fp=qq#A"]
+
+
+def test_keys_of_1_28_move_out_of_the_probe_rule(tmp_path: Path):
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"keys": [3]}))      # a 1.28.0 config: accepted, dropped
+    db.x("UPDATE auto_rules SET keys = '[3, 4]' WHERE section = 'main'")
+    db = DB(tmp_path / "m.db")
+    assert db.rule_keys(rid) == {"main": [3, 4]} and "keys" not in db.auto_rule(rid, "main")
+
+
+def test_rule_takes_every_server_of_its_keys_and_follows_them(tmp_path: Path):
+    import asyncio
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
+    subs = ["https://gas.example.com/abc", "https://free.example.com/def"]
+    db.set_probe_settings(rid, keys=subs)
+    db.sync_sub_keys(rid, subs)
+    gas, free = (k["id"] for k in db.keys(rid))
+    db.update_key(gas, label="Gas VPN", links=["vless://a@h:1#A", "vmess://x", "trojan://b@h:2#B"])
+    db.update_key(free, links=["vless://a@h:1#A2", "vless://f@h:5#F"])
+    db.set_rule_keys(rid, "main", [gas, free])
+    db.set_rule_keys(rid, "vpn", [gas])
+    hub = Hub(db, tmp_path / "key", tmp_path)
+    # each server once, only what podkop can build
+    assert hub.key_rule_links(rid)["main"] == ["vless://a@h:1#A", "trojan://b@h:2#B", "vless://f@h:5#F"]
+
+    sec = lambda n, o: {"name": n, "type": "section", "options": o}
+    cur = {"fingerprint": "fp", "config": {"sections": [
+        sec("main", {"connection_type": "proxy", "proxy_config_type": "urltest", "urltest_proxy_links": ["vless://f@h:5#F"]}),
+        sec("vpn", {"connection_type": "vpn", "interface": "wg0"})]}}
+    db.set_draft(rid, cur["config"], "fp")
+    applied = []
+
+    async def config(_rid):
+        return cur
+
+    async def apply(_rid, base, config, note, trigger):
+        applied.append((config, note, trigger))
+        return {"version": 1}
+
+    hub.config, hub.apply, hub.update_draft = config, apply, lambda rt: None
+    rt = type("RT", (), {"id": rid, "snapshot": lambda self: {}})()
+    asyncio.run(hub.sync_key_rules(rt))
+    (new, note, trigger), = applied
+    main = podkop.sections_by_name(new)["main"]["options"]
+    assert main["urltest_proxy_links"] == ["vless://a@h:1#A", "trojan://b@h:2#B", "vless://f@h:5#F"]
+    assert trigger == "keys" and "Gas VPN" in note and "vpn" not in note        # vpn is not a URLTest rule
+    assert podkop.sections_by_name(db.draft(rid)["config"])["main"]["options"]["urltest_proxy_links"] == main["urltest_proxy_links"]
+    # the same list again (also when the router did not take it): nothing more
+    asyncio.run(hub.sync_key_rules(rt))
+    assert len(applied) == 1
+    # the provider dropped a server: applied once more
+    db.update_key(gas, links=["vless://a@h:1#A"])
+    asyncio.run(hub.sync_key_rules(rt))
+    assert podkop.sections_by_name(applied[1][0])["main"]["options"]["urltest_proxy_links"] == ["vless://a@h:1#A", "vless://f@h:5#F"]
+    # keys changed in a draft not applied yet: not synced; discarding the draft puts them back
+    hub.keep_rules(rid)
+    db.set_rule_keys(rid, "main", [gas])
+    db.update_key(gas, links=["vless://n@h:6#N"])
+    asyncio.run(hub.sync_key_rules(rt))
+    assert len(applied) == 2
+    hub.restore_rules(rid)
+    assert db.rule_keys(rid)["main"] == [gas, free]
 
 
 FAKE_PROBE = r"""
