@@ -146,7 +146,7 @@ def test_auto_pick_filters_limits_and_order():
 
 def test_check_auto_rule_refuses_bad_input():
     for bad in ({"countries": ["Poland"]}, {"protocols": ["vmess"]}, {"exit_ips": ["10.0.0.0/33"]}, {"top": 0},
-                {"max_ping": 50}, {"youtube": "maybe"}, {"min_speed": "fast"}):
+                {"max_ping": 50}, {"youtube": "maybe"}, {"min_speed": "fast"}, {"keys": ["gas"]}, {"keys": [True]}):
         with pytest.raises(ValueError):
             podkop.check_auto_rule(bad)
 

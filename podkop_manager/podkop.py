@@ -438,23 +438,28 @@ def check_auto_rule(rule: dict) -> dict:
     youtube = youtube if youtube in ("", "plays") else youtube.upper()
     if youtube not in ("", "plays") and not re.fullmatch(r"[A-Z]{2}", youtube):
         raise ValueError("YouTube is '', 'plays' or a two-letter country code like RU")
+    # keys: ids of the subscriptions in Keys and usage whose servers the rule takes; none = all
+    keys = rule.get("keys") or []
+    if not isinstance(keys, list) or not all(isinstance(k, int) and not isinstance(k, bool) for k in keys):
+        raise ValueError("keys is a list of key ids")
     return {"countries": countries, "protocols": protocols, "exit_ips": exit_ips,
             "name_contains": str(rule.get("name_contains") or "").strip(), "top": top, "fallback": fallback,
-            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube}
+            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube, "keys": sorted(set(keys))}
 
 
 def auto_pick(rows: list, rule: dict) -> dict:
     """The servers of the probe's rows for a rule: those that pass its filter
     and its limits, fastest median first; top of them for the URLTest, the
-    next ones as fallback. left_out: servers in the rule's countries that
-    were not taken, with the reason."""
+    next ones as fallback. left_out: servers in the rule's countries (and of
+    its keys: a row's "key" is the id of the key it came from) that were not
+    taken, with the reason."""
     picked, left = [], []
     for r in rows:
         link = r.get("link")
         if not link:
             continue
         in_country = not rule["countries"] or (r.get("country") or "").upper() in rule["countries"]
-        if not in_country:
+        if not in_country or (rule.get("keys") and r.get("key") not in rule["keys"]):
             continue
         name = r.get("node") or link_name(link)
         why = ""
