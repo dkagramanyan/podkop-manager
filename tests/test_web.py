@@ -337,10 +337,17 @@ def test_rule_keys_api(tmp_path):
         c.put("/api/routers/1/probe", json={"keys": ["https://sub.example.com/a"]}, headers=H)
         kid = c.db.keys(1)[0]["id"]
         c.db.update_key(kid, links=["vless://a@h:1#A", "vmess://x"])
-        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid]}, headers=H).json() == {"keys": [kid]}
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid]}, headers=H).json() == {"keys": [kid], "links": []}
         for bad in ([kid + 1], ["a"], [True], "x"):
             assert c.put("/api/routers/1/rule-keys/main", json={"keys": bad}, headers=H).status_code == 400
         r = c.get("/api/routers/1/rule-keys").json()
         assert r["rules"] == {"main": [kid]} and r["subs"][0]["links"] == ["vless://a@h:1#A"]   # only what podkop builds
-        assert c.put("/api/routers/1/rule-keys/main", json={"keys": []}, headers=H).json() == {"keys": []}
+        # own servers: kept when only keys are sent, each once, only podkop's protocols
+        r = c.put("/api/routers/1/rule-keys/main", json={"keys": [kid], "links": [" trojan://m@h:2#M", "trojan://m@h:2#M"]}, headers=H).json()
+        assert r == {"keys": [kid], "links": ["trojan://m@h:2#M"]}
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid]}, headers=H).json()["links"] == ["trojan://m@h:2#M"]
+        for bad in (["vmess://x"], "trojan://m@h:2", [1]):
+            assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid], "links": bad}, headers=H).status_code == 400
+        assert c.get("/api/routers/1/rule-keys").json()["links"] == {"main": ["trojan://m@h:2#M"]}
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [], "links": []}, headers=H).json() == {"keys": [], "links": []}
         assert c.get("/api/routers/1/rule-keys").json()["rules"] == {}

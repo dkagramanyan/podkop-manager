@@ -1355,7 +1355,7 @@ async function loadWork(id) {
   if (prev && prev.inflight) await prev.inflight;      // its saves first, or they would look like someone else's
   const [cur, draft, versions, rules, keys] = await Promise.all([api("GET", `/api/routers/${id}/config`),
     api("GET", `/api/routers/${id}/draft`), api("GET", `/api/routers/${id}/versions?limit=50`).catch(() => []),
-    api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {} }))]);
+    api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {}, links: {} }))]);
   const old = S.work[id];
   const w = {
     id, orig: cur.config, fp: cur.fingerprint,
@@ -1805,11 +1805,12 @@ function ruleEditor(w, s, { onRename }) {
     s.name = name;
     touch(w);
     // the probe parameters and keys move first: the page that opens next reads them
-    if (ruleKeys(w, old).length) {
+    if (ruleKeys(w, old).length || ownLinks(w, old).length) {
       try {
-        await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, old) });
-        await api("PUT", `/api/routers/${w.id}/rule-keys/${old}`, { keys: [] });
-        w.keys.rules[name] = ruleKeys(w, old); delete w.keys.rules[old];
+        await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, old), links: ownLinks(w, old) });
+        await api("PUT", `/api/routers/${w.id}/rule-keys/${old}`, { keys: [], links: [] });
+        w.keys.rules[name] = ruleKeys(w, old); w.keys.links[name] = ownLinks(w, old);
+        delete w.keys.rules[old]; delete w.keys.links[old];
       } catch (e) { toast(e.message, true); }
     }
     if (w.auto[old]) {
@@ -1831,8 +1832,11 @@ function ruleEditor(w, s, { onRename }) {
     if (auto) {
       try { w.auto[name] = await api("PUT", `/api/routers/${w.id}/auto-rules/${name}`, auto); } catch (e) { toast(e.message, true); }
     }
-    if (ruleKeys(w, s.name).length) {
-      try { w.keys.rules[name] = (await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, s.name) })).keys; } catch (e) { toast(e.message, true); }
+    if (ruleKeys(w, s.name).length || ownLinks(w, s.name).length) {
+      try {
+        const r = await api("PUT", `/api/routers/${w.id}/rule-keys/${name}`, { keys: ruleKeys(w, s.name), links: ownLinks(w, s.name) });
+        w.keys.rules[name] = r.keys; w.keys.links[name] = r.links;
+      } catch (e) { toast(e.message, true); }
     }
     onRename(name);
   };
@@ -1846,7 +1850,8 @@ function ruleEditor(w, s, { onRename }) {
           m.close();
           w.config.sections = sectionsOf(w.config).filter((x) => x !== s);
           if (auto) api("DELETE", `/api/routers/${w.id}/auto-rules/${s.name}`).then(() => { delete w.auto[s.name]; }).catch(() => {});
-          if (ruleKeys(w, s.name).length) api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: [] }).then(() => { delete w.keys.rules[s.name]; }).catch(() => {});
+          if (ruleKeys(w, s.name).length || ownLinks(w, s.name).length) api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: [], links: [] })
+            .then(() => { delete w.keys.rules[s.name]; delete w.keys.links[s.name]; }).catch(() => {});
           touch(w);
           location.hash = `#/r/${w.id}/rules`;
         } }, "Delete rule"))] });
@@ -2000,25 +2005,24 @@ function proxyAdvanced(w, b, s, ct, pt) {
 }
 
 // --- URLTest rules that take the servers of chosen keys (subscriptions) ---------------------------------------------------
-// Without the probe the rule gets every server of its keys, and the manager
-// keeps them up to date when a provider changes its servers; with the probe,
-// the probe picks only from those keys.
+// Without the probe the rule gets every server of its keys, and your own
+// servers besides, and the manager keeps them up to date when a provider
+// changes its servers; with the probe, the probe picks only from those keys.
 
 // a rule's keys, without keys removed since
 const ruleKeys = (w, name) => (w.keys.rules[name] || []).filter((id) => w.keys.subs.some((k) => k.id === id));
+const ownLinks = (w, name) => w.keys.links[name] || [];
 const keyLabels = (w, name) => w.keys.subs.filter((k) => ruleKeys(w, name).includes(k.id)).map((k) => k.label).join(", ");
 const keyRule = (w, s) => !w.auto[s.name] && ruleKeys(w, s.name).length > 0
   && ((s.options || {}).connection_type || "proxy") === "proxy" && (s.options || {}).proxy_config_type === "urltest";
 
-// the keys' servers, each once (a link without its name and fingerprint), as the manager counts them
+// the keys' servers, then the rule's own, each once (a link without its name and fingerprint), as the manager counts them
 function keyLinks(w, name) {
   const seen = new Set(), out = [];
-  for (const k of w.keys.subs) {
-    if (!ruleKeys(w, name).includes(k.id)) continue;
-    for (const l of k.links) {
-      const n = l.split("#")[0].replace(/([?&])fp=[^&#]*&?/, "$1").replace(/[?&]$/, "");
-      if (!seen.has(n)) { seen.add(n); out.push(l); }
-    }
+  const all = [...w.keys.subs.filter((k) => ruleKeys(w, name).includes(k.id)).flatMap((k) => k.links), ...ownLinks(w, name)];
+  for (const l of all) {
+    const n = l.split("#")[0].replace(/([?&])fp=[^&#]*&?/, "$1").replace(/[?&]$/, "");
+    if (!seen.has(n)) { seen.add(n); out.push(l); }
   }
   return out;
 }
@@ -2037,7 +2041,8 @@ function ruleKeysField(w, s) {
   const chosen = ruleKeys(w, s.name), auto = w.auto[s.name];
   const set = async (ids) => {
     try {
-      w.keys.rules[s.name] = (await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ids })).keys;
+      const r = await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ids });
+      w.keys.rules[s.name] = r.keys; w.keys.links[s.name] = r.links;
       if (auto) { const ui = w.ui[`${s.name}:auto`]; if (ui) ui.preview = null; } else fillKeyServers(w, s);
     } catch (e) { toast(e.message, true); }
     w.redraw();
@@ -2052,20 +2057,46 @@ function ruleKeysField(w, s) {
         : "Every server of these keys. When a provider changes its servers, the manager applies the new ones by itself"));
 }
 
-// the servers a rule without the probe has from its keys: as in the draft, not edited by hand
+// the servers a rule without the probe has from its keys, as in the draft: the keys' come
+// from the provider, your own ones you add and remove here
 function keyServers(w, s) {
-  const links = asList(s.options.urltest_proxy_links);
+  const links = asList(s.options.urltest_proxy_links), own = ownLinks(w, s.name);
   const ui = w.ui[`${s.name}:keys`] || (w.ui[`${s.name}:keys`] = { all: false });
   const shown = ui.all ? links : links.slice(0, 6);
+  const fromKeys = links.filter((l) => !own.includes(l)).length;
+  const setOwn = async (next) => {
+    try {
+      const r = await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ruleKeys(w, s.name), links: next });
+      w.keys.links[s.name] = r.links;
+      fillKeyServers(w, s);
+    } catch (e) { toast(e.message, true); }
+    w.redraw();
+  };
+  const addArea = h("textarea", { class: "input", rows: 2, id: `own-${s.name}`, "data-k": `own-${s.name}`,
+    placeholder: "Paste links, one per line: vless://, trojan://, ss://, hysteria2://, socks://" });
+  const add = () => {
+    const found = (addArea.value.match(LINK_RE) || []).filter((l) => !own.includes(l));
+    if (!found.length) return toast("No links found: they start with vless://, trojan://, ss://, hysteria2:// or socks://", true);
+    addArea.value = "";
+    setOwn([...own, ...found]);
+  };
   return h("div", { class: "servers" },
-    h("div", { class: "servers-head" }, h("span", {}, `Servers, ${links.length} from ${keyLabels(w, s.name)}`)),
+    h("div", { class: "servers-head" }, h("span", {}, `Servers, ${fromKeys} from ${keyLabels(w, s.name)}${own.length ? ` and ${own.length} your own` : ""}`)),
     links.length ? null : h("p", { class: "empty" }, "The manager has not read these keys' servers yet. They come within 10 minutes."),
     shown.map((l) => h("div", { class: "srv" },
       h("div", { class: "col" },
-        h("div", {}, h("span", { class: "nm" }, linkName(l)), h("span", { class: "proto" }, linkProto(l))),
-        h("span", { class: "host ellipsis", title: linkDetails(l) }, linkDetails(l))))),
+        h("div", {}, h("span", { class: "nm" }, linkName(l)), h("span", { class: "proto" }, linkProto(l)),
+          own.includes(l) ? h("span", { class: "tag" }, "yours") : null),
+        h("span", { class: "host ellipsis", title: linkDetails(l) }, linkDetails(l))),
+      own.includes(l) ? h("button", { type: "button", class: "btn icon", "aria-label": `Remove ${linkName(l)}`,
+        onclick: () => setOwn(own.filter((x) => x !== l)) }, icon("trash", 14, { width: 1.6 })) : null)),
     links.length > 6 ? h("div", { class: "servers-more" }, h("button", { type: "button", class: "link-btn", onclick: () => { ui.all = !ui.all; w.redraw(); } },
-      ui.all ? "Show fewer" : `Show ${links.length - 6} more`)) : null);
+      ui.all ? "Show fewer" : `Show ${links.length - 6} more`)) : null,
+    h("div", { class: "servers-add" },
+      h("div", { class: "row", style: "justify-content: space-between" },
+        h("label", { for: `own-${s.name}`, class: "xs", style: "font-weight: 500; color: var(--text-2)" }, "Add your own servers"),
+        h("button", { type: "button", class: "btn xs", onclick: add }, "Add")),
+      addArea, h("span", { class: "help" }, "Kept when the provider changes its servers")));
 }
 
 // --- rules whose servers the probe picks from the subscriptions ----------------------------------------------------------

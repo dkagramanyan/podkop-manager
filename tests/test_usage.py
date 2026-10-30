@@ -518,6 +518,49 @@ def test_rule_takes_every_server_of_its_keys_and_follows_them(tmp_path: Path):
     assert db.rule_keys(rid)["main"] == [gas, free]
 
 
+def test_own_servers_stay_when_the_provider_changes(tmp_path: Path):
+    import asyncio
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
+    db.set_probe_settings(rid, keys=["https://gas.example.com/abc"])
+    db.sync_sub_keys(rid, ["https://gas.example.com/abc"])
+    gas = db.keys(rid)[0]["id"]
+    db.update_key(gas, links=["vless://a@h:1#A"])
+    db.set_rule_keys(rid, "main", [gas])
+    db.set_rule_links(rid, "main", ["vless://mine@h:7#Mine", "vless://a@h:1#A-again"])
+    hub = Hub(db, tmp_path / "key", tmp_path)
+    assert hub.key_rule_links(rid)["main"] == ["vless://a@h:1#A", "vless://mine@h:7#Mine"]   # each server once
+
+    cur = {"fingerprint": "fp", "config": {"sections": [{"name": "main", "type": "section", "options": {
+        "connection_type": "proxy", "proxy_config_type": "urltest", "urltest_proxy_links": ["vless://a@h:1#A", "vless://mine@h:7#Mine"]}}]}}
+    applied = []
+
+    async def config(_rid):
+        return cur
+
+    async def apply(_rid, base, config, note, trigger):
+        applied.append(config)
+        cur["config"] = config
+        return {"version": 1}
+
+    hub.config, hub.apply = config, apply
+    rt = type("RT", (), {"id": rid})()
+    asyncio.run(hub.sync_key_rules(rt))
+    assert applied == []                                                         # the router has them already
+    db.update_key(gas, links=["vless://b@h:2#B"])
+    asyncio.run(hub.sync_key_rules(rt))
+    assert podkop.sections_by_name(applied[0])["main"]["options"]["urltest_proxy_links"] == [
+        "vless://b@h:2#B", "vless://mine@h:7#Mine", "vless://a@h:1#A-again"]           # your copy of A stays when the key drops A
+    # own servers changed in a draft not applied yet: not synced; discard puts them back
+    hub.keep_rules(rid)
+    db.set_rule_links(rid, "main", [])
+    db.update_key(gas, links=["vless://c@h:3#C"])
+    asyncio.run(hub.sync_key_rules(rt))
+    assert len(applied) == 1
+    hub.restore_rules(rid)
+    assert db.rule_links(rid)["main"] == ["vless://mine@h:7#Mine", "vless://a@h:1#A-again"]
+
+
 FAKE_PROBE = r"""
 while [ $# -gt 0 ]; do
   case "$1" in -o) out=$2; shift ;; --nodes) nodes=$2; shift ;; --via) via=$2; shift ;; --via-host-key) hk=$2; shift ;; esac

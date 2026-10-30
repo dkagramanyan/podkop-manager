@@ -530,9 +530,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     # --- the keys whose servers a URLTest rule takes ---------------------------------------
     @app.get("/api/routers/{rid}/rule-keys", dependencies=[api])
     async def rule_keys(rid: int):
-        """The subscriptions with the servers podkop can build, and each rule's keys."""
+        """The subscriptions with the servers podkop can build, each rule's keys and own servers."""
         router_or_404(rid)
-        return {"subs": hub.sub_links(rid), "rules": db.rule_keys(rid)}
+        return {"subs": hub.sub_links(rid), "rules": db.rule_keys(rid), "links": db.rule_links(rid)}
 
     @app.put("/api/routers/{rid}/rule-keys/{section}", dependencies=[api])
     async def put_rule_keys(rid: int, section: str, body: dict):
@@ -543,9 +543,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         subs = {k["id"] for k in db.keys(rid) if k["kind"] == "sub"}
         if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i in subs for i in ids):
             raise HTTPException(400, "keys are ids of this router's subscriptions")
+        # own servers: links of the rule's own, besides its keys' servers; not given = as they are
+        links = body.get("links", db.rule_links(rid).get(section, []))
+        if not isinstance(links, list) or not all(isinstance(x, str) for x in links):
+            raise HTTPException(400, "links are a list of server links")
+        links = list(dict.fromkeys(x.strip() for x in links if x.strip()))
+        if bad := [x for x in links if podkop.link_protocol(x) not in podkop.PROTOCOLS]:
+            raise HTTPException(400, f"{bad[0][:40]} is not a link of {', '.join(p + '://' for p in podkop.PROTOCOLS)}")
         hub.keep_rules(rid)
         db.set_rule_keys(rid, section, ids)
-        return {"keys": db.rule_keys(rid).get(section, [])}
+        db.set_rule_links(rid, section, links)
+        return {"keys": db.rule_keys(rid).get(section, []), "links": db.rule_links(rid).get(section, [])}
 
     @app.get("/api/routers/{rid}/auto-rules/{section}/preview", dependencies=[api])
     async def preview_auto_rule(rid: int, section: str):

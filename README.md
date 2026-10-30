@@ -52,8 +52,9 @@ that already runs there are taken into **Keys and usage** and the rules.
 
 - Changes collect in a draft until **Review and apply**.
 - A **Fastest (URLTest)** rule can take **Servers from keys**: every
-  server of the subscriptions you pick (e.g. one provider). When a provider
-  changes its servers, the manager applies the new list by itself.
+  server of the subscriptions you pick (e.g. one provider), plus your own
+  servers if you add some. When a provider changes its servers, the manager
+  applies the new list by itself and keeps your own.
 - A **Fastest (URLTest)** rule can **Take links from probe**: region,
   protocol, exit IP, name, ping, speed, YouTube and how many to keep, from
   the rule's keys if it has some. Its
