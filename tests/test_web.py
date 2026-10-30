@@ -125,6 +125,11 @@ def test_login_and_header_check(tmp_path):
         # a write without the manager's own header (e.g. from another site) is refused
         assert c.post("/api/routers", json={"host": "x"}).status_code == 403
         assert c.get("/api/routers/5/config").status_code == 404
+        # the web interface's files are checked on every load, so an update shows without clearing the cache
+        for path in ("/", "/login", "/static/app.js", "/static/app.css"):
+            assert c.get(path).headers["cache-control"] == "no-cache", path
+        etag = c.get("/static/app.js").headers["etag"]
+        assert c.get("/static/app.js", headers={"If-None-Match": etag}).status_code == 304
 
 
 def test_draft_api(tmp_path):

@@ -3,6 +3,16 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.30.1 — 2026-10-31
+
+- **An update shows without clearing the browser's cache** (manager 0.18.1).
+  The web interface's files had no Cache-Control, so browsers kept app.js
+  for hours by their own guess and a normal reload ran the old one: new
+  parts were missing until Cmd+Shift+R, a cleared cache or a private
+  window. They are now sent with `Cache-Control: no-cache`: the browser asks
+  on every load whether they changed and gets a short "not modified" when
+  not, so pages load as fast and a normal reload shows the new version.
+
 ## 1.30.0 — 2026-10-31
 
 - **Your own servers in a rule with keys** (manager 0.18.0). Under "Servers,
