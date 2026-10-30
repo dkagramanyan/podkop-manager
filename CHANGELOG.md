@@ -3,6 +3,17 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.30.2 — 2026-10-31
+
+- **Logs hide failed reverse lookups** (manager 0.18.2). Devices ask PTR
+  names by themselves (Apple's Bonjour asks `lb._dns-sd._udp.<its
+  network>.in-addr.arpa` every few seconds), and some zones never answer, so
+  sing-box filled Logs with "exchange failed … in-addr.arpa. IN PTR" errors
+  although nothing broke. Such lines (in-addr.arpa and ip6.arpa, also the
+  "N more exchanges failed" summaries) are now level "noise": hidden in
+  All, Warnings and Errors, shown with **Show unimportant lines**. Lines
+  stored before are marked too. Failed lookups of other names stay errors.
+
 ## 1.30.1 — 2026-10-31
 
 - **An update shows without clearing the browser's cache** (manager 0.18.1).

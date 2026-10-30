@@ -514,11 +514,15 @@ LEVELS = {"trace": "debug", "debug": "debug", "info": "info", "notice": "info", 
           "warning": "warn", "err": "error", "error": "error", "fatal": "error", "panic": "error",
           "crit": "error", "alert": "error", "emerg": "error"}
 LOG_SOURCES = ("podkop", "sing-box", "engine", "agent")
+# failed reverse lookups (PTR in in-addr.arpa / ip6.arpa): devices ask them by themselves (Apple's
+# Bonjour asks lb._dns-sd._udp.<its network>) and some zones never answer; nothing breaks, so they
+# are "noise", which Logs hides unless asked
+_NOISE = re.compile(r"exchanges? failed .*\.(?:in-addr|ip6)\.arpa\.? IN PTR\b")
 
 
 def parse_log(line: str) -> dict:
     """time (router's clock), source (podkop, sing-box, engine, agent), level
-    (debug, info, warn, error) and the message of one syslog line."""
+    (debug, info, warn, error, or noise: see _NOISE) and the message of one syslog line."""
     m = _LOG.match(line)
     if not m:
         return {"time": "", "source": "", "level": "info", "msg": line}
@@ -544,4 +548,6 @@ def parse_log(line: str) -> dict:
         source = "podkop"
     else:
         source = tag
+    if source == "sing-box" and _NOISE.search(msg):
+        level = "noise"
     return {"time": time_, "source": source, "level": level, "msg": msg}
