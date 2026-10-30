@@ -618,7 +618,13 @@ class Hub:
         # never the servers of keys moved away from for their traffic limit
         if avoided := self._avoided_links(rid):
             status = dict(status, rows=[r for r in status.get("rows") or [] if usage.norm(r.get("link") or "") not in avoided])
-        picks = {r["section"]: podkop.auto_pick(status.get("rows") or [], r) for r in self.db.auto_rules(rid)}
+        # each server's key, for rules that take only some keys; ids of keys removed since don't count,
+        # so a rule whose keys are all gone takes every key's servers again
+        keys = self.db.keys(rid)
+        subs, index = {k["id"] for k in keys if k["kind"] == "sub"}, usage.link_index(keys)
+        rows = [dict(r, key=index.get(usage.norm(r.get("link") or ""))) for r in status.get("rows") or []]
+        picks = {r["section"]: podkop.auto_pick(rows, dict(r, keys=[k for k in r["keys"] if k in subs]))
+                 for r in self.db.auto_rules(rid)}
         if self.db.probe_settings(rid).get("fix_fingerprint"):
             for p in picks.values():
                 p["links"], p["fallback"] = ([podkop.fix_fingerprint(x) for x in p[k]] for k in ("links", "fallback"))

@@ -3,6 +3,20 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.28.0 — 2026-10-30
+
+- **A rule's servers from chosen keys** (manager 0.16.0). Probe parameters
+  have a **Keys** row: a button for each subscription in Keys and usage.
+  With Gas VPN on, the rule's URLTest takes only Gas VPN's servers (still
+  the fastest that pass its other filters); with none on, all keys, as
+  before. Each rule chooses on its own, e.g. main from one key and youtube
+  from all.
+  - A server's key is found by its link in the key's server list, as for
+    traffic and moving rules to other keys; the probe still tests every key.
+  - Other keys' servers are not listed under "left out", like other
+    countries.
+  - A rule whose chosen keys were all removed takes every key's servers again.
+
 ## 1.27.0 — 2026-10-25
 
 - **Rules that share another rule's servers** (podkop-agent 0.7.0). A rule of

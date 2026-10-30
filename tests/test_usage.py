@@ -434,6 +434,25 @@ def test_rules_never_get_servers_of_keys_moved_away_from(tmp_path: Path):
     assert hub.auto_picks(rid, st)["main"]["links"] == ["vless://c@h:3#C"]     # what the rule's preview shows too
 
 
+def test_rule_takes_servers_only_of_its_keys(tmp_path: Path):
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
+    subs = ["https://gas.example.com/abc", "https://free.example.com/def"]
+    db.set_probe_settings(rid, keys=subs)
+    db.sync_sub_keys(rid, subs)
+    gas, free = (k["id"] for k in db.keys(rid))
+    db.update_key(gas, links=["vless://a@h:1#A"])
+    db.update_key(free, links=["vless://b@h:2#B"])
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "fallback": 0, "keys": [gas]}))
+    assert db.auto_rule(rid, "main")["keys"] == [gas]
+    hub = Hub(db, tmp_path / "key", tmp_path)
+    st = {"rows": [ROW("vless://b@h:2#B", "0.1"), ROW("vless://a@h:1&fp=qq#A", "0.2"), ROW("vless://c@h:3#C", "0.3")]}
+    p = hub.auto_picks(rid, st)["main"]
+    assert p["links"] == ["vless://a@h:1&fp=qq#A"] and p["left_out"] == []    # other keys' servers are not "left out"
+    db.delete_key(gas)                                                          # its key gone: every key's servers again
+    assert hub.auto_picks(rid, st)["main"]["links"] == ["vless://b@h:2#B", "vless://a@h:1&fp=qq#A"]
+
+
 FAKE_PROBE = r"""
 while [ $# -gt 0 ]; do
   case "$1" in -o) out=$2; shift ;; --nodes) nodes=$2; shift ;; --via) via=$2; shift ;; --via-host-key) hk=$2; shift ;; esac

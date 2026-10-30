@@ -87,6 +87,7 @@ COLUMNS = [
     ("auto_rules", "youtube", "TEXT NOT NULL DEFAULT ''"),
     ("probe_settings", "fix_fingerprint", "INTEGER NOT NULL DEFAULT 0"),
     ("probe_settings", "test_from", "TEXT NOT NULL DEFAULT 'router'"),
+    ("auto_rules", "keys", "TEXT NOT NULL DEFAULT '[]'"),
 ]
 
 
@@ -351,7 +352,7 @@ class DB:
     def auto_rules(self, rid: int) -> list[dict]:
         rows = self.q("SELECT * FROM auto_rules WHERE router_id = ? ORDER BY section", rid)
         for r in rows:
-            for k in ("countries", "protocols", "exit_ips"):
+            for k in ("countries", "protocols", "exit_ips", "keys"):
                 r[k] = json.loads(r[k])
             if r["youtube"] == "ru":          # before 0.9.0: "sees Russia"
                 r["youtube"] = "RU"
@@ -362,12 +363,13 @@ class DB:
 
     def set_auto_rule(self, rid: int, section: str, rule: dict) -> None:
         self.x("INSERT INTO auto_rules (router_id, section, countries, protocols, exit_ips, name_contains, top, fallback, "
-               "max_ping, min_speed, youtube) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
+               "max_ping, min_speed, youtube, keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
                "DO UPDATE SET countries = excluded.countries, protocols = excluded.protocols, exit_ips = excluded.exit_ips, "
                "name_contains = excluded.name_contains, top = excluded.top, fallback = excluded.fallback, "
-               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube",
+               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube, keys = excluded.keys",
                rid, section, json.dumps(rule["countries"]), json.dumps(rule["protocols"]), json.dumps(rule["exit_ips"]),
-               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"])
+               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"],
+               json.dumps(rule.get("keys") or []))
 
     def delete_auto_rule(self, rid: int, section: str) -> None:
         self.x("DELETE FROM auto_rules WHERE router_id = ? AND section = ?", rid, section)

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop
+from . import __version__, backup, configs, podkop, usage
 from .agent import AgentError, forward_line, install_command, pair, parse_pairing, release_tag
 from .db import DB
 from .hub import Hub
@@ -549,6 +549,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"rule": rule, "finished": st.get("finished"), "has_links": any(r.get("link") for r in st.get("rows") or []),
                 "run": run, "schedule": ps.get("schedule") or "",
                 "keys": len(ps.get("keys") or []),
+                "subs": [{"id": k["id"], "label": usage.key_label(k)} for k in db.keys(rid) if k["kind"] == "sub"],
                 "countries": sorted({r["country"] for r in st.get("rows") or [] if len(r.get("country") or "") == 2}),
                 "matched": pick["matched"], "fallback": pick["fallback_rows"],
                 "left_out": pick["left_out"]}

@@ -2132,6 +2132,13 @@ function autoRuleEditor(w, s, rule) {
         h("div", { class: "part-head" }, h("span", { style: "font-size: 13.5px; font-weight: 600" }, "Probe parameters"),
           h("a", { href: `#/r/${w.id}/usage`, class: "xs" }, p ? `Tests ${plural(p.keys, "subscription")} from Keys and usage` : "Keys and usage")),
         h("div", { class: "form-grid", style: "grid-template-columns: minmax(110px, 140px) minmax(0, 1fr); align-items: start" },
+          p && p.subs.length ? [
+            h("span", { class: "lbl", style: "font-weight: 500; padding-top: 6px" }, "Keys"),
+            h("div", { class: "ctl", style: "gap: 6px" },
+              h("div", { class: "row", style: "gap: 6px" }, p.subs.map((k) =>
+                h("button", { type: "button", class: "toggle", "aria-pressed": String(rule.keys.includes(k.id)),
+                  onclick: () => update({ keys: rule.keys.includes(k.id) ? rule.keys.filter((x) => x !== k.id) : [...rule.keys, k.id] }, true) }, k.label))),
+              h("span", { class: "help" }, rule.keys.some((id) => p.subs.some((k) => k.id === id)) ? "Servers only from these keys" : "None chosen: servers from all keys"))] : null,
           h("span", { class: "lbl", style: "font-weight: 500; padding-top: 6px" }, "Exit country"),
           h("div", { class: "ctl", style: "gap: 6px" },
             h("div", { class: "row", style: "gap: 6px" },
