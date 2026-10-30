@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.29.0 — 2026-10-31
+
+- **Servers from keys, without the probe** (manager 0.17.0). The Keys choice
+  moved from Probe parameters into the rule, above **Take links from probe**,
+  as **Servers from keys**.
+  - Probe off: the rule's URLTest gets every server of the chosen keys
+    (podkop's protocols, each server once), shown as "Servers, 9 from Gas
+    VPN" instead of the editable list.
+  - The manager rereads the subscriptions every 10 minutes. When a
+    provider's servers changed, it applies the new list by itself (History:
+    "provider's new servers"), and an open draft gets it too. Each new list
+    is applied once: one the router did not take is not tried again.
+    A rule whose keys were changed in a draft not applied yet waits for it.
+  - Probe on: the probe picks only from the chosen keys, as in 1.28.0.
+  - Discard puts the keys back with the probe parameters. A 1.28.0 rule's
+    keys move over by themselves.
+
 ## 1.28.0 — 2026-10-30
 
 - **A rule's servers from chosen keys** (manager 0.16.0). Probe parameters

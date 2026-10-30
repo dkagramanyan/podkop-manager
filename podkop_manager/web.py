@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop, usage
+from . import __version__, backup, configs, podkop
 from .agent import AgentError, forward_line, install_command, pair, parse_pairing, release_tag
 from .db import DB
 from .hub import Hub
@@ -527,6 +527,26 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         db.delete_auto_rule(rid, section)
         return {"ok": True}
 
+    # --- the keys whose servers a URLTest rule takes ---------------------------------------
+    @app.get("/api/routers/{rid}/rule-keys", dependencies=[api])
+    async def rule_keys(rid: int):
+        """The subscriptions with the servers podkop can build, and each rule's keys."""
+        router_or_404(rid)
+        return {"subs": hub.sub_links(rid), "rules": db.rule_keys(rid)}
+
+    @app.put("/api/routers/{rid}/rule-keys/{section}", dependencies=[api])
+    async def put_rule_keys(rid: int, section: str, body: dict):
+        router_or_404(rid)
+        if not re.fullmatch(r"[A-Za-z0-9_]+", section):
+            raise HTTPException(400, "rule names are letters, digits and _")
+        ids = body.get("keys")
+        subs = {k["id"] for k in db.keys(rid) if k["kind"] == "sub"}
+        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i in subs for i in ids):
+            raise HTTPException(400, "keys are ids of this router's subscriptions")
+        hub.keep_rules(rid)
+        db.set_rule_keys(rid, section, ids)
+        return {"keys": db.rule_keys(rid).get(section, [])}
+
     @app.get("/api/routers/{rid}/auto-rules/{section}/preview", dependencies=[api])
     async def preview_auto_rule(rid: int, section: str):
         """What the rule gets from the last probe run: matched servers,
@@ -549,7 +569,6 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"rule": rule, "finished": st.get("finished"), "has_links": any(r.get("link") for r in st.get("rows") or []),
                 "run": run, "schedule": ps.get("schedule") or "",
                 "keys": len(ps.get("keys") or []),
-                "subs": [{"id": k["id"], "label": usage.key_label(k)} for k in db.keys(rid) if k["kind"] == "sub"],
                 "countries": sorted({r["country"] for r in st.get("rows") or [] if len(r.get("country") or "") == 2}),
                 "matched": pick["matched"], "fallback": pick["fallback_rows"],
                 "left_out": pick["left_out"]}

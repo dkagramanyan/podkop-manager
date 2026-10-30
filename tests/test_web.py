@@ -40,6 +40,7 @@ class FakeHub:
     probe_config = Hub.probe_config
     probe_status = Hub.probe_status
     _avoided_links = Hub._avoided_links
+    sub_links = Hub.sub_links
 
     def local_probe_missing(self):
         return "sing-box not found"
@@ -328,3 +329,18 @@ def test_discard_puts_the_probe_rules_back(tmp_path):
 def podkop_rule(**kw):
     from podkop_manager import podkop
     return podkop.check_auto_rule(kw)
+
+
+def test_rule_keys_api(tmp_path):
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        c.put("/api/routers/1/probe", json={"keys": ["https://sub.example.com/a"]}, headers=H)
+        kid = c.db.keys(1)[0]["id"]
+        c.db.update_key(kid, links=["vless://a@h:1#A", "vmess://x"])
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid]}, headers=H).json() == {"keys": [kid]}
+        for bad in ([kid + 1], ["a"], [True], "x"):
+            assert c.put("/api/routers/1/rule-keys/main", json={"keys": bad}, headers=H).status_code == 400
+        r = c.get("/api/routers/1/rule-keys").json()
+        assert r["rules"] == {"main": [kid]} and r["subs"][0]["links"] == ["vless://a@h:1#A"]   # only what podkop builds
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": []}, headers=H).json() == {"keys": []}
+        assert c.get("/api/routers/1/rule-keys").json()["rules"] == {}

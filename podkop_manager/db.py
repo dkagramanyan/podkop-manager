@@ -113,6 +113,11 @@ class DB:
                 rows = self.conn.execute("SELECT id, line FROM logs").fetchall()
                 parsed = [(p["source"], p["level"], r[0]) for r in rows for p in [parse_log(r[1])]]
                 self.conn.executemany("UPDATE logs SET source = ?, level = ? WHERE id = ?", parsed)
+        # 1.28.0 kept a rule's keys with its probe parameters
+        for r in self.q("SELECT router_id, section, keys FROM auto_rules WHERE keys != '[]'"):
+            if r["section"] not in self.rule_keys(r["router_id"]):
+                self.set_rule_keys(r["router_id"], r["section"], json.loads(r["keys"]))
+        self.x("UPDATE auto_rules SET keys = '[]' WHERE keys != '[]'")
 
     def q(self, sql: str, *args) -> list[dict]:
         with self.lock:
@@ -159,7 +164,8 @@ class DB:
             self.x(f"DELETE FROM {table} WHERE router_id = ?", rid)
         self.x("DELETE FROM probe_settings WHERE router_id = ?", rid)
         # the hub's per-router settings, so a router that gets this id later starts clean
-        for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported"):
+        for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
+                     "rule_keys", "rule_keys_base", "keys_synced"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -352,8 +358,9 @@ class DB:
     def auto_rules(self, rid: int) -> list[dict]:
         rows = self.q("SELECT * FROM auto_rules WHERE router_id = ? ORDER BY section", rid)
         for r in rows:
-            for k in ("countries", "protocols", "exit_ips", "keys"):
+            for k in ("countries", "protocols", "exit_ips"):
                 r[k] = json.loads(r[k])
+            r.pop("keys")                     # 1.28.0's, now in rule_keys
             if r["youtube"] == "ru":          # before 0.9.0: "sees Russia"
                 r["youtube"] = "RU"
         return rows
@@ -363,16 +370,27 @@ class DB:
 
     def set_auto_rule(self, rid: int, section: str, rule: dict) -> None:
         self.x("INSERT INTO auto_rules (router_id, section, countries, protocols, exit_ips, name_contains, top, fallback, "
-               "max_ping, min_speed, youtube, keys) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
+               "max_ping, min_speed, youtube) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
                "DO UPDATE SET countries = excluded.countries, protocols = excluded.protocols, exit_ips = excluded.exit_ips, "
                "name_contains = excluded.name_contains, top = excluded.top, fallback = excluded.fallback, "
-               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube, keys = excluded.keys",
+               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube",
                rid, section, json.dumps(rule["countries"]), json.dumps(rule["protocols"]), json.dumps(rule["exit_ips"]),
-               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"],
-               json.dumps(rule.get("keys") or []))
+               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"])
 
     def delete_auto_rule(self, rid: int, section: str) -> None:
         self.x("DELETE FROM auto_rules WHERE router_id = ? AND section = ?", rid, section)
+
+    # --- the keys whose servers a URLTest rule takes: {section: [key ids]} ------------------
+    def rule_keys(self, rid: int) -> dict:
+        return self.get_setting(f"rule_keys:{rid}") or {}
+
+    def set_rule_keys(self, rid: int, section: str, ids: list) -> None:
+        rk = self.rule_keys(rid)
+        if ids:
+            rk[section] = sorted(set(ids))
+        else:
+            rk.pop(section, None)
+        self.set_setting(f"rule_keys:{rid}", rk)
 
     # --- saved configs (not tied to a router) ------------------------------------
     def configs(self) -> list[dict]:
