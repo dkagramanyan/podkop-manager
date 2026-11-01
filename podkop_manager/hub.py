@@ -100,6 +100,7 @@ class RouterRuntime:
         self.proxies: dict | None = None
         self.names: dict = {}
         self.names_fp = ""
+        self.request_logs = podkop.RequestLogContext()
         self.config: dict | None = None    # the last config-get
         self.draft: dict | None = None     # summary of the unapplied draft
         self.alert: dict | None = None     # the last change undone on the router
@@ -292,6 +293,7 @@ class Hub:
             return
         if typ == "log":
             line = str(m.get("line", ""))
+            line = rt.request_logs.enrich(line)
             p = podkop.parse_log(line)
             self.db.add_log(rt.id, line, p["source"], p["level"])
             self.publish({"type": "log", "router_id": rt.id, "line": line, "t": time.time(), **p})

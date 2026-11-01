@@ -210,3 +210,39 @@ def test_install_command_and_pairing_line():
                 "podkop-router 1.2.3.4 22 ssh-dss AAAA", "router 1.2.3.4 22 ssh-ed25519 AAAA"):
         with pytest.raises(ValueError):
             parse_pairing(bad)
+
+
+def test_picker_spreads_keys_and_prioritizes_reliability():
+    rule = podkop.check_auto_rule({'top': 2, 'fallback': 1})
+    rows = [dict(node=str(i), link=f'vless://{i}@h:1', key=k, verdict=v,
+                 median=str(ms), mbit='100', country='DE')
+            for i, k, v, ms in [(1, 1, 'GOOD', .1), (2, 1, 'GOOD', .11),
+                                 (3, 2, 'GOOD', .2), (4, 3, 'GOOD', .3),
+                                 (5, 4, 'FLAKY', .05)]]
+    p = podkop.auto_pick(rows, rule)
+    assert [r['key'] for r in p['matched']] == [1, 2]
+    assert [r['key'] for r in p['fallback_rows']] == [3]
+    restricted = podkop.auto_pick(rows, dict(rule, keys=[1]))
+    assert [r['key'] for r in restricted['matched']] == [1, 1]
+    assert restricted['fallback'] == []
+
+
+def test_picker_deduplicates_links_with_different_names():
+    rule = podkop.check_auto_rule({'top': 5})
+    row = dict(link='vless://a@h:1#one', verdict='GOOD', median='.1', mbit='100')
+    assert len(podkop.auto_pick([row, dict(row, link='vless://a@h:1#two')], rule)['links']) == 1
+
+
+def test_request_error_context_is_bounded_and_process_scoped():
+    c = podkop.RequestLogContext(limit=1)
+    prefix = 'Sun Nov  1 23:00:00 2026 daemon.err sing-box[12]: '
+    c.enrich(prefix + 'INFO[0001] [42 0ms] inbound/tproxy[tproxy-in]: inbound connection to accounts.google.com:443')
+    c.enrich(prefix + 'INFO[0001] [42 1ms] outbound/vless[main-1-out]: outbound connection to accounts.google.com:443')
+    error = prefix + 'ERROR[0002] [42 1s] connection: connection reset by peer'
+    out = c.enrich(error)
+    assert 'destination=accounts.google.com:443' in out and 'outbound=main-1-out' in out
+    other = error.replace('sing-box[12]', 'sing-box[13]')
+    assert c.enrich(other) == other
+    c.enrich(prefix + 'INFO[0003] [43 0ms] inbound connection to example.com:443')
+    assert c.enrich(error) == error
+    assert len(c.entries) <= 1

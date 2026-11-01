@@ -353,7 +353,7 @@ hot_apply() {
     echo "podkop could not build the config: $(head -n 1 "$_hb.err" 2>/dev/null)"; rm -f "$_hb" "$_hb.err"; return 1
   fi
   if ! { jq "$HEALTH_JQ" "$_hb" > "$_hb.i" && mv "$_hb.i" "$_hb"; }; then
-    rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and interrupt_exist_connections"; return 1
+    rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
   fi
   logger -t podkop-agent "$1"
   if ! cmp -s "$_hb" "$_cp"; then
@@ -389,9 +389,10 @@ hot_apply() {
 #   own timeouts. With HTTP/2 pings (idle_timeout, ping_timeout) a quiet
 #   connection is pinged after 15 s and dropped 15 s later without an answer,
 #   with everything on it: apps reconnect at once. A link's own values stay.
-# - urltest interrupt_exist_connections: when a group switches servers, it
-#   closes the connections still open through the one it left.
-HEALTH_JQ='(.outbounds[]? | select(.type == "urltest")) += {interrupt_exist_connections: true}
+# - URLTest: preserve established connections on a latency-driven switch.
+#   gRPC pings still detect dead transports; changing exits must not abort
+#   healthy uploads, signups and streams.
+HEALTH_JQ='(.outbounds[]? | select(.type == "urltest")) += {interrupt_exist_connections: false}
   | (.outbounds[]? | select(.transport.type == "grpc") | .transport) |= ({idle_timeout: "15s", ping_timeout: "15s"} + .)'
 
 # health_on: sing-box's config gets them and sing-box reloads in place
@@ -407,11 +408,11 @@ health_on() {
   if ! { sing-box check -c "$RUN/health.json" >/dev/null 2>&1 &&
          cp "$RUN/health.json" "$_ic.agent-new" && mv "$_ic.agent-new" "$_ic"; }; then
     rm -f "$RUN/health.json" "$_ic.agent-new"; echo "$_ip" > "$RUN/health.failed"
-    logger -t podkop-agent "could not add gRPC pings and interrupt_exist_connections to sing-box's config"
+    logger -t podkop-agent "could not add gRPC pings and connection preservation to sing-box's config"
     return 0
   fi
   rm -f "$RUN/health.json"
-  logger -t podkop-agent "dead servers: gRPC pings and interrupt_exist_connections added to sing-box's config"
+  logger -t podkop-agent "dead servers: gRPC pings and connection preservation added to sing-box's config"
   if kill -HUP "$_ip" 2>/dev/null; then echo reloaded; fi
 }
 

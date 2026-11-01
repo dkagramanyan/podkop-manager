@@ -13,6 +13,8 @@ import csv
 import io
 import ipaddress
 import re
+import time
+from collections import OrderedDict
 from urllib.parse import unquote
 
 # kind: select (one of values), combo (free text with suggestions), text,
@@ -445,7 +447,8 @@ def check_auto_rule(rule: dict) -> dict:
 
 def auto_pick(rows: list, rule: dict) -> dict:
     """The servers of the probe's rows for a rule: those that pass its filter
-    and its limits, fastest median first; top of them for the URLTest, the
+    and its limits, reliability first, then spread across subscription keys
+    before taking another server from the same key; top for the URLTest, the
     next ones as fallback. left_out: servers in the rule's countries (and of
     its "keys", if given: a row's "key" is the id of the key it came from)
     that were not taken, with the reason."""
@@ -470,14 +473,33 @@ def auto_pick(rows: list, rule: dict) -> dict:
             if not why and rule["youtube"]:
                 why = _youtube_why(r, rule["youtube"])
         item = {"name": name, "link": link, "protocol": link_protocol(link), "exit_ip": r.get("exit_ip"),
-                "country": r.get("country"), "median": r.get("median"), "mbit": r.get("mbit"), "verdict": r.get("verdict")}
+                "country": r.get("country"), "median": r.get("median"), "mbit": r.get("mbit"), "verdict": r.get("verdict"),
+                "key": r.get("key")}
         if why:
             left.append(dict(item, reason=why))
         else:
             picked.append(item)
-    picked.sort(key=lambda x: _num(x["median"]) if _num(x["median"]) is not None else 1e9)
+    picked.sort(key=lambda x: ({"GOOD": 0, "OK": 1, "FLAKY": 2}.get(x["verdict"], 3),
+                               _num(x["median"]) if _num(x["median"]) is not None else 1e9))
+    # Keys are the available provenance, not proof of independent providers.
+    # Unknown provenance is one bucket, never a different provider per node.
+    # Keep counts across the primary/fallback boundary to favour an unused key
+    # for fallback. Never promote a flaky node over a healthy node for diversity.
+    ordered, counts, seen = [], {}, set()
+    while picked:
+        tier = picked[0]["verdict"]
+        candidates = [i for i, x in enumerate(picked) if x["verdict"] == tier]
+        i = min(candidates, key=lambda i: counts.get(picked[i]["key"], 0))
+        item = picked.pop(i)
+        identity = item["link"].split("#", 1)[0]
+        if identity in seen:
+            continue
+        seen.add(identity)
+        ordered.append(item)
+        counts[item["key"]] = counts.get(item["key"], 0) + 1
+    picked = ordered
     keep, fb = picked[:rule["top"]], picked[rule["top"]:rule["top"] + rule["fallback"]]
-    left += [dict(x, reason=f"not among the {rule['top'] + rule['fallback']} fastest")
+    left += [dict(x, reason=f"outside the {rule['top'] + rule['fallback']} picks by reliability, key diversity and latency")
              for x in picked[rule["top"] + rule["fallback"]:]]
     return {"matched": keep, "fallback_rows": fb, "left_out": left, "youtube": bool(rule["youtube"]),
             "links": [x["link"] for x in keep], "fallback": [x["link"] for x in fb]}
@@ -518,6 +540,42 @@ LOG_SOURCES = ("podkop", "sing-box", "engine", "agent")
 # Bonjour asks lb._dns-sd._udp.<its network>) and some zones never answer; nothing breaks, so they
 # are "noise", which Logs hides unless asked
 _NOISE = re.compile(r"exchanges? failed .*\.(?:in-addr|ip6)\.arpa\.? IN PTR\b")
+
+
+class RequestLogContext:
+    """Bounded, per-router connection context; no HTTP bodies or credentials.
+
+    Info-level sing-box logs supply destinations before later errors that
+    only carry a connection ID. Scope IDs by process and expire old entries.
+    """
+
+    def __init__(self, limit: int = 4096, ttl: float = 600):
+        self.entries = OrderedDict()
+        self.limit, self.ttl = limit, ttl
+
+    def enrich(self, line: str) -> str:
+        now = time.monotonic()
+        while self.entries and next(iter(self.entries.values()))[0] < now - self.ttl:
+            self.entries.popitem(last=False)
+        proc = re.search(r"sing-box\[(\d+)\]:", line)
+        conn = re.search(r"\[(\d+) [^\]]+\]", line)
+        if not proc or not conn:
+            return line
+        key = (proc[1], conn[1])
+        _, context = self.entries.pop(key, (now, {}))
+        dest = re.search(r"(?:connection to|packet connection to) ([^\s]+)", line)
+        outbound = re.search(r"outbound/[^\s\[]+\[([^\]]+)\]", line)
+        if dest:
+            context["destination"] = dest[1]
+        if outbound:
+            context["outbound"] = outbound[1]
+        if context:
+            self.entries[key] = (now, context)
+            while len(self.entries) > self.limit:
+                self.entries.popitem(last=False)
+        if parse_log(line)["level"] == "error" and context:
+            line += " | request " + " ".join(f"{k}={v}" for k, v in context.items())
+        return line
 
 
 def parse_log(line: str) -> dict:

@@ -83,12 +83,25 @@ that already runs there are taken into **Keys and usage** and the rules.
 - **Keys and usage**: add subscriptions and single links here, and see each
   key's traffic against its limit (from the provider or your own). At 90% it warns, or moves the probe's rules to other keys
   until the reset.
-- **Dead servers don't hang connections:** the agent adds HTTP/2 pings
-  (15 s) to gRPC servers and `interrupt_exist_connections` to URLTest groups
-  in sing-box's config, after every podkop start and apply (podkop itself
-  leaves them off and is not changed). A connection through a server that
-  stopped answering is dropped within ~30 s, so apps reconnect through a
-  working server instead of hanging for minutes.
+- **Connection stability:** the agent adds HTTP/2 pings to gRPC servers
+  (15 s idle, 15 s ping timeout) and preserves established connections when
+  URLTest changes its selected server. A latency improvement should not abort
+  a healthy signup, upload or stream. These pings detect unresponsive gRPC
+  transports; they do not guarantee a timeout for every stalled request.
+- **Probe selection:** eligible servers are ranked GOOD, OK, then FLAKY.
+  Within each class, picks spread across subscription keys, taking the lowest
+  median latency within each key. Counts continue into fallback selection.
+  Different keys may still belong to one provider: this is key diversity,
+  not a guarantee of independent infrastructure. Explicit key filters remain
+  in force. Duplicate links differing only in their display name count once.
+- **Request errors:** Logs stores transport failures. With the router's Log
+  level set to `info`, the manager can attach destination and outbound context
+  from earlier lines with the same process and connection IDs. Context is
+  bounded to 4096 connections per router and expires after 10 minutes without
+  an update. Search Logs for a domain or connection ID. Enable info while
+  reproducing a problem, then return to `warn` to reduce logging volume.
+  HTTPS paths, response bodies and browser-only failures are not visible to
+  the router. Use browser DevTools Network alongside Logs for those errors.
 - To stop podkop, use **Stop**: otherwise the watchdog starts it again within
   about 30 s (**Disable** in LuCI turns that off).
 
