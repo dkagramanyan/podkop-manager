@@ -33,6 +33,18 @@ it: `docker compose up -d`. Update: `git pull && docker compose up -d --build`.
 Data (database, SSH keys) is in the `podkop-manager_data` volume. Logs:
 `docker compose logs -f`.
 
+Router agents are updated separately. After updating Manager, open
+**Settings → Update agent** (also available in **Connection health**) and run
+the shown command as root on the OpenWrt router. It preserves SSH keys,
+forwarding access, firewall rules, service state and Podkop settings. Click
+**Done, check the router** afterwards. Connection health needs agent 0.8.0 or
+newer with its `reliability.sh` helper; older agents show an upgrade message.
+For an already paired router, the command for this release is:
+
+```sh
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.1
+```
+
 ## Add a router
 
 **Settings → Add router** shows a command: run it on the router as root

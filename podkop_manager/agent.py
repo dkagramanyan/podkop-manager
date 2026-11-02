@@ -143,6 +143,44 @@ AGENT_FILES = ("router/podkop-agent", "router/podkop-agent.init", "router/instal
 REPO_URL = "https://github.com/dkagramanyan/podkop-manager"
 
 
+def connection_support(info: dict | None) -> dict:
+    """Older agents have no capability list; diagnostics first shipped in 0.8.0."""
+    info = info or {}
+    version = info.get("version") or ""
+    parts = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+    supported = None
+    if "capabilities" in info:
+        supported = all(c in (info["capabilities"] or []) for c in ("diagnostics", "eligibility"))
+    elif parts:
+        supported = tuple(map(int, parts.groups())) >= (0, 8, 0)
+    if supported is False:
+        message = (f"Router agent {version or '(unknown version)'} does not support connection health. "
+                   "Update the router agent using Update agent; updating Manager alone does not update the router.")
+    elif supported is None:
+        message = "Router agent compatibility has not been checked. Refresh the router to check its version."
+    else:
+        message = ""
+    return {"supported": supported, "version": version, "message": message}
+
+
+async def require_connection_support(rt) -> None:
+    # Read the executable's version each time, so an upgrade is recognised
+    # immediately, without reconnecting SSH or restarting Manager.
+    info = await rt.agent.call("version", timeout=15)
+    rt.status = {**(rt.status or {}), "agent": info}
+    support = connection_support(info)
+    if support["supported"] is not True:
+        raise AgentError("agent_upgrade", support["message"], support)
+
+
+def upgrade_command(tag: str) -> str:
+    """Update an already paired router without replacing keys or firewall rules."""
+    base = f"{REPO_URL}/releases/download/{tag}" if tag != "latest" else f"{REPO_URL}/releases/latest/download"
+    release = f" --release {shlex.quote(tag)}" if tag != "latest" else ""
+    return (f"wget -qO /tmp/podkop-install.sh {shlex.quote(base + '/install.sh')} && "
+            f"sh /tmp/podkop-install.sh --upgrade{release}")
+
+
 def release_tag(src: Path) -> str:
     """The release with this manager's router files: podkop-probe's VERSION."""
     m = re.search(r'^VERSION="([^"]+)"', (src / "router" / "probe.sh").read_text(), re.M)

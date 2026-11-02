@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__, backup, configs, podkop, reliability
-from .agent import AgentError, forward_line, install_command, pair, parse_pairing, release_tag
+from .agent import (AgentError, connection_support, forward_line, install_command, pair,
+                    parse_pairing, release_tag, require_connection_support, upgrade_command)
 from .db import DB
 from .hub import Hub
 
@@ -337,6 +338,11 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 for line in await rt.agent.call("logs", str(min(lines, 2000)))]
 
     # --- probe ------------------------------------------------------------------------
+    @app.get("/api/routers/{rid}/agent-upgrade", dependencies=[api])
+    async def agent_upgrade(rid: int):
+        router_or_404(rid)
+        return {"command": upgrade_command(release_tag(hub.src))}
+
     @app.get("/api/routers/{rid}/reliability", dependencies=[api])
     async def connection_health(rid: int):
         rt = router_or_404(rid)
@@ -344,6 +350,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 "settings": db.get_setting(f"reliability:{rid}", reliability.DEFAULTS),
                 "servers": db.get_setting(f"server_health:{rid}", {}),
                 "latest": getattr(rt, "connection_check", {}),
+                "agent": connection_support((rt.status or {}).get("agent")),
                 "kuma_connected": bool(db.get_setting(f"kuma_token:{rid}"))}
 
     @app.put("/api/routers/{rid}/reliability", dependencies=[api])
@@ -353,8 +360,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             opts = reliability.settings(body)
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
+        if opts["enabled"]:
+            await require_connection_support(rt)
         db.set_setting(f"reliability:{rid}", opts)
-        if not opts["auto_recover"]:
+        if not opts["auto_recover"] and connection_support((rt.status or {}).get("agent"))["supported"] is True:
             # Runtime exclusions have a 180-second lease even if the router
             # is currently unreachable. Turning recovery off cannot strand it.
             with contextlib.suppress(AgentError):

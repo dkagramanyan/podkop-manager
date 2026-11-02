@@ -3,6 +3,16 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.31.1 — 2026-11-03
+
+- Manager 0.19.1 detects older router agents before connection checks and
+  explains how to upgrade instead of reporting `unknown command diagnostics`.
+- **Update agent** provides a separate upgrade command that preserves paired
+  SSH keys, forwarding access, firewall rules, service state and Podkop settings.
+  Failed file validation or service restarts restore the previous agent files.
+- Agent 0.8.1 reports installed capabilities, including missing connection health
+  helpers. Manager recognises upgrades without a restart.
+
 ## 1.31.0 — 2026-11-03
 
 - Manager 0.19.0 and agent 0.8.0 add Connection health: incident grouping,

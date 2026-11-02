@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from . import configs, podkop, usage, reliability
-from .agent import Agent, AgentError, check_forward
+from .agent import Agent, AgentError, check_forward, connection_support, require_connection_support
 from .db import DB
 
 log = logging.getLogger("podkop_manager")
@@ -221,6 +221,9 @@ class Hub:
             rt.status = await rt.agent.call("status", timeout=30)
             if rt.status.get("agent") != old:
                 rt.exit_ip = True                 # a new agent may have exit-ip
+                if (rt.connection_check.get("code") == "agent_upgrade"
+                        and connection_support(rt.status.get("agent"))["supported"] is True):
+                    rt.connection_check = {}
             if rt.status.get("fingerprint") != rt.names_fp:
                 self._got_config(rt, await rt.agent.call("config-get", timeout=30))
             rt.proxies = None
@@ -338,6 +341,7 @@ class Hub:
                     await self.check_connections(rt.id)
                 except AgentError as e:
                     rt.connection_check = {"checked": time.time(), "error": e.message, "code": e.code}
+                    self.publish({"type": "reliability", "router_id": rt.id})
                 except Exception:
                     log.exception("connection checks for router %s", rt.id)
             await asyncio.sleep(opts["interval"])
@@ -349,6 +353,7 @@ class Hub:
         if rid in self.probes and not self.probes[rid].done():
             raise AgentError("busy", "connection checks wait while the full probe runs")
         async with rt.connection_lock:
+            await require_connection_support(rt)
             cfg = await self.config(rid)
             # An explicit stop, a draft or an in-progress apply must never
             # be counteracted by automatic eligibility changes.
@@ -369,7 +374,16 @@ class Hub:
             rt.check_cursor += 1
             payload = time.time() - rt.last_payload >= 300 or any(
                 history.get(reliability.identity(links[t]), {}).get("download_status") == "down" for t in tags)
-            report = await rt.agent.call("diagnostics", payload={"tags": tags, "payload": payload}, timeout=75)
+            try:
+                report = await rt.agent.call("diagnostics", payload={"tags": tags, "payload": payload}, timeout=75)
+            except AgentError as e:
+                if ((e.code == "unsupported" and e.message == "reinstall agent for diagnostics")
+                        or (e.code == "bad_request" and e.message == "unknown command diagnostics")):
+                    # Also handle partial 0.8.0 installs with a missing helper.
+                    rt.status["agent"]["capabilities"] = []
+                    support = connection_support(rt.status["agent"])
+                    raise AgentError("agent_upgrade", support["message"], support) from None
+                raise
             if report.get("fingerprint") != cfg["fingerprint"]:
                 raise AgentError("conflict", "configuration changed during checks")
             now = time.time()

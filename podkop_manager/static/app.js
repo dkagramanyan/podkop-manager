@@ -890,6 +890,35 @@ async function viewLogs(main, id) {
   };
 }
 
+async function updateAgent(id, done = async () => {}) {
+  try {
+    const { command } = await api("GET", `/api/routers/${id}/agent-upgrade`);
+    const out = h("p", { class: "small muted", role: "status" });
+    const code = h("textarea", { class: "input mono", rows: 5, readonly: true,
+      "aria-label": "Router agent upgrade command", value: command, onclick: e => e.target.select() });
+    const check = h("button", { type: "button", class: "btn primary", onclick: async () => {
+      check.disabled = true; out.textContent = "Checking the router…";
+      try {
+        const rt = await api("POST", `/api/routers/${id}/refresh`);
+        if (!rt.online) throw new Error(rt.error || "The router is offline. Try again when it is reachable.");
+        const health = await api("GET", `/api/routers/${id}/reliability`);
+        if (health.agent.supported !== true) throw new Error(health.agent.message);
+        m.close(); await done(); toast(`Router agent ${health.agent.version} supports connection health`);
+      } catch (e) { out.textContent = e.message; }
+      finally { check.disabled = false; }
+    } }, "Done, check the router");
+    const m = modal({ title: "Update router agent", narrow: true,
+      sub: "Run this command as root in the OpenWrt router's SSH terminal.",
+      body: h("div", { class: "stack" },
+        h("p", {}, "Updates the agent, probe and connection health helper. Existing SSH keys, firewall rules and Podkop settings are preserved."),
+        code, h("button", { type: "button", class: "btn", onclick: async () => {
+          try { await navigator.clipboard.writeText(command); toast("Command copied"); }
+          catch { code.select(); toast("Select the command and copy it", true); }
+        } }, "Copy command"), out),
+      foot: [h("span"), check] });
+  } catch (e) { toast(e.message, true); }
+}
+
 async function viewReliability(main, id) {
   const page = h("div", { class: "page" });
   let data, webhook = "", timer, left = false;
@@ -904,28 +933,30 @@ async function viewReliability(main, id) {
   const state = v => v === true ? "Responding" : v === false ? "Failed" : "Not checked";
   const draw = () => {
     const opts = data.settings;
-    const enabled = h("input", { type: "checkbox", checked: opts.enabled });
-    const automatic = h("input", { type: "checkbox", checked: opts.auto_recover });
-    const interval = h("input", { type: "number", min: 30, max: 300, value: opts.interval });
-    const cooldown = h("input", { type: "number", min: 60, max: 3600, value: opts.cooldown });
+    const supported = data.agent.supported === true;
+    const enabled = h("input", { type: "checkbox", checked: opts.enabled, disabled: !supported && !opts.enabled });
+    const automatic = h("input", { type: "checkbox", checked: opts.auto_recover, disabled: !supported });
+    const interval = h("input", { class: "input", id: "health-interval", type: "number", min: 30, max: 300, value: opts.interval });
+    const cooldown = h("input", { class: "input", id: "health-cooldown", type: "number", min: 60, max: 3600, value: opts.cooldown });
     const controls = h("form", { class: "card pad stack", onsubmit: async e => {
       e.preventDefault();
       try {
-        await api("PUT", endpoint, { ...opts, enabled: enabled.checked, auto_recover: automatic.checked,
+        await api("PUT", endpoint, { ...opts, enabled: enabled.checked, auto_recover: enabled.checked && automatic.checked,
           interval: Number(interval.value), cooldown: Number(cooldown.value) });
         toast("Connection monitoring settings saved"); await load();
-      } catch (err) { toast(err.message, true); }
+      } catch (err) { toast(err.message, true); if (err.info?.code === "agent_upgrade") await load(); }
     } }, h("label", { class: "check" }, enabled, "Monitor connections from the router"),
     h("label", { class: "check" }, automatic, "Temporarily exclude repeatedly failing proxies"),
-    h("label", {}, "Pause between checks, seconds ", interval),
-    h("label", {}, "Minimum exclusion time, seconds ", cooldown),
+    h("div", { class: "auto-grid", style: "grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr))" },
+      h("div", { class: "field" }, h("label", { for: "health-interval" }, "Pause between checks, seconds"), interval),
+      h("div", { class: "field" }, h("label", { for: "health-cooldown" }, "Minimum exclusion time, seconds"), cooldown)),
     h("p", { class: "muted" }, "Recovery requires working direct internet, working DNS, repeated proxy failures and a recently tested replacement. Manual server pins are respected. Recovery checks continue during the cooldown."),
     h("div", { class: "row" }, h("button", { type: "submit", class: "btn primary" }, "Save"),
-      h("button", { type: "button", class: "btn", onclick: async e => {
+      h("button", { type: "button", class: "btn", disabled: !supported, onclick: async e => {
         const button = e.currentTarget; button.disabled = true; button.textContent = "Checking…";
         try { await api("POST", `${endpoint}/check`, {}); await load(); }
-        catch (err) { toast(err.message, true); }
-        finally { button.disabled = false; button.textContent = "Check now"; }
+        catch (err) { toast(err.message, true); if (err.info?.code === "agent_upgrade") await load(); }
+        finally { button.disabled = !supported; button.textContent = "Check now"; }
       } }, "Check now")));
     const last = data.checks[0], report = last ? last.report : {};
     const servers = Object.values(data.servers).sort((a,b) => b.checked - a.checked);
@@ -938,8 +969,21 @@ async function viewReliability(main, id) {
       ["Load (1 / 5 / 15 minutes)", report.load || "Not checked"] ];
     for (const r of report.direct || []) checks.push([`Direct: ${new URL(r.target).hostname}`,
       `${r.exit === 0 ? `HTTP ${r.code}` : "Failed"} · ${Math.round(r.seconds * 1000)} ms`]);
-    put(page, pageHead("Connection health"), controls,
-      data.latest.error ? h("p", { class: "bad-text" }, data.latest.error) : null,
+    put(page, pageHead("Connection health"),
+      !supported ? h("section", { class: "card pad stack", role: "status" },
+        h("h2", {}, data.agent.supported === false ? "Router agent update required" : "Check router compatibility"),
+        h("p", {}, data.agent.message),
+        h("div", { class: "row" },
+          h("button", { type: "button", class: "btn primary", onclick: () => updateAgent(id, load) }, "Update agent"),
+          h("button", { type: "button", class: "btn", onclick: async e => {
+            const button = e.currentTarget; button.disabled = true;
+            try { const rt = await api("POST", `/api/routers/${id}/refresh`); await load();
+              if (!rt.online) toast(rt.error || "The router is offline", true); }
+            catch (err) { toast(err.message, true); }
+            finally { button.disabled = false; }
+          } }, "Refresh router"))) : null,
+      controls,
+      data.latest.error && data.latest.code !== "agent_upgrade" ? h("p", { class: "bad-text" }, data.latest.error) : null,
       h("section", { class: "card pad stack" }, h("h2", {}, "Latest checks"),
         h("p", { class: "muted" }, last ? `Collected ${longWhen(last.t)}. Checks use the router and the selected server configuration. LAN forwarding and established application sessions need separate Kuma checks.` : "Run a check to establish a baseline."),
         table(["Check", "Result"], checks)),
@@ -970,11 +1014,13 @@ async function viewReliability(main, id) {
   };
   put(main, page);
   await load();
-  S.view = { leave: () => { left = true; clearTimeout(timer); }, onReliability: m => {
-    if (m.router_id === id && !page.querySelector("form :focus")) {
+  const reload = routerId => {
+    if (routerId === id && !page.querySelector("form :focus")) {
       clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 500);
     }
-  } };
+  };
+  S.view = { leave: () => { left = true; clearTimeout(timer); },
+    onReliability: m => reload(m.router_id), onRouter: rt => reload(rt.id) };
 }
 
 // --- changes, as shown in History and the apply dialog ----------------------------------------------
@@ -2986,6 +3032,7 @@ async function viewSettings(main) {
               h("td", { style: "color: var(--text-2)" }, rt.status ? rt.status.agent.version : "–"),
               h("td", { class: "r nowrap" }, h("span", { class: "row", style: "gap: 6px; justify-content: flex-end; flex-wrap: nowrap" },
                 h("button", { type: "button", class: "btn xs", onclick: () => rename(rt) }, "Rename"),
+                h("button", { type: "button", class: "btn xs", onclick: () => updateAgent(rt.id, async () => { await loadRouters(); draw(); }) }, "Update agent"),
                 h("button", { type: "button", class: "btn xs", onclick: () => reinstall(rt) }, "Reinstall agent"),
                 h("button", { type: "button", class: "btn xs danger", onclick: () => remove(rt) }, "Remove"))));
           }))) : null),

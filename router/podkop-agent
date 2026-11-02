@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.8.0"
+AGENT_VERSION="0.8.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -33,6 +33,12 @@ umask 077
 # --- output -------------------------------------------------------------------
 
 reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0; }
+
+capabilities() {
+  if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
+    printf '["diagnostics","eligibility"]'
+  else printf '[]'; fi
+}
 
 # fail <code> <message> [details json]
 fail() {
@@ -764,7 +770,7 @@ cmd_status() {
   [ -s "$ETC/pins" ] && _pins=$(while IFS="$TAB" read -r _s _h; do
             jq -nc --arg s "$_s" --arg t "$(link_tag "$_s" "$_h")" '{section: $s, server: $t}'
           done < "$ETC/pins" | jq -sc '.')
-  reply "$(jq -nc --arg av "$AGENT_VERSION" --argjson pv "$PROTO" --arg boot "$BOOT" \
+  reply "$(jq -nc --arg av "$AGENT_VERSION" --argjson pv "$PROTO" --argjson caps "$(capabilities)" --arg boot "$BOOT" \
     --arg up "$(cut -d ' ' -f 1 /proc/uptime | cut -d . -f 1)" \
     --arg model "$(cat /tmp/sysinfo/model 2>/dev/null)" \
     --arg os "$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)" \
@@ -778,7 +784,7 @@ cmd_status() {
     --arg fs "$(tail -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" --arg fst "$(head -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" \
     --arg pb "$([ -x "$PROBE" ] && sed -n 's/^VERSION="\(.*\)"/\1/p' "$PROBE")" \
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" --arg eng "$(sing-box version 2>/dev/null | grep -q 'tools.decode-link' && echo 1)" \
-    '{agent: {version: $av, protocol: $pv}, boot: $boot, uptime: ($up | tonumber? // 0),
+    '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $model, openwrt: $os, utc_offset: $tz},
       podkop: {version: $pk, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
@@ -1238,7 +1244,8 @@ case "$_cmd" in
     env -u SSH_ORIGINAL_COMMAND -u SSH_CONNECTION -u SSH_CLIENT \
       setsid sh -c 'sleep 2; sh /usr/share/podkop-agent/install.sh --uninstall' </dev/null >/dev/null 2>&1 &
     reply '{"uninstalling":true}' ;;
-  version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" '{version: $v, protocol: $p}')" ;;
+  version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" --argjson caps "$(capabilities)" \
+                   '{version: $v, protocol: $p, capabilities: $caps}')" ;;
   daemon|_run-apply|_run-probe)
     [ "$REMOTE" = 0 ] || fail forbidden "$_cmd can't be run over SSH"
     case "$_cmd" in
@@ -1247,7 +1254,7 @@ case "$_cmd" in
       _run-probe) run_probe ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

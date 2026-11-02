@@ -168,6 +168,8 @@ def test_hub_checks_and_runtime_only_recovery(tmp_path):
     class Agent:
         async def call(self, name, **kwargs):
             calls.append((name, kwargs.get("payload")))
+            if name == "version":
+                return {"version": "0.8.0", "protocol": 1}
             if name == "config-get":
                 return {"config": CONFIG, "fingerprint": "fp"}
             if name == "proxies":
@@ -193,7 +195,12 @@ def test_hub_checks_and_runtime_only_recovery(tmp_path):
 
 
 def test_authenticated_kuma_webhook_and_settings(tmp_path, monkeypatch):
-    from test_web import client, H, FakeHub, FakeRouter
+    from test_web import client, H, FakeHub, FakeRouter, FakeAgent
+    async def version(self, name, **kwargs):
+        if name == "version":
+            return {"version": "0.8.0", "protocol": 1}
+        raise AgentError("unreachable", "no router in tests")
+    monkeypatch.setattr(FakeAgent, "call", version)
     monkeypatch.setattr(FakeHub, "observe", Hub.observe, raising=False)
     for name, value in (("config", None), ("proxies", None), ("connection_check", {})):
         monkeypatch.setattr(FakeRouter, name, value, raising=False)

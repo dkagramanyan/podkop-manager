@@ -6,6 +6,7 @@
 #
 #   sh install.sh --key 'ssh-ed25519 AAAA... podkop-manager' [--forward-key 'ssh-ed25519 AAAA...']
 #                 [--allow-clash IP ...] [--keep-clash-open] [--release TAG | --src DIR]
+#   sh install.sh --upgrade [--release TAG | --src DIR]
 #   sh install.sh --uninstall
 #
 # At the end it prints a line to paste into podkop-manager: the router's
@@ -21,6 +22,7 @@
 # --release TAG  take podkop-agent, podkop-agent.init and probe.sh from this
 #                release (the manager's own version) instead of the latest
 # --src DIR      take them from DIR
+# --upgrade      update an existing agent, preserving keys, firewall and settings
 
 REPO_URL="https://github.com/dkagramanyan/podkop-manager"
 RELEASE="$REPO_URL/releases/latest/download"
@@ -30,21 +32,26 @@ FWD_MARK=podkop-agent-forward
 KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/"
 
 set -u
-KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on
+KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --key) KEY=${2:-}; shift 2 ;;
-    --forward-key) FWD_KEY=${2:-}; shift 2 ;;
+    --key) KEY=${2:-}; PAIRING=1; shift 2 ;;
+    --forward-key) FWD_KEY=${2:-}; PAIRING=1; shift 2 ;;
     --release) RELEASE="$REPO_URL/releases/download/${2:-}"; shift 2 ;;
-    --allow-clash) ALLOW="$ALLOW ${2:-}"; shift 2 ;;
-    --keep-clash-open) BLOCK=off; shift ;;
+    --allow-clash) ALLOW="$ALLOW ${2:-}"; PAIRING=1; shift 2 ;;
+    --keep-clash-open) BLOCK=off; PAIRING=1; shift ;;
     --src) SRC=${2:-}; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --upgrade) UPGRADE=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 die() { echo "error: $*" >&2; exit 1; }
+
+if [ "$UPGRADE" = 1 ] && { [ "$PAIRING" = 1 ] || [ "$UNINSTALL" = 1 ]; }; then
+  die "--upgrade cannot be combined with key, firewall or uninstall options"
+fi
 
 fetch() { # <name> <to>
   if [ -n "$SRC" ]; then cp "$SRC/$1" "$2"
@@ -87,9 +94,13 @@ if [ "$UNINSTALL" = 1 ]; then
   exit 0
 fi
 
-[ -n "$KEY" ] || die "--key 'ssh-ed25519 AAAA...' is required"
-case "$KEY" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) die "--key must be an SSH public key" ;; esac
-case "$FWD_KEY" in ""|ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) die "--forward-key must be an SSH public key" ;; esac
+if [ "$UPGRADE" = 1 ]; then
+  [ -x /usr/bin/podkop-agent ] && [ -x /etc/init.d/podkop-agent ] || die "no existing agent; use the Add router command first"
+else
+  [ -n "$KEY" ] || die "--key 'ssh-ed25519 AAAA...' is required"
+  case "$KEY" in ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) die "--key must be an SSH public key" ;; esac
+  case "$FWD_KEY" in ""|ssh-ed25519\ *|ssh-rsa\ *|ecdsa-sha2-*) ;; *) die "--forward-key must be an SSH public key" ;; esac
+fi
 [ -x /usr/bin/podkop ] && [ -f /usr/lib/podkop/sing_box_config_facade.sh ] || die "podkop is not installed"
 # without podkop-engine the agent works (reading, applying, the watchdog), podkop-probe does not
 sing-box version 2>/dev/null | grep -q 'tools.decode-link' ||
@@ -98,8 +109,27 @@ command -v jq >/dev/null 2>&1 || die "jq is not installed"
 for _t in flock setsid; do command -v "$_t" >/dev/null 2>&1 || die "$_t is not available (BusyBox without it?)"; done
 
 TMP=/tmp/podkop-agent-install.$$
-mkdir -p "$TMP" || die "cannot create $TMP"
-trap 'rm -rf "$TMP"' EXIT
+umask 077
+mkdir "$TMP" || die "cannot create $TMP"
+ROLLBACK=0; WAS_RUNNING=0
+FILES="/usr/bin/podkop-agent /etc/init.d/podkop-agent /usr/bin/podkop-probe /usr/share/podkop-agent/reliability.sh /usr/share/podkop-agent/install.sh"
+cleanup() {
+  _rc=$?
+  trap - EXIT HUP INT TERM
+  if [ "$ROLLBACK" = 1 ]; then
+    echo "Upgrade failed; restoring the previous agent files." >&2
+    for _f in $FILES; do
+      if [ -f "$TMP/backup$_f" ]; then
+        cp -p "$TMP/backup$_f" "$_f.new" && mv "$_f.new" "$_f" || echo "error: could not restore $_f" >&2
+      else rm -f "$_f"; fi
+    done
+    [ "$WAS_RUNNING" = 0 ] || /etc/init.d/podkop-agent restart 7>&- 8>&- 9>&- || echo "error: could not restart the previous agent" >&2
+  fi
+  rm -rf "$TMP"
+  exit "$_rc"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 # whole <file> <its last line>: a cut-off download is not installed
 whole() { [ "$(tail -n 1 "$1")" = "$2" ] && sh -n "$1" 2>/dev/null; }
 fetch podkop-agent "$TMP/podkop-agent" && whole "$TMP/podkop-agent" "# end of podkop-agent" || die "could not get podkop-agent"
@@ -109,15 +139,48 @@ fetch probe.sh "$TMP/probe.sh" && whole "$TMP/probe.sh" "# end of podkop-probe" 
 
 fetch reliability.sh "$TMP/reliability.sh" && whole "$TMP/reliability.sh" "# end of podkop reliability" || die "could not get reliability.sh"
 
+if [ "$UPGRADE" = 1 ]; then
+  mkdir -p /tmp/podkop-agent || die "cannot create agent runtime directory"
+  exec 8> /tmp/podkop-agent/install.lock
+  flock -n 8 || die "another agent upgrade is running"
+  exec 9> /tmp/podkop-agent/apply.lock
+  flock -n 9 || die "an apply or recovery is running; try again in a minute"
+  exec 7> /tmp/podkop-agent/diagnostics.lock
+  flock -n 7 || die "a connection check is running; try again in a minute"
+  /etc/init.d/podkop-agent running >/dev/null 2>&1 && WAS_RUNNING=1
+  for _f in $FILES; do
+    if [ -e "$_f" ]; then
+      mkdir -p "$TMP/backup$(dirname "$_f")" && cp -p "$_f" "$TMP/backup$_f" || die "could not back up $_f"
+    fi
+  done
+  ROLLBACK=1
+fi
+
 # flash: a file that is already the same is not written again
 put() { cmp -s "$1" "$2" || { cp "$1" "$2.new" && chmod 755 "$2.new" && mv "$2.new" "$2"; } || die "could not write $2"; }
+mkdir -p /etc/podkop-agent /usr/share/podkop-agent || die "cannot create agent directories"
+# Install the helper before the executable that advertises its commands.
+put "$TMP/reliability.sh" /usr/share/podkop-agent/reliability.sh
 put "$TMP/podkop-agent" /usr/bin/podkop-agent
 put "$TMP/podkop-agent.init" /etc/init.d/podkop-agent
 put "$TMP/probe.sh" /usr/bin/podkop-probe
-mkdir -p /etc/podkop-agent /usr/share/podkop-agent && chmod 700 /etc/podkop-agent
-put "$TMP/reliability.sh" /usr/share/podkop-agent/reliability.sh
 # kept for "podkop-agent uninstall"
-[ "$0" -ef /usr/share/podkop-agent/install.sh ] || cp "$0" /usr/share/podkop-agent/install.sh
+[ "$0" -ef /usr/share/podkop-agent/install.sh ] || put "$0" /usr/share/podkop-agent/install.sh
+
+if [ "$UPGRADE" = 1 ]; then
+  env -u SSH_ORIGINAL_COMMAND /usr/bin/podkop-agent version > "$TMP/version.json" || die "updated agent could not run"
+  jq -e '.ok == true and (.data.capabilities | index("diagnostics") != null and index("eligibility") != null)' \
+    "$TMP/version.json" >/dev/null || die "updated agent is missing connection health commands"
+  if [ "$WAS_RUNNING" = 1 ]; then
+    /etc/init.d/podkop-agent restart 7>&- 8>&- 9>&- || die "could not restart the updated agent"
+  fi
+  ROLLBACK=0
+  for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
+  echo "podkop-agent $(jq -r '.data.version' "$TMP/version.json") upgraded; keys, firewall and Podkop settings preserved"
+  exit 0
+fi
+
+chmod 700 /etc/podkop-agent
 
 # the manager's key: only podkop-agent, no shell, no forwarding
 touch "$KEYS" && chmod 600 "$KEYS"
