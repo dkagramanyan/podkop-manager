@@ -2,6 +2,14 @@
 # shellcheck shell=dash disable=SC2034,SC2317
 # Sourced by podkop-agent. Diagnostics never change UCI or production listeners.
 
+# OpenWrt's standard jq is built without Oniguruma: test/match are unavailable.
+# Keep the same ASCII allowlist without regexes; tags also become filenames.
+RELIABILITY_TAG_JQ='def valid_tag:
+  if type != "string" then false else
+    length > 0 and (explode | all(. == 45 or . == 95 or
+      (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)))
+  end;'
+
 # BusyBox builds may omit timeout. Bound the lookup ourselves using only
 # shell job control and sleep; kill and reap it on expiry or cancellation.
 # This is specific to nslookup, which runs as a single child process.
@@ -78,8 +86,8 @@ cmd_eligibility() (
   exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
   head -c 65536 > "$RUN/policy.$$.in"
   trap 'rm -f "$RUN/policy.$$.in" "$RUN/policy.$$.old" "$RUN/policy.$$.config"' EXIT
-  jq -e '(.fingerprint | type == "string") and (.banned | type == "array" and length <= 100)
-    and all(.banned[]; type == "string" and test("^[A-Za-z0-9_-]+$"))' "$RUN/policy.$$.in" >/dev/null || fail bad_request "invalid eligibility policy"
+  jq -e "$RELIABILITY_TAG_JQ"' (.fingerprint | type == "string") and (.banned | type == "array" and length <= 100)
+    and all(.banned[]; valid_tag)' "$RUN/policy.$$.in" >/dev/null || fail bad_request "invalid eligibility policy"
   _fp=$(config_fp) || fail busy "configuration unavailable"
   [ "$(jq -r .fingerprint "$RUN/policy.$$.in")" = "$_fp" ] || fail conflict "configuration changed during checks"
   _ban=$(jq -c '.banned | unique | sort' "$RUN/policy.$$.in")
@@ -146,7 +154,7 @@ cmd_diagnostics() (
   trap '[ -z "$_jobs" ] || kill $_jobs 2>/dev/null; [ -z "$_pid" ] || kill "$_pid" 2>/dev/null; rm -rf "$_dir"' EXIT
   trap 'exit 1' HUP INT TERM
   head -c 65536 > "$_dir/request"
-  jq -e '(.tags | type == "array" and length <= 4) and all(.tags[]; type == "string" and test("^[A-Za-z0-9_-]+$"))' "$_dir/request" >/dev/null ||
+  jq -e "$RELIABILITY_TAG_JQ"' (.tags | type == "array" and length <= 4) and all(.tags[]; valid_tag)' "$_dir/request" >/dev/null ||
     fail bad_request "up to four server tags expected"
   _mem=$(awk '/MemAvailable:/ {print $2}' /proc/meminfo)
   [ "${_mem:-0}" -ge 49152 ] || fail resource_limit "less than 48 MiB available for isolated diagnostics"

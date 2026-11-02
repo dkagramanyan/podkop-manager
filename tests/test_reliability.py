@@ -256,12 +256,15 @@ def diagnostic_environment(tmp_path):
 
 
 @pytest.mark.parametrize("dns_exit", [0, 1])
-def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path, diagnostic_environment, dns_exit):
+@pytest.mark.parametrize("tags", [[], ["main-1-out"],
+                                  ["youtube-1-out", "youtube-fallback-2-out", "anthropic_am-1-out", "main-1-out"]])
+def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path, diagnostic_environment, dns_exit, tags):
     """Execute the real collector without timeout, with local network fakes."""
     helper = Path(__file__).resolve().parents[1] / "router/reliability.sh"
     config = tmp_path / "live.json"
     config.write_text(json.dumps({"dns": {"servers": [{"tag": "dns-server", "type": "udp", "server": "192.0.2.53"}]},
-                                 "outbounds": [{"tag": "main-1-out", "type": "vless"}, {"tag": "direct-out", "type": "direct"}]}))
+                                 "outbounds": [{"tag": t, "type": "vless"} for t in tags] +
+                                              [{"tag": "direct-out", "type": "direct"}]}))
     commands = {
         "sing-box": '#!/bin/sh\nif [ "$1" = run ]; then exec sleep 90; fi\n',
         "curl": '#!/bin/sh\ncase "$*" in *size_download*connect*) exit 1;; *time_connect*) echo "204 0.1 0.01 0";; *) echo "206 0.1 65536";; esac\n',
@@ -286,7 +289,7 @@ def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path, diagnostic_
     cmd_diagnostics
     '''
     out = subprocess.run(["sh", "-c", script, "sh", str(helper), str(tmp_path)],
-                         input=json.dumps({"tags": ["main-1-out"], "payload": True}),
+                         input=json.dumps({"tags": tags, "payload": True}),
                          text=True, capture_output=True, timeout=15,
                          env=env)
     assert out.returncode == 0, out.stderr
@@ -296,10 +299,36 @@ def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path, diagnostic_
     assert result["primary_dns"]["ok"] is (dns_exit == 0)
     assert (tmp_path / "lookups").read_text().splitlines() == ["127.0.0.42", "192.0.2.53", "192.0.2.53"]
     assert r.checked_path(result["direct"]) == "up"
-    assert r.checked_path(result["nodes"]["main-1-out"]) == "up"
-    assert r.payload_state(result["payload"]["main-1-out"]) == "up"
+    assert set(result["nodes"]) == set(tags)
+    assert all(r.checked_path(result["nodes"][tag]) == "up" for tag in tags)
+    assert all(r.payload_state(result["payload"][tag]) == "up" for tag in tags)
     assert r.controls_work(result) is (dns_exit == 0)
     assert not list(tmp_path.glob("check.*"))
+
+
+@pytest.mark.parametrize("command,field,limit,message", [
+    ("cmd_diagnostics", "tags", 4, "up to four server tags expected"),
+    ("cmd_eligibility", "banned", 100, "invalid eligibility policy"),
+])
+@pytest.mark.parametrize("invalid", [None, 17, "", "../outside", "main/out", "main.1.out",
+                                     "main out", "main-1-out\n", "main\t1", "сервер-out", "too_many"])
+def test_diagnostics_and_recovery_reject_invalid_tags(tmp_path, diagnostic_environment, command, field, limit, message, invalid):
+    helper = Path(__file__).resolve().parents[1] / "router/reliability.sh"
+    _, env = diagnostic_environment
+    tags = [f"main-{i}-out" for i in range(limit + 1)] if invalid == "too_many" else [invalid]
+    script = '''
+    . "$1"
+    RUN="$2"; ETC="$2"
+    fail() { printf '%s: %s\\n' "$1" "$2"; exit 1; }
+    "$3"
+    '''
+    out = subprocess.run(["sh", "-c", script, "sh", str(helper), str(tmp_path), command],
+                         input=json.dumps({field: tags, "fingerprint": "fp", "payload": False}),
+                         env=env, text=True, capture_output=True, timeout=5)
+    assert out.returncode == 1
+    assert out.stdout.strip() == f"bad_request: {message}"
+    assert not list(tmp_path.glob("check.*"))
+    assert not list(tmp_path.glob("policy.*"))
 
 
 @pytest.mark.parametrize("mode,expected", [("success", 0), ("failure", 2), ("hang", 124), ("cancel", 1)])

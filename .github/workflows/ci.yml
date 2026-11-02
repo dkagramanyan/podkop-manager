@@ -31,3 +31,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build .
+
+  router-compatibility:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - name: Build jq like OpenWrt and use BusyBox tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y busybox
+          build="$RUNNER_TEMP/jq-noregex"
+          mkdir -p "$build/src" "$build/bin"
+          curl -fsSL --retry 3 -o "$build/jq.tar.gz" https://github.com/jqlang/jq/releases/download/jq-1.8.1/jq-1.8.1.tar.gz
+          echo "2be64e7129cecb11d5906290eba10af694fb9e3e7f9fc208a311dc33ca837eb0  $build/jq.tar.gz" | sha256sum -c -
+          tar -xzf "$build/jq.tar.gz" -C "$build/src" --strip-components=1
+          cd "$build/src"
+          ./configure --without-oniguruma --disable-docs --disable-valgrind --disable-shared
+          make -j2
+          cp jq "$build/bin/jq"
+          for tool in sh awk basename cat cut head mktemp rm sleep wc od tr true; do
+            ln -s /bin/busybox "$build/bin/$tool"
+          done
+          # Assert this is the reduced build; a full jq would hide regressions.
+          if "$build/bin/jq" -n '"main-1-out" | test("out")' > /dev/null 2>&1; then
+            echo "expected jq without regex support" >&2
+            exit 1
+          fi
+          echo "$build/bin" >> "$GITHUB_PATH"
+      - name: Test router diagnostics, recovery and upgrades
+        run: python -m pytest -q tests/test_reliability.py tests/test_agent_upgrade.py

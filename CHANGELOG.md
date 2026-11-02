@@ -3,6 +3,15 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.31.3 — 2026-11-03
+
+- Agent 0.8.3 validates diagnostic and recovery server tags without jq regex
+  functions, which OpenWrt's standard jq package does not provide. Valid tags
+  no longer fail with the misleading "up to four server tags expected" error.
+  The four-server limit and strict filename character checks are preserved.
+- CI now builds jq 1.8.1 without Oniguruma and tests diagnostics, recovery and
+  upgrades with BusyBox tools, including valid and invalid server tags.
+
 ## 1.31.2 — 2026-11-03
 
 - Agent 0.8.2 runs Connection health on routers without the optional BusyBox

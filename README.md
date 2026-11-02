@@ -41,10 +41,12 @@ forwarding access, firewall rules, service state and Podkop settings. Click
 newer with its `reliability.sh` helper; older agents show an upgrade message.
 Use agent 0.8.2 or newer on routers without a `timeout` command: DNS checks
 enforce their own six-second limit and do not require extra packages.
+Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
+`jq-full` is not required for diagnostics or automatic recovery.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.2/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.2
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.3/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.3
 ```
 
 ## Add a router
