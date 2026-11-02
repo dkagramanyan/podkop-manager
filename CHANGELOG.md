@@ -3,6 +3,14 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.31.2 — 2026-11-03
+
+- Agent 0.8.2 runs Connection health on routers without the optional BusyBox
+  `timeout` command. Router, primary and provider DNS lookups retain a
+  six-second limit; stalled or cancelled lookups are stopped and reaped.
+- Regression tests run the full collector without `timeout`, check successful
+  and failed DNS results, and verify lookup deadlines and process cleanup.
+
 ## 1.31.1 — 2026-11-03
 
 - Manager 0.19.1 detects older router agents before connection checks and

@@ -39,10 +39,12 @@ the shown command as root on the OpenWrt router. It preserves SSH keys,
 forwarding access, firewall rules, service state and Podkop settings. Click
 **Done, check the router** afterwards. Connection health needs agent 0.8.0 or
 newer with its `reliability.sh` helper; older agents show an upgrade message.
+Use agent 0.8.2 or newer on routers without a `timeout` command: DNS checks
+enforce their own six-second limit and do not require extra packages.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.1
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.2/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.2
 ```
 
 ## Add a router

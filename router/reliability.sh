@@ -2,6 +2,25 @@
 # shellcheck shell=dash disable=SC2034,SC2317
 # Sourced by podkop-agent. Diagnostics never change UCI or production listeners.
 
+# BusyBox builds may omit timeout. Bound the lookup ourselves using only
+# shell job control and sleep; kill and reap it on expiry or cancellation.
+# This is specific to nslookup, which runs as a single child process.
+diagnostic_lookup() (
+  _dl_limit=$1; shift
+  _dl_pid=''; _dl_elapsed=0
+  trap '[ -z "$_dl_pid" ] || { kill -KILL "$_dl_pid" 2>/dev/null; wait "$_dl_pid" 2>/dev/null; }' EXIT
+  trap 'exit 1' HUP INT TERM
+  nslookup "$@" & _dl_pid=$!
+  while kill -0 "$_dl_pid" 2>/dev/null; do
+    [ "$_dl_elapsed" -lt "$_dl_limit" ] || exit 124
+    sleep 1
+    _dl_elapsed=$((_dl_elapsed + 1))
+  done
+  wait "$_dl_pid"; _dl_rc=$?
+  _dl_pid=''
+  exit "$_dl_rc"
+)
+
 diagnostic_primary_dns() (
   _dp=$(jq -c '.dns.servers[]? | select(.tag == "dns-server")' "$1")
   _dt=$(printf '%s' "$_dp" | jq -r '.type // "unknown"')
@@ -12,7 +31,7 @@ diagnostic_primary_dns() (
     case "$_dt" in
       udp)
         _ok=false; _method="direct UDP lookup"
-        timeout 6 nslookup example.com "$_ds" >/dev/null 2>&1 && _ok=true ;;
+        diagnostic_lookup 6 example.com "$_ds" >/dev/null 2>&1 && _ok=true ;;
       https)
         _name=$(printf '%s' "$_dp" | jq -r '.tls.server_name // .server')
         _port=$(printf '%s' "$_dp" | jq -r '.server_port // 443')
@@ -122,7 +141,6 @@ cmd_diagnostics() (
   exec 7> "$RUN/diagnostics.lock"; flock -n 7 || fail busy "a connection check is already running"
   flock -n "$RUN/apply.lock" true || fail busy "configuration is being applied"
   [ "$(cat "$RUN/probe/state" 2>/dev/null)" != running ] || fail busy "the full probe is running"
-  command -v timeout >/dev/null || fail unsupported "diagnostics need BusyBox timeout"
   _dir=$(mktemp -d "$RUN/check.XXXXXX") || fail error "cannot create check directory"
   _pid=''; _jobs=''
   trap '[ -z "$_jobs" ] || kill $_jobs 2>/dev/null; [ -z "$_pid" ] || kill "$_pid" 2>/dev/null; rm -rf "$_dir"' EXIT
@@ -160,12 +178,12 @@ cmd_diagnostics() (
   sleep 1
   kill -0 "$_pid" 2>/dev/null || fail collector "diagnostic engine did not start"
   # Test DNS separately. Provider DNS comes from the WAN, never a guessed IP.
-  _dns=false; timeout 6 nslookup example.com 127.0.0.42 > "$_dir/dns" 2>&1 && _dns=true
+  _dns=false; diagnostic_lookup 6 example.com 127.0.0.42 > "$_dir/dns" 2>&1 && _dns=true
   _primary=$(diagnostic_primary_dns "$_cp" "$_dir")
   _wan=$(ubus call network.interface.wan status 2>/dev/null || echo '{}')
   _provider=$(printf '%s' "$_wan" | jq -r '.["dns-server"][0] // empty')
   _pdns=null
-  case "$_provider" in ''|*[!0-9a-fA-F:.]*) ;; *) _pdns=false; timeout 6 nslookup example.com "$_provider" >/dev/null 2>&1 && _pdns=true ;; esac
+  case "$_provider" in ''|*[!0-9a-fA-F:.]*) ;; *) _pdns=false; diagnostic_lookup 6 example.com "$_provider" >/dev/null 2>&1 && _pdns=true ;; esac
   _gateway=$(ip -4 route show default | awk 'NR==1 {print $3}')
   _gw=null
   case "$_gateway" in ''|*[!0-9.]*) ;; *) _gw=false; ping -c 1 -W 2 "$_gateway" >/dev/null 2>&1 && _gw=true ;; esac

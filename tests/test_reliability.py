@@ -2,7 +2,11 @@ import asyncio
 import copy
 import json
 import os
+import shutil
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -237,8 +241,23 @@ def test_stalled_payload_requires_independent_controls_and_fresh_recovery():
     assert state[key]["successes"] == 0  # broken control cannot confirm recovery
 
 
-def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path):
-    """Execute the real shell collector with local fake network commands."""
+@pytest.fixture
+def diagnostic_environment(tmp_path):
+    """Only the collector's standard tools; no timeout executable or applet."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("sh", "awk", "basename", "cat", "cut", "flock", "head", "jq", "mktemp",
+                 "rm", "sleep", "wc", "od", "tr", "true"):
+        target = shutil.which(name)
+        assert target, f"test prerequisite: {name}"
+        (bindir / name).symlink_to(target)
+    assert shutil.which("timeout", path=str(bindir)) is None
+    return bindir, {**os.environ, "PATH": str(bindir)}
+
+
+@pytest.mark.parametrize("dns_exit", [0, 1])
+def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path, diagnostic_environment, dns_exit):
+    """Execute the real collector without timeout, with local network fakes."""
     helper = Path(__file__).resolve().parents[1] / "router/reliability.sh"
     config = tmp_path / "live.json"
     config.write_text(json.dumps({"dns": {"servers": [{"tag": "dns-server", "type": "udp", "server": "192.0.2.53"}]},
@@ -246,13 +265,13 @@ def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path):
     commands = {
         "sing-box": '#!/bin/sh\nif [ "$1" = run ]; then exec sleep 90; fi\n',
         "curl": '#!/bin/sh\ncase "$*" in *size_download*connect*) exit 1;; *time_connect*) echo "204 0.1 0.01 0";; *) echo "206 0.1 65536";; esac\n',
-        "nslookup": '#!/bin/sh\nexit 0\n',
+        "nslookup": '#!/bin/sh\nprintf "%s\\n" "$2" >> "$LOOKUP_LOG"\nexit "$DNS_EXIT"\n',
         "ping": '#!/bin/sh\nexit 0\n',
         "ubus": '#!/bin/sh\necho \'{"up":true,"l3_device":"eth0","dns-server":["192.0.2.53"]}\'\n',
         "ip": '#!/bin/sh\necho "default via 192.0.2.1 dev eth0"\n',
     }
-    bindir = tmp_path / "bin"
-    bindir.mkdir()
+    bindir, env = diagnostic_environment
+    env.update(LOOKUP_LOG=str(tmp_path / "lookups"), DNS_EXIT=str(dns_exit))
     for name, content in commands.items():
         f = bindir / name
         f.write_text(content)
@@ -269,14 +288,70 @@ def test_agent_diagnostics_collects_bounded_separate_paths(tmp_path):
     out = subprocess.run(["sh", "-c", script, "sh", str(helper), str(tmp_path)],
                          input=json.dumps({"tags": ["main-1-out"], "payload": True}),
                          text=True, capture_output=True, timeout=15,
-                         env={**os.environ, "PATH": str(bindir) + ":" + os.environ["PATH"]})
+                         env=env)
     assert out.returncode == 0, out.stderr
     result = json.loads(out.stdout)
-    assert result["router_dns"] and result["provider_dns"] and result["primary_dns"]["ok"]
+    assert result["router_dns"] is (dns_exit == 0)
+    assert result["provider_dns"] is (dns_exit == 0)
+    assert result["primary_dns"]["ok"] is (dns_exit == 0)
+    assert (tmp_path / "lookups").read_text().splitlines() == ["127.0.0.42", "192.0.2.53", "192.0.2.53"]
     assert r.checked_path(result["direct"]) == "up"
     assert r.checked_path(result["nodes"]["main-1-out"]) == "up"
     assert r.payload_state(result["payload"]["main-1-out"]) == "up"
+    assert r.controls_work(result) is (dns_exit == 0)
     assert not list(tmp_path.glob("check.*"))
+
+
+@pytest.mark.parametrize("mode,expected", [("success", 0), ("failure", 2), ("hang", 124), ("cancel", 1)])
+def test_bounded_dns_lookup_exit_status_and_cleanup(tmp_path, diagnostic_environment, mode, expected):
+    helper = Path(__file__).resolve().parents[1] / "router/reliability.sh"
+    bindir, env = diagnostic_environment
+    pidfile = tmp_path / "lookup.json"
+    fake = bindir / "nslookup"
+    fake.write_text(f"#!{sys.executable}\n" + '''import json, os, signal, sys, time
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(os.environ["LOOKUP_PID"], "w") as f:
+    json.dump({"pid": os.getpid(), "parent": os.getppid(), "args": sys.argv[1:]}, f)
+if os.environ["MODE"] in ("hang", "cancel"):
+    time.sleep(60)
+print("lookup result")
+sys.exit(2 if os.environ["MODE"] == "failure" else 0)
+''')
+    fake.chmod(0o755)
+    env.update(LOOKUP_PID=str(pidfile), MODE=mode)
+    script = '. "$1"; diagnostic_lookup "$2" example.com 192.0.2.53'
+    started = time.monotonic()
+    proc = subprocess.Popen([str(bindir / "sh"), "-c", script, "sh", str(helper), "30" if mode == "cancel" else "1"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    child = None
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                child = json.loads(pidfile.read_text())
+                break
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(.01)
+        assert child, "lookup did not start"
+        if mode == "cancel":
+            os.kill(child["parent"], signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=5)
+        assert proc.returncode == expected, stderr
+        assert time.monotonic() - started < 5
+        assert child["args"] == ["example.com", "192.0.2.53"]
+        if mode in ("success", "failure"):
+            assert stdout.strip() == "lookup result"
+        with pytest.raises(ProcessLookupError):
+            os.kill(child["pid"], 0)  # no lookup or unreaped zombie left behind
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if child:
+            try:
+                os.kill(child["pid"], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        proc.communicate(timeout=5)
 
 
 def test_eligibility_rollback_and_manual_pin(tmp_path):
