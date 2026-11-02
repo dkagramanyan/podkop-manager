@@ -137,7 +137,7 @@ class Agent:
             proc.close()
 
 
-AGENT_FILES = ("router/podkop-agent", "router/podkop-agent.init", "router/install.sh", "router/probe.sh")
+AGENT_FILES = ("router/podkop-agent", "router/podkop-agent.init", "router/install.sh", "router/probe.sh", "router/reliability.sh")
 
 
 REPO_URL = "https://github.com/dkagramanyan/podkop-manager"

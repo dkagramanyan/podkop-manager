@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop
+from . import __version__, backup, configs, podkop, reliability
 from .agent import AgentError, forward_line, install_command, pair, parse_pairing, release_tag
 from .db import DB
 from .hub import Hub
@@ -337,6 +337,78 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 for line in await rt.agent.call("logs", str(min(lines, 2000)))]
 
     # --- probe ------------------------------------------------------------------------
+    @app.get("/api/routers/{rid}/reliability", dependencies=[api])
+    async def connection_health(rid: int):
+        rt = router_or_404(rid)
+        return {**db.connection_history(rid),
+                "settings": db.get_setting(f"reliability:{rid}", reliability.DEFAULTS),
+                "servers": db.get_setting(f"server_health:{rid}", {}),
+                "latest": getattr(rt, "connection_check", {}),
+                "kuma_connected": bool(db.get_setting(f"kuma_token:{rid}"))}
+
+    @app.put("/api/routers/{rid}/reliability", dependencies=[api])
+    async def connection_settings(rid: int, body: dict):
+        rt = router_or_404(rid)
+        try:
+            opts = reliability.settings(body)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
+        db.set_setting(f"reliability:{rid}", opts)
+        if not opts["auto_recover"]:
+            # Runtime exclusions have a 180-second lease even if the router
+            # is currently unreachable. Turning recovery off cannot strand it.
+            with contextlib.suppress(AgentError):
+                cfg = await hub.config(rid)
+                await rt.agent.call("eligibility", payload={"fingerprint": cfg["fingerprint"], "banned": []}, timeout=60)
+        if not opts["enabled"]:
+            health = db.get_setting(f"server_health:{rid}", {})
+            for s in health.values():
+                s.update(quarantined=False, failures=0, successes=0)
+            db.set_setting(f"server_health:{rid}", health)
+        return opts
+
+    @app.post("/api/routers/{rid}/reliability/check", dependencies=[api])
+    async def check_connections(rid: int):
+        router_or_404(rid)
+        return await hub.check_connections(rid)
+
+    @app.post("/api/routers/{rid}/kuma-token", dependencies=[api])
+    async def kuma_token(rid: int):
+        router_or_404(rid)
+        token = secrets.token_urlsafe(32)
+        db.set_setting(f"kuma_token:{rid}", token)
+        return {"path": f"/api/kuma/{rid}/{token}"}
+
+    @app.post("/api/kuma/{rid}/{token}")
+    async def kuma_observation(rid: int, token: str, request: Request):
+        expected = db.get_setting(f"kuma_token:{rid}")
+        if not expected or not hmac.compare_digest(token, expected):
+            raise HTTPException(403, "invalid webhook token")
+        raw = bytearray()
+        async for chunk in request.stream():
+            raw.extend(chunk)
+            if len(raw) > 65536:
+                raise HTTPException(413, "webhook body is too large")
+        try:
+            body = json.loads(raw)
+            heartbeat, monitor = body.get("heartbeat") or {}, body.get("monitor") or {}
+            if not isinstance(heartbeat, dict) or not isinstance(monitor, dict):
+                raise ValueError()
+        except (ValueError, AttributeError, TypeError):
+            raise HTTPException(400, "expected a Kuma webhook object") from None
+        message = str(heartbeat.get("msg") or body.get("msg") or "")[:2000]
+        status = heartbeat.get("status")
+        kind = ("recovery" if status == 1 else "pending" if status == 2 else
+                (reliability.classify(message) or "application") if status == 0 else "test")
+        # Notifications remain observations. They cannot change eligibility,
+        # even if a token holder forges a failure or replays an old heartbeat.
+        hub.observe(router_or_404(rid), "kuma", {
+            "kind": kind, "scope": str(monitor.get("name") or heartbeat.get("monitorID") or "Kuma")[:200],
+            "monitor_id": str(heartbeat.get("monitorID") or monitor.get("id") or "")[:100],
+            "reported_time": str(heartbeat.get("time") or "")[:80], "message": message,
+        })
+        return {"ok": True}
+
     @app.get("/api/routers/{rid}/probe", dependencies=[api])
     async def probe(rid: int):
         rt = router_or_404(rid)

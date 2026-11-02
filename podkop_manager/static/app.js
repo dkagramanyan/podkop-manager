@@ -248,6 +248,7 @@ const SECTIONS = {
   rules: { title: "Routing rules", view: (m, id, sub) => viewRules(m, id, sub) },
   global: { title: "Global settings", view: (m, id) => viewGlobal(m, id) },
   configs: { title: "Configs", view: (m, id) => viewConfigs(m, id) },
+  reliability: { title: "Connection health", view: (m, id) => viewReliability(m, id) },
   logs: { title: "Logs", view: (m, id) => viewLogs(m, id) },
   history: { title: "History", view: (m, id) => viewHistory(m, id) },
 };
@@ -340,6 +341,7 @@ function drawSide() {
       h("a", { href: `#/r/${rt.id}/rules`, class: "sub", "aria-current": cur("rules") }, "Rules"),
       h("a", { href: `#/r/${rt.id}/global`, class: "sub", "aria-current": cur("global") }, "Global settings"),
       h("a", { href: `#/r/${rt.id}/configs`, class: "sub", "aria-current": cur("configs") }, "Configs"),
+      link("reliability", "Connection health", "probe"),
       link("logs", "Logs", "logs"),
       link("history", "History", "history")) : null,
     h("div", { class: "nav nav-bottom" },
@@ -886,6 +888,93 @@ async function viewLogs(main, id) {
     },
     onLive: drawFoot,
   };
+}
+
+async function viewReliability(main, id) {
+  const page = h("div", { class: "page" });
+  let data, webhook = "", timer, left = false;
+  const endpoint = `/api/routers/${id}/reliability`;
+  const load = async () => {
+    data = await api("GET", endpoint);
+    if (!left) draw();
+  };
+  const table = (headers, rows) => h("div", { style: "overflow-x:auto" }, h("table", {},
+    h("thead", {}, h("tr", {}, headers.map(x => h("th", {}, x)))),
+    h("tbody", {}, rows.map(row => h("tr", {}, row.map(x => h("td", {}, x)))))));
+  const state = v => v === true ? "Responding" : v === false ? "Failed" : "Not checked";
+  const draw = () => {
+    const opts = data.settings;
+    const enabled = h("input", { type: "checkbox", checked: opts.enabled });
+    const automatic = h("input", { type: "checkbox", checked: opts.auto_recover });
+    const interval = h("input", { type: "number", min: 30, max: 300, value: opts.interval });
+    const cooldown = h("input", { type: "number", min: 60, max: 3600, value: opts.cooldown });
+    const controls = h("form", { class: "card pad stack", onsubmit: async e => {
+      e.preventDefault();
+      try {
+        await api("PUT", endpoint, { ...opts, enabled: enabled.checked, auto_recover: automatic.checked,
+          interval: Number(interval.value), cooldown: Number(cooldown.value) });
+        toast("Connection monitoring settings saved"); await load();
+      } catch (err) { toast(err.message, true); }
+    } }, h("label", { class: "check" }, enabled, "Monitor connections from the router"),
+    h("label", { class: "check" }, automatic, "Temporarily exclude repeatedly failing proxies"),
+    h("label", {}, "Pause between checks, seconds ", interval),
+    h("label", {}, "Minimum exclusion time, seconds ", cooldown),
+    h("p", { class: "muted" }, "Recovery requires working direct internet, working DNS, repeated proxy failures and a recently tested replacement. Manual server pins are respected. Recovery checks continue during the cooldown."),
+    h("div", { class: "row" }, h("button", { type: "submit", class: "btn primary" }, "Save"),
+      h("button", { type: "button", class: "btn", onclick: async e => {
+        const button = e.currentTarget; button.disabled = true; button.textContent = "Checking…";
+        try { await api("POST", `${endpoint}/check`, {}); await load(); }
+        catch (err) { toast(err.message, true); }
+        finally { button.disabled = false; button.textContent = "Check now"; }
+      } }, "Check now")));
+    const last = data.checks[0], report = last ? last.report : {};
+    const servers = Object.values(data.servers).sort((a,b) => b.checked - a.checked);
+    const names = (S.routers[id] || {}).names || {};
+    const checks = [ ["Router DNS", state(report.router_dns)],
+      ["Primary DNS", `${state((report.primary_dns || {}).ok)} · ${(report.primary_dns || {}).method || ""}`],
+      ["Provider DNS", state(report.provider_dns)],
+      ["WAN", state((report.wan || {}).up)], ["Gateway ping", state(report.gateway)],
+      ["Available memory", report.available_kib ? `${Math.round(report.available_kib / 1024)} MiB` : "Not checked"],
+      ["Load (1 / 5 / 15 minutes)", report.load || "Not checked"] ];
+    for (const r of report.direct || []) checks.push([`Direct: ${new URL(r.target).hostname}`,
+      `${r.exit === 0 ? `HTTP ${r.code}` : "Failed"} · ${Math.round(r.seconds * 1000)} ms`]);
+    put(page, pageHead("Connection health"), controls,
+      data.latest.error ? h("p", { class: "bad-text" }, data.latest.error) : null,
+      h("section", { class: "card pad stack" }, h("h2", {}, "Latest checks"),
+        h("p", { class: "muted" }, last ? `Collected ${longWhen(last.t)}. Checks use the router and the selected server configuration. LAN forwarding and established application sessions need separate Kuma checks.` : "Run a check to establish a baseline."),
+        table(["Check", "Result"], checks)),
+      h("section", { class: "card pad stack" }, h("h2", {}, "Server history"),
+        h("p", { class: "muted" }, "Cooldown is a recovery recommendation. Runtime exclusion requires automatic recovery and a verified replacement; manual pins are preserved."),
+        servers.length ? table(["Server", "Last result", "Response time", "Checks / confirmed failures", "Recovery state", "Checked"],
+          servers.map(s => [names[s.tag] || s.tag, s.status, s.response_ms == null ? "–" : `${s.response_ms} ms`, `${s.samples} / ${s.failed_samples}`,
+            s.quarantined ? `Cooldown until at least ${longWhen(s.until)}; recovery checks required` : "Eligible", longWhen(s.checked)]))
+          : h("p", {}, "No server checks yet.")),
+      h("section", { class: "card pad stack" }, h("h2", {}, "Incidents"),
+        h("p", { class: "muted" }, "Related network failures within 30 seconds are grouped. Counts are observations, not independent outages. Times below show when Manager received them."),
+        data.incidents.length ? table(["First / last observation", "Type", "Observations", "Selected servers at first observation"],
+          data.incidents.map(i => [ `${longWhen(i.started)} — ${longWhen(i.last)}`, i.category, i.count,
+            Object.entries(i.context.selected || {}).map(([s,t]) => `${s}: ${(i.context.server_names || {})[t] || t}`).join(", ") ]))
+          : h("p", {}, "No incidents recorded.")),
+      h("section", { class: "card pad stack" }, h("h2", {}, "Recent observations"),
+        table(["Received", "Source", "Type", "Target", "Detail"], data.observations.slice(0,80).map(o =>
+          [longWhen(o.t), o.source, o.data.kind, o.data.scope, o.data.message]))),
+      h("section", { class: "card pad stack" }, h("h2", {}, "Uptime Kuma"),
+        h("p", {}, "Connect a Kuma Webhook notification using its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),
+        h("button", { class: "btn", onclick: async () => {
+          try { const r = await api("POST", `/api/routers/${id}/kuma-token`, {});
+            webhook = new URL(r.path, location.origin).href; draw(); }
+          catch (err) { toast(err.message, true); }
+        } }, data.kuma_connected ? "Replace webhook token" : "Create webhook URL"),
+        webhook ? h("input", { value: webhook, readonly: true, "aria-label": "Kuma webhook URL", onclick: e => e.target.select() }) : null,
+        h("p", { class: "muted" }, "Use separate Kuma monitors for the router, direct internet, DNS and application access. Preserve 403 responses as access failures. Try two retries before notifying, and keep slow-response measurements.")));
+  };
+  put(main, page);
+  await load();
+  S.view = { leave: () => { left = true; clearTimeout(timer); }, onReliability: m => {
+    if (m.router_id === id && !page.querySelector("form :focus")) {
+      clearTimeout(timer); timer = setTimeout(() => load().catch(() => {}), 500);
+    }
+  } };
 }
 
 // --- changes, as shown in History and the apply dialog ----------------------------------------------
@@ -2252,6 +2341,10 @@ function autoRuleEditor(w, s, rule) {
       h("div", { class: "stack", style: "gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px" },
         h("div", { class: "part-head" }, h("span", { style: "font-size: 13.5px; font-weight: 600" }, "Probe parameters"),
           h("a", { href: `#/r/${w.id}/usage`, class: "xs" }, p ? `Tests ${plural(p.keys, "subscription")} from Keys and usage` : "Keys and usage")),
+        h("label", {}, "Selection priorities ", h("select", { onchange: (e) => update({ profile: e.target.value }, true) },
+          [ ["balanced", "Browsing: reliability and latency"], ["interactive", "Interactive: reliability and response consistency"],
+            ["streaming", "Streaming: reliability and download speed"] ].map(([value, label]) =>
+            h("option", { value, selected: (rule.profile || "balanced") === value }, label)))),
         h("div", { class: "form-grid", style: "grid-template-columns: minmax(110px, 140px) minmax(0, 1fr); align-items: start" },
           h("span", { class: "lbl", style: "font-weight: 500; padding-top: 6px" }, "Exit country"),
           h("div", { class: "ctl", style: "gap: 6px" },
@@ -2960,6 +3053,7 @@ function connect() {
     } else if (m.type === "log") v.onLog && v.onLog(m);
     else if (m.type === "probe") v.onProbe && v.onProbe(m);
     else if (m.type === "usage") v.onUsage && v.onUsage(m);
+    else if (m.type === "reliability") v.onReliability && v.onReliability(m);
     else if (m.type === "job") {
       const fn = S.jobWatch.get(m.version);
       if (fn) fn(m.job);

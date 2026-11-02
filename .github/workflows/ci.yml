@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck -s dash router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh
+      - run: shellcheck -s dash router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh router/reliability.sh
 
   manager:
     runs-on: ubuntu-latest

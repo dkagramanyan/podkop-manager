@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck shell=dash disable=SC1090,SC1091,SC2012,SC2016,SC2034,SC2317
+# shellcheck shell=dash disable=SC1090,SC1091,SC2012,SC2016,SC2034,SC2317,SC2329
 #
 # podkop-agent — runs on the OpenWrt router next to podkop and does what
 # podkop-manager asks over SSH: read and change podkop's settings safely
@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.7.0"
+AGENT_VERSION="0.8.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -27,6 +27,8 @@ BOOT=$(cut -c 1-8 /proc/sys/kernel/random/boot_id 2>/dev/null || echo 00000000)
 set -u
 export LC_ALL=C
 umask 077
+
+[ ! -f /usr/share/podkop-agent/reliability.sh ] || . /usr/share/podkop-agent/reliability.sh
 
 # --- output -------------------------------------------------------------------
 
@@ -355,6 +357,12 @@ hot_apply() {
   if ! { jq "$HEALTH_JQ" "$_hb" > "$_hb.i" && mv "$_hb.i" "$_hb"; }; then
     rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
   fi
+  if command -v reliability_filter >/dev/null 2>&1; then
+    if ! { reliability_filter "$_hb" "$_hb.r" && mv "$_hb.r" "$_hb"; }; then
+      rm -f "$_hb" "$_hb.r"; echo "invalid eligibility policy"; return 1
+    fi
+    sing-box check -c "$_hb" >/dev/null 2>&1 || { rm -f "$_hb"; echo "invalid filtered config"; return 1; }
+  fi
   logger -t podkop-agent "$1"
   if ! cmp -s "$_hb" "$_cp"; then
     if ! { cp "$_hb" "$_cp.agent-new" && mv "$_cp.agent-new" "$_cp"; }; then
@@ -404,6 +412,9 @@ health_on() {
   if [ -z "$_ic" ] || [ ! -f "$_ic" ] || [ -z "$_ip" ]; then return 0; fi
   [ "$(cat "$RUN/health.failed" 2>/dev/null)" = "$_ip" ] && return 0
   jq "$HEALTH_JQ" "$_ic" > "$RUN/health.json" 2>/dev/null || { rm -f "$RUN/health.json"; return 0; }
+  if command -v reliability_filter >/dev/null 2>&1; then
+    reliability_filter "$RUN/health.json" "$RUN/health.filtered" && mv "$RUN/health.filtered" "$RUN/health.json" || return 0
+  fi
   if [ "$(jq -c . "$RUN/health.json")" = "$(jq -c . "$_ic")" ]; then rm -f "$RUN/health.json"; return 0; fi
   if ! { sing-box check -c "$RUN/health.json" >/dev/null 2>&1 &&
          cp "$RUN/health.json" "$_ic.agent-new" && mv "$_ic.agent-new" "$_ic"; }; then
@@ -721,6 +732,7 @@ daemon() {
     [ "$(podkop_start_state)" = running ] && continue
     _pid=$(singbox_pid)
     if [ -n "$_pid" ]; then
+      if command -v reliability_expire >/dev/null 2>&1; then reliability_expire; fi
       [ "$_down" -ge 2 ] && event podkop_up
       _down=0
       # tried every round until the Clash API answers and the pins are back;
@@ -1200,6 +1212,8 @@ fi
 
 _cmd=${1:-help}; [ $# -gt 0 ] && shift
 case "$_cmd" in
+  diagnostics)   command -v cmd_diagnostics >/dev/null || fail unsupported "reinstall agent for diagnostics"; cmd_diagnostics ;;
+  eligibility)   command -v cmd_eligibility >/dev/null || fail unsupported "reinstall agent for eligibility"; cmd_eligibility ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
   validate)      cmd_validate ;;

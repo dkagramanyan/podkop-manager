@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck shell=dash disable=SC1090,SC2012,SC2016,SC2018,SC2019,SC2046,SC2154,SC2317
+# shellcheck shell=dash disable=SC1090,SC2012,SC2016,SC2018,SC2019,SC2046,SC2154,SC2317,SC2329
 #
 # podkop-probe — measure how reliable every proxy node is, right on the
 # OpenWrt router that runs podkop (https://github.com/itdoginfo/podkop).
@@ -12,7 +12,7 @@
 #
 # https://github.com/dkagramanyan/podkop-manager
 
-VERSION="1.30.2"
+VERSION="1.31.0"
 REPO_URL="https://github.com/dkagramanyan/podkop-manager"
 RELEASE_URL="$REPO_URL/releases/latest/download/probe.sh"
 BIN=/usr/bin/podkop-probe            # installed copy, used by the nightly run

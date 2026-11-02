@@ -105,6 +105,84 @@ that already runs there are taken into **Keys and usage** and the rules.
 - To stop podkop, use **Stop**: otherwise the watchdog starts it again within
   about 30 s (**Disable** in LuCI turns that off).
 
+## Connection health (manager 0.19, agent 0.8)
+
+**Connection health** stores router errors and Kuma notifications alongside
+the selected servers, configuration fingerprint, last DNS results, WAN state,
+load and available memory. Network failures received within 30 seconds are
+grouped into an incident; every observation remains available. An incident's
+end is its last observed failure, not a measured recovery time. Router log
+timestamps and Kuma's reported timestamps are retained, while grouping uses
+Manager receipt time. HTTP 401/403/429 responses are access failures and never
+trigger automatic proxy exclusion.
+
+Start with **Check now**, then enable monitoring. Each round checks two
+independent HTTPS destinations directly and through up to four server
+configurations. Selected groups, backups and excluded nodes rotate through
+the checks. Every five minutes, bounded 64 KiB downloads from two destinations
+also test for stalled transfers; a detected stall is checked again next round.
+This is a small availability test, not a bandwidth benchmark. Full speed tests
+remain in the nightly probe.
+
+The checks run in one temporary sing-box process on the router, with local-only
+listeners, bounded request times and automatic cleanup. They exercise the
+router's network and the real server configuration, including UDP transports,
+but do not exercise LAN interception or an application's existing connection.
+Keep Kuma's application checks for that view. Diagnostics require curl, jq,
+BusyBox timeout, and at least 48 MiB of available memory; unsupported or failed
+collectors are reported as such, never counted as failed proxies.
+
+DNS is shown separately: resolution through Podkop, a direct primary-resolver
+probe (UDP or DoH with an ordinary direct route), and the DNS offered by the
+WAN provider. Other primary DNS transports/routes show **Not checked**. These
+tests do not change DNS settings or bypass certificate verification. A cached
+answer through Podkop alone is not proof that its upstream resolver works.
+
+**Temporarily exclude repeatedly failing proxies** is optional and off by
+default. It requires two consecutive paired failures, working direct controls
+and router DNS, and a recently verified replacement in the same URLTest group.
+The default cooldown is ten minutes, followed by two successful recovery
+checks. A failed download needs successful download checks to recover. Unknown
+results and access rejections do not count as transport failures. User pins,
+pending drafts and configuration changes are respected.
+
+Exclusions affect runtime URLTest membership; the original UCI server lists
+stay intact. The agent checks and reloads the generated configuration, restores
+the previous file on failure, and never restarts Podkop for these decisions.
+If Manager disappears, a three-minute lease expires and the router rebuilds
+the original memberships. Restoring a lease is retried at most once a minute
+if it fails. Changes that require a reload can affect active sessions; retain
+the existing connection-preservation settings and validate on one group first.
+
+Probe parameters now include **Selection priorities**: browsing favors
+latency, interactive favors response consistency (p90), and streaming favors
+download speed. Reliability class remains first, with recent confirmed
+failures considered within a class, and subscription-key diversity retained.
+Independent infrastructure is still something to verify with the provider.
+
+To correlate Kuma events, create a webhook URL in Connection health. In Kuma,
+add a **Webhook** notification using POST and the default JSON body, then
+attach it to the relevant monitors. Token replacement revokes the old URL.
+Webhook events are observations only: even a replayed notification cannot
+change routing. Notifications and checks are retained for 14 days; recent
+per-server scores cover at most 120 samples in the last 24 hours.
+
+For a useful baseline, keep separate Kuma monitors for the router's LAN
+address, two independent internet destinations verified to take the direct
+route, DNS, and the actual applications through Podkop. Start with two retries
+before notifying and keep raw failures/latency visible; retries delay alerts.
+Keep LinkedIn's 403 as an application-access failure rather than treating it
+as a dead proxy. Use the existing draft/apply flow to trial one-minute URLTest
+checks in one section, then compare failures, response times and router load
+over 24–48 hours before broadening the change.
+
+When upgrading from a source checkout, install both `router/podkop-agent` and
+`router/reliability.sh` (the latter at
+`/usr/share/podkop-agent/reliability.sh`), then restart **podkop-agent**. The
+packaged installer and release include both. Preserve the existing agent's
+keys and firewall rules. An older agent gives an explicit unsupported-command
+error and continues its existing watchdog behavior.
+
 ## podkop-probe without the manager
 
 Tests every server of your keys on the router and puts the best into podkop:

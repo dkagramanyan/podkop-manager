@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.31.0 — 2026-11-03
+
+- Manager 0.19.0 and agent 0.8.0 add Connection health: incident grouping,
+  current routing context, separate DNS/direct/proxy checks, resource and WAN
+  snapshots, and bounded download checks for stalled transfers.
+- Optional temporary exclusion requires paired transport failures and a
+  verified replacement. Runtime overrides preserve UCI lists, respect manual
+  pins, roll back failed reloads, and expire when Manager stops renewing them.
+- Authenticated Kuma webhooks preserve failures and recoveries without using
+  notifications as routing commands. Access rejections remain distinct from
+  transport failures.
+- Probe selection offers browsing, interactive and streaming priorities and
+  incorporates recent confirmed failures. Histories follow the connection
+  identity when URLTest tags or display names change.
+- Router installers and releases include reliability.sh. Monitoring and
+  recovery are off by default until the first router check is reviewed.
+
 ## 1.30.2 — 2026-10-31
 
 - **Logs hide failed reverse lookups** (manager 0.18.2). Devices ask PTR

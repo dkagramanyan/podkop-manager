@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import configs, podkop, usage
+from . import configs, podkop, usage, reliability
 from .agent import Agent, AgentError, check_forward
 from .db import DB
 
@@ -117,12 +117,17 @@ class RouterRuntime:
         self.exit_ip = True                # False for an agent before 0.3.2 (no exit-ip)
         self.moving = False                 # a move of rules for the traffic limit is under way
         self.local_probe: dict | None = None    # the last probe run on this server: state, times, folder
+        self.connection_check: dict = {}
+        self.connection_lock = asyncio.Lock()
+        self.check_cursor = 0
+        self.last_payload = 0.0
 
     def snapshot(self) -> dict:
         return {"id": self.id, "name": self.row["name"], "host": self.row["host"], "port": self.row["port"],
                 "online": self.online, "error": self.error, "checked": self.checked, "down_since": self.down_since,
                 "status": self.status, "proxies": self.proxies, "names": self.names,
-                "draft": self.draft, "alert": self.alert, "usage": self.usage, "exits": self.exits}
+                "draft": self.draft, "alert": self.alert, "usage": self.usage, "exits": self.exits,
+                "connection_check": self.connection_check}
 
 
 class Hub:
@@ -171,7 +176,7 @@ class Hub:
         except ValueError as e:      # odd old probe options: leave the rules as they are
             log.warning("router %s: old probe settings not converted: %s", rt.id, e)
         rt.tasks = [asyncio.create_task(self._poll_loop(rt)), asyncio.create_task(self._watch_loop(rt)),
-                    asyncio.create_task(self._usage_loop(rt))]
+                    asyncio.create_task(self._usage_loop(rt)), asyncio.create_task(self._connection_loop(rt))]
         return rt
 
     async def _stop_router(self, rid: int) -> None:
@@ -296,6 +301,8 @@ class Hub:
             line = rt.request_logs.enrich(line)
             p = podkop.parse_log(line)
             self.db.add_log(rt.id, line, p["source"], p["level"])
+            if p["level"] != "noise" and (observation := reliability.log_observation(line)):
+                self.observe(rt, "router", observation)
             self.publish({"type": "log", "router_id": rt.id, "line": line, "t": time.time(), **p})
             return
         data = {k: v for k, v in m.items() if k not in ("id", "t", "type")}
@@ -308,6 +315,91 @@ class Hub:
         rt.wake.set()
 
     # --- config ------------------------------------------------------------------------
+    def observe(self, rt: RouterRuntime, source: str, observation: dict) -> None:
+        cfg = (rt.config or {}).get("config", {})
+        if observation["kind"] == "switch":
+            for group in (rt.proxies or {}).get("groups", []):
+                if group["name"] == observation["scope"]:
+                    group["now"] = observation["server"]
+        self.db.observe(rt.id, source, observation, {
+            "selected": reliability.selections(cfg, rt.proxies),
+            "server_names": podkop.tag_names(cfg),
+            "server_ids": {t: reliability.identity(v[1]) for t, v in podkop.tag_links(cfg).items()},
+            "fingerprint": (rt.config or {}).get("fingerprint"),
+            "last_check": rt.connection_check,
+        })
+        self.publish({"type": "reliability", "router_id": rt.id})
+
+    async def _connection_loop(self, rt: RouterRuntime) -> None:
+        while True:
+            opts = self.db.get_setting(f"reliability:{rt.id}", reliability.DEFAULTS)
+            if opts["enabled"] and rt.online:
+                try:
+                    await self.check_connections(rt.id)
+                except AgentError as e:
+                    rt.connection_check = {"checked": time.time(), "error": e.message, "code": e.code}
+                except Exception:
+                    log.exception("connection checks for router %s", rt.id)
+            await asyncio.sleep(opts["interval"])
+
+    async def check_connections(self, rid: int) -> dict:
+        rt = self.get(rid)
+        if rt.connection_lock.locked():
+            raise AgentError("busy", "connection checks are already running")
+        if rid in self.probes and not self.probes[rid].done():
+            raise AgentError("busy", "connection checks wait while the full probe runs")
+        async with rt.connection_lock:
+            cfg = await self.config(rid)
+            # An explicit stop, a draft or an in-progress apply must never
+            # be counteracted by automatic eligibility changes.
+            rt.proxies = await rt.agent.call("proxies", timeout=15)
+            links = {tag: v[1] for tag, v in podkop.tag_links(cfg["config"]).items()}
+            selected = list(dict.fromkeys(reliability.selections(cfg["config"], rt.proxies).values()))
+            selected = [t for t in selected if t in links]
+            history = self.db.get_setting(f"server_health:{rid}", {})
+            # Reserve slots for backups and quarantined servers. Rotate
+            # selected groups so a large config cannot starve later groups.
+            if selected:
+                n = rt.check_cursor % len(selected)
+                selected = selected[n:] + selected[:n]
+            tags = selected[:2]
+            others = sorted((t for t in links if t not in tags),
+                            key=lambda t: history.get(reliability.identity(links[t]), {}).get("checked", 0))
+            tags += others[:4 - len(tags)]
+            rt.check_cursor += 1
+            payload = time.time() - rt.last_payload >= 300 or any(
+                history.get(reliability.identity(links[t]), {}).get("download_status") == "down" for t in tags)
+            report = await rt.agent.call("diagnostics", payload={"tags": tags, "payload": payload}, timeout=75)
+            if report.get("fingerprint") != cfg["fingerprint"]:
+                raise AgentError("conflict", "configuration changed during checks")
+            now = time.time()
+            if payload:
+                rt.last_payload = now
+            opts = self.db.get_setting(f"reliability:{rid}", reliability.DEFAULTS)
+            history = reliability.advance(history, report, links, opts, now)
+            self.db.set_setting(f"server_health:{rid}", history)
+            report["selected"] = reliability.selections(cfg["config"], rt.proxies)
+            report["server_names"] = podkop.tag_names(cfg["config"])
+            check_id = self.db.x("INSERT INTO connection_checks(router_id,t,report) VALUES (?,?,?)", rid, now, json.dumps(report))
+            rt.connection_check = {"checked": now, "direct": reliability.checked_path(report.get("direct", [])),
+                                   "router_dns": report.get("router_dns"), "primary_dns": report.get("primary_dns"),
+                                   "provider_dns": report.get("provider_dns"),
+                                   "wan": report.get("wan"), "load": report.get("load"),
+                                   "available_kib": report.get("available_kib")}
+            for tag, rows in report.get("nodes", {}).items():
+                if reliability.checked_path(rows) == "down":
+                    self.observe(rt, "active check", {"kind": "transport", "scope": tag,
+                                                      "message": "Both test endpoints failed", "rows": rows})
+            if opts["enabled"] and opts["auto_recover"] and not self.db.draft(rid):
+                banned = reliability.eligibility(cfg["config"], links, history, report, now)
+                report["eligibility"] = await rt.agent.call("eligibility", payload={
+                    "fingerprint": cfg["fingerprint"], "banned": banned}, timeout=60)
+                report["banned"] = report["eligibility"].get("banned", [])
+                rt.connection_check["banned"] = report["banned"]
+                self.db.x("UPDATE connection_checks SET report = ? WHERE id = ?", json.dumps(report), check_id)
+            self.publish({"type": "reliability", "router_id": rid})
+            return report
+
     def _got_config(self, rt: RouterRuntime, cfg: dict) -> None:
         rt.config = cfg
         rt.names, rt.names_fp = podkop.tag_names(cfg["config"]), cfg["fingerprint"]
@@ -632,6 +724,10 @@ class Hub:
         keys, rk = self.db.keys(rid), self.db.rule_keys(rid)
         subs, index = {k["id"] for k in keys if k["kind"] == "sub"}, usage.link_index(keys)
         rows = [dict(r, key=index.get(usage.norm(r.get("link") or ""))) for r in status.get("rows") or []]
+        opts = self.db.get_setting(f"reliability:{rid}", reliability.DEFAULTS)
+        health = self.db.get_setting(f"server_health:{rid}", {}) if opts["enabled"] and opts["auto_recover"] else {}
+        health = {key: value for key, value in health.items() if time.time() - value.get("checked", 0) < 86400}
+        rows = [dict(r, health=health.get(reliability.identity(r.get("link") or ""), {})) for r in rows]
         picks = {r["section"]: podkop.auto_pick(rows, dict(r, keys=[k for k in rk.get(r["section"], []) if k in subs]))
                  for r in self.db.auto_rules(rid)}
         if self.db.probe_settings(rid).get("fix_fingerprint"):

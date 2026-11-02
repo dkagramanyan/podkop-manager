@@ -17,6 +17,8 @@ import time
 from collections import OrderedDict
 from urllib.parse import unquote
 
+from . import reliability
+
 # kind: select (one of values), combo (free text with suggestions), text,
 # number, flag ("0"/"1"), list (several values), textarea, devices / device
 # (network devices of the router), interfaces (logical interfaces), community
@@ -440,7 +442,10 @@ def check_auto_rule(rule: dict) -> dict:
     youtube = youtube if youtube in ("", "plays") else youtube.upper()
     if youtube not in ("", "plays") and not re.fullmatch(r"[A-Z]{2}", youtube):
         raise ValueError("YouTube is '', 'plays' or a two-letter country code like RU")
-    return {"countries": countries, "protocols": protocols, "exit_ips": exit_ips,
+    profile = rule.get("profile", "balanced")
+    if profile not in ("balanced", "interactive", "streaming"):
+        raise ValueError("profile is balanced, interactive or streaming")
+    return {"profile": profile, "countries": countries, "protocols": protocols, "exit_ips": exit_ips,
             "name_contains": str(rule.get("name_contains") or "").strip(), "top": top, "fallback": fallback,
             "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube}
 
@@ -475,12 +480,15 @@ def auto_pick(rows: list, rule: dict) -> dict:
         item = {"name": name, "link": link, "protocol": link_protocol(link), "exit_ip": r.get("exit_ip"),
                 "country": r.get("country"), "median": r.get("median"), "mbit": r.get("mbit"), "verdict": r.get("verdict"),
                 "key": r.get("key")}
+        item.update(p90=r.get("p90"), health=r.get("health") or {})
+        if item["health"].get("quarantined"):
+            why = "temporarily excluded after confirmed connection failures"
         if why:
             left.append(dict(item, reason=why))
         else:
             picked.append(item)
     picked.sort(key=lambda x: ({"GOOD": 0, "OK": 1, "FLAKY": 2}.get(x["verdict"], 3),
-                               _num(x["median"]) if _num(x["median"]) is not None else 1e9))
+                               reliability.rank(x, rule.get("profile", "balanced"))))
     # Keys are the available provenance, not proof of independent providers.
     # Unknown provenance is one bucket, never a different provider per node.
     # Keep counts across the primary/fallback boundary to favour an unused key

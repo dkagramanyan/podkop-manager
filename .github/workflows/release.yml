@@ -28,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Lint
-        run: shellcheck -s dash router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh
+        run: shellcheck -s dash router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh router/reliability.sh
 
       - name: Resolve tag
         id: tag
@@ -45,7 +45,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.tag.outputs.tag }}
-          ASSETS: router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh
+          ASSETS: router/probe.sh router/podkop-agent router/podkop-agent.init router/install.sh router/reliability.sh
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             if [ "${{ github.event_name }}" = push ] && [ "${{ github.ref_type }}" = branch ]; then

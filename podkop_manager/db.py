@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS configs (
   id INTEGER PRIMARY KEY, name TEXT NOT NULL, t REAL NOT NULL, source TEXT NOT NULL DEFAULT '',
   podkop TEXT NOT NULL DEFAULT '', config TEXT NOT NULL, rules TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS connection_checks (
+  id INTEGER PRIMARY KEY, router_id INTEGER NOT NULL, t REAL NOT NULL, report TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS checks_router ON connection_checks(router_id, id);
+CREATE TABLE IF NOT EXISTS incidents (
+  id INTEGER PRIMARY KEY, router_id INTEGER NOT NULL, started REAL NOT NULL, last REAL NOT NULL,
+  category TEXT NOT NULL, count INTEGER NOT NULL, context TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS incidents_router ON incidents(router_id, id);
+CREATE TABLE IF NOT EXISTS observations (
+  id INTEGER PRIMARY KEY, router_id INTEGER NOT NULL, incident_id INTEGER, t REAL NOT NULL,
+  source TEXT NOT NULL, data TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS observations_router ON observations(router_id, id);
 """
 
 KEY_FIELDS = {"label", "limit_source", "limit_gb", "period", "reset_time", "action", "threshold",
@@ -88,6 +102,7 @@ COLUMNS = [
     ("probe_settings", "fix_fingerprint", "INTEGER NOT NULL DEFAULT 0"),
     ("probe_settings", "test_from", "TEXT NOT NULL DEFAULT 'router'"),
     ("auto_rules", "keys", "TEXT NOT NULL DEFAULT '[]'"),
+    ("auto_rules", "profile", "TEXT NOT NULL DEFAULT 'balanced'"),
 ]
 
 
@@ -166,12 +181,14 @@ class DB:
 
     def delete_router(self, rid: int) -> None:
         self.x("DELETE FROM key_usage WHERE key_id IN (SELECT id FROM keys WHERE router_id = ?)", rid)
-        for table in ("events", "logs", "versions", "probe_runs", "drafts", "auto_rules", "keys", "traffic"):
+        for table in ("events", "logs", "versions", "probe_runs", "drafts", "auto_rules", "keys", "traffic",
+                      "connection_checks", "incidents", "observations"):
             self.x(f"DELETE FROM {table} WHERE router_id = ?", rid)
         self.x("DELETE FROM probe_settings WHERE router_id = ?", rid)
         # the hub's per-router settings, so a router that gets this id later starts clean
         for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
-                     "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced"):
+                     "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced",
+                     "reliability", "server_health", "kuma_token"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -209,6 +226,9 @@ class DB:
         self.x("DELETE FROM events WHERE t < ?", now - event_days * 86400)
         self.x("DELETE FROM key_usage WHERE t < ?", now - 60 * 86400)
         self.x("DELETE FROM traffic WHERE hour < ?", now - 60 * 86400)
+        for table in ("connection_checks", "observations"):
+            self.x(f"DELETE FROM {table} WHERE t < ?", now - 14 * 86400)
+        self.x("DELETE FROM incidents WHERE last < ?", now - 14 * 86400)
         # each version holds a whole config and each probe run all its rows: keep the newest
         self.x("DELETE FROM versions WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER "
                "(PARTITION BY router_id ORDER BY id DESC) AS n FROM versions) WHERE n > ?)", versions)
@@ -217,6 +237,34 @@ class DB:
                probe_results)
 
     # --- config versions ------------------------------------------------------------
+    def observe(self, rid: int, source: str, data: dict, context: dict, now: float | None = None) -> int | None:
+        now = time.time() if now is None else now
+        category = "network" if data["kind"] in ("transport", "dns") else data["kind"] + ":" + data.get("scope", "")
+        with self.lock:
+            row = self.conn.execute("SELECT id, last FROM incidents WHERE router_id = ? AND category = ? "
+                                    "ORDER BY id DESC LIMIT 1", (rid, category)).fetchone()
+            iid = None
+            if data["kind"] not in ("switch", "recovery", "pending", "test"):
+                if row and now - row["last"] <= 30:
+                    iid = row["id"]
+                    self.conn.execute("UPDATE incidents SET last = ?, count = count + 1 WHERE id = ?", (now, iid))
+                else:
+                    iid = self.conn.execute("INSERT INTO incidents(router_id, started, last, category, count, context) "
+                                            "VALUES (?, ?, ?, ?, 1, ?)",
+                                            (rid, now, now, category, json.dumps(context))).lastrowid
+            self.conn.execute("INSERT INTO observations(router_id, incident_id, t, source, data) VALUES (?, ?, ?, ?, ?)",
+                              (rid, iid, now, source, json.dumps(data)))
+        return iid
+
+    def connection_history(self, rid: int) -> dict:
+        checks = self.q("SELECT * FROM connection_checks WHERE router_id = ? ORDER BY id DESC LIMIT 60", rid)
+        incidents = self.q("SELECT * FROM incidents WHERE router_id = ? ORDER BY id DESC LIMIT 100", rid)
+        observations = self.q("SELECT * FROM observations WHERE router_id = ? ORDER BY id DESC LIMIT 300", rid)
+        for rows, key in ((checks, "report"), (incidents, "context"), (observations, "data")):
+            for row in rows:
+                row[key] = json.loads(row[key])
+        return {"checks": checks, "incidents": incidents, "observations": observations}
+
     def add_version(self, rid: int, config: dict, diff: list, note: str, base: str, trigger: str = "web") -> int:
         return self.x("INSERT INTO versions (router_id, t, state, note, fingerprint_before, config, diff, trigger) "
                       "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
@@ -376,12 +424,12 @@ class DB:
 
     def set_auto_rule(self, rid: int, section: str, rule: dict) -> None:
         self.x("INSERT INTO auto_rules (router_id, section, countries, protocols, exit_ips, name_contains, top, fallback, "
-               "max_ping, min_speed, youtube) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
+               "max_ping, min_speed, youtube, profile) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
                "DO UPDATE SET countries = excluded.countries, protocols = excluded.protocols, exit_ips = excluded.exit_ips, "
                "name_contains = excluded.name_contains, top = excluded.top, fallback = excluded.fallback, "
-               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube",
+               "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube, profile = excluded.profile",
                rid, section, json.dumps(rule["countries"]), json.dumps(rule["protocols"]), json.dumps(rule["exit_ips"]),
-               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"])
+               rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"], rule.get("profile", "balanced"))
 
     def delete_auto_rule(self, rid: int, section: str) -> None:
         self.x("DELETE FROM auto_rules WHERE router_id = ? AND section = ?", rid, section)

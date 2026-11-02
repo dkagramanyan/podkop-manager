@@ -107,12 +107,15 @@ fetch podkop-agent.init "$TMP/podkop-agent.init" && grep -q 'podkop-agent daemon
   sh -n "$TMP/podkop-agent.init" 2>/dev/null || die "could not get podkop-agent.init"
 fetch probe.sh "$TMP/probe.sh" && whole "$TMP/probe.sh" "# end of podkop-probe" || die "could not get probe.sh"
 
+fetch reliability.sh "$TMP/reliability.sh" && whole "$TMP/reliability.sh" "# end of podkop reliability" || die "could not get reliability.sh"
+
 # flash: a file that is already the same is not written again
 put() { cmp -s "$1" "$2" || { cp "$1" "$2.new" && chmod 755 "$2.new" && mv "$2.new" "$2"; } || die "could not write $2"; }
 put "$TMP/podkop-agent" /usr/bin/podkop-agent
 put "$TMP/podkop-agent.init" /etc/init.d/podkop-agent
 put "$TMP/probe.sh" /usr/bin/podkop-probe
 mkdir -p /etc/podkop-agent /usr/share/podkop-agent && chmod 700 /etc/podkop-agent
+put "$TMP/reliability.sh" /usr/share/podkop-agent/reliability.sh
 # kept for "podkop-agent uninstall"
 [ "$0" -ef /usr/share/podkop-agent/install.sh ] || cp "$0" /usr/share/podkop-agent/install.sh
 
