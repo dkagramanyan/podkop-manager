@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS observations (
   source TEXT NOT NULL, data TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS observations_router ON observations(router_id, id);
+CREATE INDEX IF NOT EXISTS observations_router_time ON observations(router_id, t);
 """
 
 KEY_FIELDS = {"label", "limit_source", "limit_gb", "period", "reset_time", "action", "threshold",
@@ -256,10 +257,31 @@ class DB:
                               (rid, iid, now, source, json.dumps(data)))
         return iid
 
-    def connection_history(self, rid: int) -> dict:
+    def observation_summary(self, rid: int, since: float, until: float) -> dict:
+        """Count the full window, independently of the recent-evidence display limit."""
+        groups = self.q("""
+            SELECT source, json_extract(data, '$.kind') AS kind,
+                   coalesce(json_extract(data, '$.scope'), '') AS scope,
+                   count(*) AS count, min(t) AS first, max(t) AS last, max(id) AS latest_id
+            FROM observations WHERE router_id = ? AND t >= ? AND t <= ?
+            GROUP BY source, kind, scope ORDER BY count DESC, last DESC
+        """, rid, since, until)
+        total = sum(g["count"] for g in groups)
+        failures = sum(g["count"] for g in groups if g["kind"] not in ("switch", "recovery", "pending", "test"))
+        shown = groups[:100]
+        if shown:
+            ids = [g["latest_id"] for g in shown]
+            samples = {r["id"]: json.loads(r["data"]) for r in self.q(
+                f"SELECT id, data FROM observations WHERE id IN ({','.join('?' for _ in ids)})", *ids)}
+            for group in shown:
+                group["sample"] = samples[group.pop("latest_id")]
+        return {"since": since, "until": until, "total": total, "failures": failures,
+                "group_count": len(groups), "groups": shown}
+
+    def connection_history(self, rid: int, since: float = 0) -> dict:
         checks = self.q("SELECT * FROM connection_checks WHERE router_id = ? ORDER BY id DESC LIMIT 60", rid)
-        incidents = self.q("SELECT * FROM incidents WHERE router_id = ? ORDER BY id DESC LIMIT 100", rid)
-        observations = self.q("SELECT * FROM observations WHERE router_id = ? ORDER BY id DESC LIMIT 300", rid)
+        incidents = self.q("SELECT * FROM incidents WHERE router_id = ? AND last >= ? ORDER BY id DESC LIMIT 100", rid, since)
+        observations = self.q("SELECT * FROM observations WHERE router_id = ? AND t >= ? ORDER BY id DESC LIMIT 300", rid, since)
         for rows, key in ((checks, "report"), (incidents, "context"), (observations, "data")):
             for row in rows:
                 row[key] = json.loads(row[key])

@@ -3,6 +3,16 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.32.0 — 2026-11-04
+
+- Manager 0.20.0 redesigns Connection health around current status, freshness
+  and suggested next steps, with expandable DNS, WAN, HTTP and download evidence.
+- Repeated observations are grouped by source, type and target. History windows
+  and filters make bursts easier to investigate; counts include the full window
+  rather than only the most recent 300 observations.
+- Server history distinguishes cooldown recommendations from confirmed runtime
+  exclusions. Live refreshes preserve unsaved monitoring settings and input focus.
+
 ## 1.31.3 — 2026-11-03
 
 - Agent 0.8.3 validates diagnostic and recovery server tags without jq regex

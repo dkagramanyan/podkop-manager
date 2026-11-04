@@ -344,9 +344,14 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"command": upgrade_command(release_tag(hub.src))}
 
     @app.get("/api/routers/{rid}/reliability", dependencies=[api])
-    async def connection_health(rid: int):
+    async def connection_health(rid: int, hours: int = 24):
         rt = router_or_404(rid)
-        return {**db.connection_history(rid),
+        if hours not in (1, 6, 24, 168):
+            raise HTTPException(400, "hours must be 1, 6, 24 or 168")
+        now = time.time()
+        since = now - hours * 3600
+        return {**db.connection_history(rid, since),
+                "summary": db.observation_summary(rid, since, now),
                 "settings": db.get_setting(f"reliability:{rid}", reliability.DEFAULTS),
                 "servers": db.get_setting(f"server_health:{rid}", {}),
                 "latest": getattr(rt, "connection_check", {}),
@@ -378,8 +383,14 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     @app.post("/api/routers/{rid}/reliability/check", dependencies=[api])
     async def check_connections(rid: int):
-        router_or_404(rid)
-        return await hub.check_connections(rid)
+        rt = router_or_404(rid)
+        try:
+            return await hub.check_connections(rid)
+        except AgentError as e:
+            if e.code != "busy":
+                rt.connection_check = {"checked": time.time(), "error": e.message, "code": e.code}
+                hub.publish({"type": "reliability", "router_id": rid})
+            raise
 
     @app.post("/api/routers/{rid}/kuma-token", dependencies=[api])
     async def kuma_token(rid: int):

@@ -1,3 +1,3 @@
 """podkop-manager: manage podkop on OpenWrt routers from a Linux server."""
 
-__version__ = "0.19.3"
+__version__ = "0.20.0"

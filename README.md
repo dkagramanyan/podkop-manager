@@ -46,7 +46,7 @@ Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.31.3/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.31.3
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.32.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.32.0
 ```
 
 ## Add a router
@@ -131,6 +131,22 @@ end is its last observed failure, not a measured recovery time. Router log
 timestamps and Kuma's reported timestamps are retained, while grouping uses
 Manager receipt time. HTTP 401/403/429 responses are access failures and never
 trigger automatic proxy exclusion.
+
+The page starts with a current-health verdict and suggested next steps, followed
+by direct internet, DNS and proxy summaries. Old results, incomplete checks and
+collector errors are labelled explicitly. Expand **Diagnostic evidence** for
+individual HTTP results, request times, download sizes and router resources.
+Server history distinguishes recommended cooldowns from runtime exclusions
+confirmed at the last completed check.
+
+**Grouped observations** combines repeated messages by source, failure type and
+target, with first/last receipt times, counts and expandable latest evidence.
+Choose 1 hour, 6 hours, 24 hours or 7 days and filter by source, type or text.
+Counts cover the entire selected window, even when there are more than the
+300 individual observations or 100 groups displayed. These are observation
+counts, not outage counts; application recoveries remain separate evidence.
+Monitoring settings live below the diagnostics, and unsaved edits survive
+live updates. The page also refreshes every 30 seconds.
 
 Start with **Check now**, then enable monitoring. Each round checks two
 independent HTTPS destinations directly and through up to four server
