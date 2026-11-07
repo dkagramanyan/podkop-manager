@@ -2,8 +2,9 @@
 
 import { FINAL_STATES, changeRows, chipList, problemText } from "./history.js";
 import { diffSummary, ruleDest, ruleMatches, rulesOf, runningVersion } from "./model.js";
+import { seg } from "./shell.js";
 import { S } from "./state.js";
-import { api, asList, h, icon, modal, plural, put, spinner, toast } from "./ui.js";
+import { api, asList, h, icon, longWhen, modal, plural, put, spinner, toast } from "./ui.js";
 
 // --- review and apply ------------------------------------------------------------------------------------
 
@@ -117,6 +118,25 @@ export async function openApply(id, { base, config, note, trigger, done }) {
   const close = h("button", { type: "button", class: "btn" }, "Close, keep going");
   const go = h("button", { type: "button", class: "btn primary", disabled: true }, "Apply");
   let problems = null, finished = false;
+  // Now, or Later at a time of the browser's clock (the next 03:00 to start with)
+  const pad = (x) => String(x).padStart(2, "0");
+  const local = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const first = new Date(); first.setHours(3, 0, 0, 0);
+  if (first.getTime() < Date.now() + 120e3) first.setDate(first.getDate() + 1);
+  let later = false;
+  const dueInput = h("input", { type: "datetime-local", id: "apply-due", class: "input", style: "width: auto", value: local(first),
+    min: local(new Date()), "aria-label": "Apply at" });
+  const whenBox = h("div", { class: "field" });
+  const drawWhen = () => {
+    put(whenBox, h("span", { class: "label" }, "When"),
+      h("div", { class: "row", style: "gap: 10px" },
+        seg([["now", "Now"], ["later", "Later"]], later ? "later" : "now", (v) => { later = v === "later"; drawWhen(); }, { label: "When" }),
+        later ? dueInput : null),
+      later ? h("span", { class: "help" }, "Applied then even with this page closed: only these changes, on top of what the router has at that time. "
+        + "If the same setting was changed there in between, it is not applied and you get an alert.") : null);
+    go.textContent = later ? "Schedule" : "Apply";
+  };
+  drawWhen();
 
   const m = modal({
     title: `Apply ${plural(n, "change")} to ${rt.name}`,
@@ -124,7 +144,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       : `Compared with what the router runs now${running ? ` (#${running.id})` : ""}. Nobody changed it on the router in the meantime.`,
     body: [changesBlock(d.diff, config), checks,
       h("div", { class: "field" }, h("label", { for: "apply-note" }, "Note for history"), noteInput),
-      steps, result,
+      whenBox, steps, result,
       h("div", { class: "assure" }, icon("shield", 18, { stroke: "var(--info)", width: 1.6 }),
         h("p", {}, `If podkop does not come up, the router puts ${running ? `#${running.id}` : "the current settings"} back by itself within about 30 s. This works even if you close this page or the manager goes offline.`))],
     foot: [info, h("div", { class: "row" }, close, go)],
@@ -150,7 +170,28 @@ export async function openApply(id, { base, config, note, trigger, done }) {
   api("POST", `/api/routers/${id}/validate`, { config }).then((r) => { problems = r.problems; showChecks(); })
     .catch((e) => { put(checks, h("span", {}, `Could not check: ${e.message}`)); checks.className = "checks bad"; go.disabled = stale; });
 
+  const scheduleIt = async () => {
+    const due = new Date(dueInput.value).getTime() / 1000;
+    if (!due || due < Date.now() / 1000 + 60) {
+      put(result, h("div", { class: "result bad" }, "Pick a time at least a minute from now")); return;
+    }
+    go.disabled = true; noteInput.disabled = true;
+    try {
+      const r = await api("POST", `/api/routers/${id}/schedule`, { base, config, note: noteInput.value.trim() || diffSummary(d.diff), due, trigger });
+      finished = true;
+      put(whenBox);
+      put(result, h("div", { class: "result ok" }, `Scheduled for ${longWhen(due)} as #${r.version}. You can apply it now, put it back into the draft or cancel it in History.`));
+      put(info, h("span", {}, `Saved as #${r.version} in `, h("a", { href: `#/r/${id}/history`, onclick: () => m.close() }, "History")));
+      go.textContent = "Done"; go.disabled = false; go.onclick = () => m.close(); close.textContent = "Close";
+      done && done(true);
+    } catch (e) {
+      put(result, h("div", { class: "result bad" }, e.message)); go.disabled = false; noteInput.disabled = false;
+    }
+  };
+
   go.onclick = async () => {
+    if (later) return scheduleIt();
+    put(whenBox);
     go.disabled = true; go.textContent = "Applying"; noteInput.disabled = true;
     steps.hidden = false;
     const marks = { check: Date.now() };

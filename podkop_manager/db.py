@@ -104,6 +104,8 @@ COLUMNS = [
     ("probe_settings", "test_from", "TEXT NOT NULL DEFAULT 'router'"),
     ("auto_rules", "keys", "TEXT NOT NULL DEFAULT '[]'"),
     ("auto_rules", "profile", "TEXT NOT NULL DEFAULT 'balanced'"),
+    ("versions", "due", "REAL"),                 # a change scheduled for this time
+    ("versions", "base_config", "TEXT"),         # ... and the router's settings it was made on
 ]
 
 
@@ -231,7 +233,7 @@ class DB:
             self.x(f"DELETE FROM {table} WHERE t < ?", now - 14 * 86400)
         self.x("DELETE FROM incidents WHERE last < ?", now - 14 * 86400)
         # each version holds a whole config and each probe run all its rows: keep the newest
-        self.x("DELETE FROM versions WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER "
+        self.x("DELETE FROM versions WHERE state != 'scheduled' AND id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER "
                "(PARTITION BY router_id ORDER BY id DESC) AS n FROM versions) WHERE n > ?)", versions)
         self.x("UPDATE probe_runs SET result = NULL WHERE result IS NOT NULL AND id IN (SELECT id FROM (SELECT id, "
                "ROW_NUMBER() OVER (PARTITION BY router_id ORDER BY id DESC) AS n FROM probe_runs) WHERE n > ?)",
@@ -287,20 +289,33 @@ class DB:
                 row[key] = json.loads(row[key])
         return {"checks": checks, "incidents": incidents, "observations": observations}
 
-    def add_version(self, rid: int, config: dict, diff: list, note: str, base: str, trigger: str = "web") -> int:
-        return self.x("INSERT INTO versions (router_id, t, state, note, fingerprint_before, config, diff, trigger) "
-                      "VALUES (?, ?, 'pending', ?, ?, ?, ?, ?)",
-                      rid, time.time(), note, base, json.dumps(config), json.dumps(diff), trigger)
+    def add_version(self, rid: int, config: dict, diff: list, note: str, base: str, trigger: str = "web",
+                    due: float | None = None, base_config: dict | None = None) -> int:
+        """A change being applied now, or (due) one scheduled for later, with the settings it was made on."""
+        return self.x("INSERT INTO versions (router_id, t, state, note, fingerprint_before, config, diff, trigger, due, "
+                      "base_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      rid, time.time(), "scheduled" if due else "pending", note, base, json.dumps(config),
+                      json.dumps(diff), trigger, due, json.dumps(base_config) if base_config is not None else None)
 
     def update_version(self, vid: int, **fields) -> None:
         for k, v in fields.items():
-            assert k in {"job", "state", "message", "details"}
-            self.x(f"UPDATE versions SET {k} = ? WHERE id = ?", json.dumps(v) if k == "details" else v, vid)
+            assert k in {"job", "state", "message", "details", "config", "diff", "t", "fingerprint_before"}
+            self.x(f"UPDATE versions SET {k} = ? WHERE id = ?",
+                   json.dumps(v) if k in ("details", "config", "diff") else v, vid)
+
+    def scheduled(self, rid: int | None = None) -> list[dict]:
+        """Changes waiting for their time (of one router, or all), soonest first."""
+        rows = self.q("SELECT id, router_id, due, note, diff FROM versions WHERE state = 'scheduled' "
+                      + ("AND router_id = ? " if rid is not None else "") + "ORDER BY due, id",
+                      *(() if rid is None else (rid,)))
+        for r in rows:
+            r["changes"] = len(json.loads(r.pop("diff")))
+        return rows
 
     def versions(self, rid: int, limit: int = 100, before: int | None = None) -> list[dict]:
         """Newest first, with from the job's answer: the fingerprint the router
         had after it, how long it took, and why it was undone or rejected."""
-        rows = self.q("SELECT id, router_id, t, job, state, message, note, diff, details, trigger FROM versions "
+        rows = self.q("SELECT id, router_id, t, job, state, message, note, diff, details, trigger, due FROM versions "
                       "WHERE router_id = ? AND id < ? ORDER BY id DESC LIMIT ?", rid, before or 2**62, limit)
         for r in rows:
             r["diff"] = json.loads(r["diff"])
@@ -315,7 +330,7 @@ class DB:
     def version(self, vid: int) -> dict | None:
         r = self.one("SELECT * FROM versions WHERE id = ?", vid)
         if r:
-            for k in ("config", "diff", "details"):
+            for k in ("config", "diff", "details", "base_config"):
                 r[k] = json.loads(r[k]) if r[k] else None
         return r
 

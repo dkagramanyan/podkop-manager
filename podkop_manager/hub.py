@@ -28,7 +28,7 @@ log = logging.getLogger("podkop_manager")
 FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "failed"}
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
-ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down")
+ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed")
 POLL_SECONDS = 30
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
@@ -39,6 +39,7 @@ USAGE_SECONDS = 600      # the providers' numbers, read through the router
 PROBE_PATH = os.environ.get("PODKOP_MANAGER_PROBE_PATH") or os.environ.get("PATH", "")
 PROBE_SECONDS = 3 * 3600
 BACKUP_SECONDS = 86400   # a copy of everything in the data folder this often
+SCHEDULE_GRACE = 3600   # a scheduled change waits this long for a router that is away or busy
 HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in this time
 HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
 HEAL_RETRY_SECONDS = 10      # the router was busy reloading: try again after this
@@ -130,13 +131,14 @@ class RouterRuntime:
         self.heal_lock = asyncio.Lock()     # its down groups are healed one at a time
         self.upgrade: asyncio.Task | None = None    # the agent update being followed
         self.heal_sections: set[str] = set()        # rules the next self-heal probe is for
+        self.scheduled: list = []                   # changes waiting for their time: {id, due, note, changes}
 
     def snapshot(self) -> dict:
         return {"id": self.id, "name": self.row["name"], "host": self.row["host"], "port": self.row["port"],
                 "online": self.online, "error": self.error, "checked": self.checked, "down_since": self.down_since,
                 "status": self.status, "proxies": self.proxies, "names": self.names,
                 "draft": self.draft, "alert": self.alert, "usage": self.usage, "exits": self.exits,
-                "connection_check": self.connection_check}
+                "connection_check": self.connection_check, "scheduled": self.scheduled}
 
 
 class Hub:
@@ -178,6 +180,7 @@ class Hub:
         ev = self.db.one(f"SELECT type, t FROM events WHERE router_id = ? AND type IN "
                          f"({', '.join('?' * len(ALERT_EVENTS))}) ORDER BY id DESC LIMIT 1", rt.id, *ALERT_EVENTS)
         rt.alert = ev
+        rt.scheduled = self.db.scheduled(rt.id)
         self.update_draft(rt)
         self.db.sync_sub_keys(rt.id, self.db.probe_settings(rt.id)["keys"])
         try:
@@ -496,6 +499,10 @@ class Hub:
         cur = await self.config(rid)
         d = podkop.diff(cur["config"], config)
         vid = self.db.add_version(rid, config, d, note, base, trigger)
+        return await self._send(rt, vid, base, config)
+
+    async def _send(self, rt: RouterRuntime, vid: int, base: str, config: dict) -> dict:
+        """The version to the router as an apply job, followed until it ends."""
         try:
             job = (await rt.agent.call("apply", payload={"base": base, "config": config}, timeout=30))["job"]
         except AgentError as e:
@@ -504,6 +511,106 @@ class Hub:
         self.db.update_version(vid, job=job, state="running")
         self._follow_job(rt, vid, job)
         return {"version": vid, "job": job}
+
+    # --- changes scheduled for later ------------------------------------------------------
+    def _scheduled_changed(self, rt: RouterRuntime) -> None:
+        rt.scheduled = self.db.scheduled(rt.id)
+        self.publish({"type": "router", "router": rt.snapshot()})
+
+    async def schedule(self, rid: int, base: str, config: dict, note: str, due: float, trigger: str = "web") -> int:
+        """Keeps the change and the router's settings it was made on, to apply
+        at due; the draft it came from goes (the change is in History now)."""
+        rt = self.get(rid)
+        cur = await self.config(rid)
+        if base != cur["fingerprint"]:
+            raise AgentError("config_changed", "podkop's settings changed on the router after this draft was started")
+        d = podkop.diff(cur["config"], config)
+        if not d:
+            raise AgentError("unchanged", "nothing to apply: the router already has these settings")
+        vid = self.db.add_version(rid, config, d, note, base, trigger, due=due, base_config=cur["config"])
+        if (draft := self.db.draft(rid)) and draft["config"] == config:
+            self.db.delete_draft(rid)
+            self.update_draft(rt)
+        self._event(rt, "scheduled", {"version": vid, "due": due, "changes": len(d), "note": note})
+        self._scheduled_changed(rt)
+        return vid
+
+    async def _on_router_now(self, rt: RouterRuntime, v: dict) -> tuple[dict, dict, list]:
+        """The scheduled version made on the router's settings now: (cur, config, conflicts)."""
+        cur = await self.config(rt.id)
+        if cur["fingerprint"] == v["fingerprint_before"] or v.get("base_config") is None:
+            return cur, v["config"], []
+        config, conflicts = podkop.rebase(v["base_config"], v["config"], cur["config"])
+        return cur, config, conflicts
+
+    async def run_scheduled(self, vid: int) -> dict:
+        """Applies a scheduled change now (its time came, or "Apply now"):
+        only what it changes, on top of the router's settings now."""
+        v = self.db.version(vid)
+        if not v or v["state"] != "scheduled":
+            raise AgentError("bad_request", "this change is not scheduled any more")
+        rt = self.get(v["router_id"])
+        cur, config, conflicts = await self._on_router_now(rt, v)
+        if self.db.version(vid)["state"] != "scheduled":       # cancelled meanwhile
+            raise AgentError("bad_request", "this change is not scheduled any more")
+        if conflicts:
+            msg = "the router's settings changed since it was scheduled: " + "; ".join(conflicts)
+            self.db.update_version(vid, state="rejected", message=msg, details={"code": "config_changed"})
+            self._event(rt, "schedule_failed", {"version": vid, "message": msg})
+            self._scheduled_changed(rt)
+            return {"version": vid, "state": "rejected"}
+        d = podkop.diff(cur["config"], config)
+        self.db.update_version(vid, config=config, diff=d, t=time.time(), fingerprint_before=cur["fingerprint"],
+                               state="pending" if d else "unchanged",
+                               message=None if d else "the router already had these settings")
+        self._scheduled_changed(rt)
+        if not d:
+            return {"version": vid, "state": "unchanged"}
+        try:
+            return await self._send(rt, vid, cur["fingerprint"], config)
+        except AgentError as e:
+            self._event(rt, "schedule_failed", {"version": vid, "message": e.message})
+            raise
+
+    async def _run_due(self) -> None:
+        """Scheduled changes whose time came; a router away or busy is tried
+        again every 30 s for SCHEDULE_GRACE, then the change fails."""
+        now = time.time()
+        for v in self.db.q("SELECT id, router_id, due FROM versions WHERE state = 'scheduled' AND due <= ? "
+                           "ORDER BY due, id", now):
+            rt = self.routers.get(v["router_id"])
+            if rt is None:
+                continue
+            try:
+                await self.run_scheduled(v["id"])
+            except AgentError as e:
+                if self.db.version(v["id"])["state"] != "scheduled":
+                    continue                    # it failed on the router: run_scheduled told already
+                if e.code in ("unreachable", "timeout", "busy") and now - v["due"] < SCHEDULE_GRACE:
+                    continue
+                msg = f"not applied: {e.message}"
+                self.db.update_version(v["id"], state="failed", message=msg)
+                self._event(rt, "schedule_failed", {"version": v["id"], "message": msg})
+                self._scheduled_changed(rt)
+
+    async def cancel_scheduled(self, vid: int, to_draft: bool = False) -> None:
+        """Drops a scheduled change; to_draft: it becomes the draft again, made
+        on the router's settings now."""
+        v = self.db.version(vid)
+        if not v or v["state"] != "scheduled":
+            raise AgentError("bad_request", "this change is not scheduled any more")
+        rt = self.get(v["router_id"])
+        if to_draft:
+            if self.db.draft(rt.id):
+                raise AgentError("draft_exists", "there is a draft already: apply or discard it first")
+            cur, config, conflicts = await self._on_router_now(rt, v)
+            if conflicts:
+                raise AgentError("config_changed", "the router's settings changed since it was scheduled: " + "; ".join(conflicts))
+            self.db.set_draft(rt.id, config, cur["fingerprint"])
+            self.update_draft(rt)
+        self.db.update_version(vid, state="cancelled", message="moved back to the draft" if to_draft else "cancelled")
+        self._event(rt, "schedule_cancelled", {"version": vid, "to_draft": to_draft})
+        self._scheduled_changed(rt)
 
     def _background(self, rt: RouterRuntime, coro) -> None:
         """A task of the router's, stopped with it."""
@@ -820,6 +927,8 @@ class Hub:
     def _event(self, rt: RouterRuntime, etype: str, data: dict) -> None:
         """An event of the manager itself, stored and sent like the router's."""
         self.db.add_event(rt.id, etype, data)
+        if etype in ALERT_EVENTS:            # e.g. a scheduled change that was not applied
+            rt.alert = {"type": etype, "t": time.time()}
         self.publish({"type": "event", "router_id": rt.id, "event": etype, "data": data, "t": time.time()})
 
     def _lists_to_rules(self, rid: int) -> None:
@@ -1375,6 +1484,10 @@ class Hub:
     async def _scheduler(self) -> None:
         while True:
             await asyncio.sleep(30)
+            try:
+                await self._run_due()
+            except Exception:  # noqa: BLE001 - the nightly probes must still start
+                log.exception("scheduled changes")
             now = dt.datetime.now()
             for rid in list(self.routers):
                 try:

@@ -73,7 +73,7 @@ export function changeRows(diff, config) {
 export const VERSION_STATE = {
   applied: ["applied", "ok"], saved: ["saved", "ok"], unchanged: ["no change", ""], reverted: ["undone", "bad"],
   rejected: ["rejected", "warn"], failed: ["failed", "bad"], pending: ["applying", "accent"], running: ["applying", "accent"],
-  unknown: ["unknown", ""],
+  unknown: ["unknown", ""], scheduled: ["scheduled", "accent"], cancelled: ["cancelled", ""],
 };
 
 export function versionWho(v) {
@@ -84,7 +84,8 @@ export function versionWho(v) {
 }
 
 export function versionMeta(v, running) {
-  const parts = [longWhen(v.t), versionWho(v)];
+  const parts = [v.state === "scheduled" ? `for ${longWhen(v.due)}` : longWhen(v.t), versionWho(v)];
+  if (v.due && v.state !== "scheduled") parts.push(`scheduled for ${longWhen(v.due)}`);
   if (v.diff.length) parts.push(plural(v.diff.length, "change"));
   if (running) parts.push("running now");
   if (v.state === "reverted") parts.push(`the router put the old settings back${v.seconds ? ` after ${v.seconds} s` : ""}`);
@@ -120,10 +121,14 @@ export async function viewHistory(main, id) {
     const rt = S.routers[id];
     if (!rt) return;
     const runningId = (runningVersion(rt, list) || {}).id;
-    const shown = list.filter((v) => filter === "all" || (filter === "ok" ? ["applied", "saved"].includes(v.state)
-      : ["reverted", "rejected", "failed"].includes(v.state)));
+    const sched = list.filter((v) => v.state === "scheduled").sort((a, b) => a.due - b.due);
+    const shown = list.filter((v) => v.state !== "scheduled" && (filter === "all" || (filter === "ok" ? ["applied", "saved"].includes(v.state)
+      : ["reverted", "rejected", "failed"].includes(v.state))));
     put(page,
       pageHead("History"),
+      sched.length ? h("section", { class: "stack", "aria-labelledby": "h-sched", style: "gap: 8px" },
+        h("h2", { id: "h-sched", style: "margin: 0; font-size: 15px" }, "Scheduled"),
+        h("ol", { class: "versions" }, sched.map(scheduledItem))) : null,
       h("div", { class: "row" }, seg([["all", "All"], ["ok", "Applied"], ["bad", "Undone or rejected"]], filter,
         (v) => { filter = v; draw(); }, { label: "Show" })),
       shown.length ? h("ol", { class: "versions" }, shown.map((v) => {
@@ -145,10 +150,32 @@ export async function viewHistory(main, id) {
           reason ? h("div", { class: `reason ${reason[2]}` }, h("span", {}, reason[0]), h("span", { style: "white-space: pre-wrap" }, reason[1])) : null,
           isOpen ? h("div", { class: "changes-grid" }, rows.map(([sec, lbl, val]) => [
             h("span", { class: "mono xs" }, sec), h("span", { class: "muted" }, lbl), val])) : null);
-      })) : h("div", { class: "card empty" }, list.length ? "Nothing here with this filter." : "Nothing applied from this manager yet."),
+      })) : h("div", { class: "card empty" }, list.some((v) => v.state !== "scheduled") ? "Nothing here with this filter." : "Nothing applied from this manager yet."),
       more && list.length ? h("button", { type: "button", class: "btn", style: "align-self: center", onclick: busyClick(async () => {
         await load(true); draw();
       }) }, "Show older") : null);
+  };
+
+  const act = (path, body, done) => busyClick(async () => {
+    try { await api("POST", path, body); toast(done); } catch (e) { toast(e.message, true); }
+    await load(); draw();
+  });
+  const scheduledItem = (v) => {
+    const isOpen = open.has(v.id);
+    return h("li", { class: "card clip" },
+      h("div", { class: "vhead" },
+        h("span", { class: "vid" }, `#${v.id}`),
+        h("span", { class: "pill accent" }, "scheduled"),
+        h("div", { class: "col" }, h("span", {}, v.note || "Change from the web interface"), h("span", {}, versionMeta(v, false))),
+        h("div", { class: "row", style: "gap: 6px" },
+          h("button", { type: "button", class: "btn ghost sm", "aria-expanded": String(isOpen), onclick: () => {
+            if (isOpen) open.delete(v.id); else open.add(v.id); draw();
+          } }, isOpen ? "Hide changes" : "Show changes", icon(isOpen ? "up" : "down", 14, { width: 1.6 })),
+          h("button", { type: "button", class: "btn sm", onclick: act(`/api/versions/${v.id}/run`, undefined, `#${v.id}: applying now`) }, "Apply now"),
+          h("button", { type: "button", class: "btn sm", onclick: act(`/api/versions/${v.id}/cancel`, { to_draft: true }, `#${v.id} is the draft again: edit it in Rules`) }, "Back to draft"),
+          h("button", { type: "button", class: "btn sm danger", onclick: act(`/api/versions/${v.id}/cancel`, {}, `#${v.id} cancelled`) }, "Cancel"))),
+      isOpen ? h("div", { class: "changes-grid" }, changeRows(v.diff).map(([sec, lbl, val]) => [
+        h("span", { class: "mono xs" }, sec), h("span", { class: "muted" }, lbl), val])) : null);
   };
 
   const restore = async (vid) => {
@@ -164,7 +191,13 @@ export async function viewHistory(main, id) {
   await load();
   draw();
   S.view = {
-    onRouter: (r) => r.id === id && draw(),
+    onRouter: (r) => {
+      if (r.id !== id) return;
+      // a scheduled change started, was cancelled or added: the list changed
+      const ids = (r.scheduled || []).map((x) => x.id).join();
+      if (ids !== list.filter((v) => v.state === "scheduled").map((v) => v.id).sort((a, b) => a - b).join()) load().then(draw);
+      else draw();
+    },
     onJob: (m) => { if (m.router_id === id && FINAL_STATES.includes(m.job.state)) load().then(draw); },
   };
 }

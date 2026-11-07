@@ -57,7 +57,7 @@ needs agent 0.10.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.34.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.34.1
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.35.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.35.0
 ```
 
 ## Add a router
@@ -77,7 +77,14 @@ that already runs there are taken into **Keys and usage** and the rules.
 
 ## Good to know
 
-- Changes collect in a draft until **Review and apply**.
+- Changes collect in a draft until **Review and apply**. There, **When →
+  Later** applies them at a day and time you pick (your browser's clock),
+  even with no browser open: the change waits in **History → Scheduled**
+  (Apply now, Back to draft, Cancel) and Rules shows it is coming. At that
+  time only what the change touches is applied, on top of what the router
+  has then (e.g. servers the nightly probe put in meanwhile stay); if the
+  same setting was changed on the router in between, nothing is applied and
+  you get an alert. A router that is away is tried again for an hour.
 - **Keys and usage** lists every key: a subscription (its servers come from
   the provider) or a single link of your own; the probe tests the servers of
   both at every run. Each row shows today's usage with the limit, the period,
