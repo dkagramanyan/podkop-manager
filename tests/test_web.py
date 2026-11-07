@@ -369,6 +369,10 @@ def test_rule_keys_api(tmp_path):
         assert c.get("/api/routers/1/rule-keys").json()["links"] == {"main": ["trojan://m@h:2#M"]}
         assert c.put("/api/routers/1/rule-keys/main", json={"keys": [], "links": []}, headers=H).json() == {"keys": [], "links": []}
         assert c.get("/api/routers/1/rule-keys").json()["rules"] == {}
+        # a single link added as a key can be chosen too
+        own = c.post("/api/routers/1/keys", json={"link": "vless://u@own.example:443#own", "label": "own"}, headers=H).json()["id"]
+        assert c.put("/api/routers/1/rule-keys/main", json={"keys": [kid, own]}, headers=H).json()["keys"] == [kid, own]
+        assert [(k["kind"], k["links"]) for k in c.get("/api/routers/1/rule-keys").json()["subs"]][-1] == ("link", ["vless://u@own.example:443#own"])
 
 
 def test_agent_update_from_the_manager(tmp_path, monkeypatch):
