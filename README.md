@@ -57,7 +57,7 @@ needs agent 0.10.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.34.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.34.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.34.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.34.1
 ```
 
 ## Add a router

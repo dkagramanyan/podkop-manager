@@ -3,6 +3,13 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.34.1 — 2026-11-07
+
+- A single link added as a key can be chosen under a rule's **Servers from
+  keys** (1.34.0 refused it with "keys are ids of this router's
+  subscriptions"); the rule's probe line counts keys, not subscriptions.
+  No change on the router: agent 0.10.0 stays.
+
 ## 1.34.0 — 2026-11-07
 
 - **Update agent from the manager** (agent 0.10.0): Settings → Update agent
