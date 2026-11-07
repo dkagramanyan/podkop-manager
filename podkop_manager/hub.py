@@ -19,8 +19,8 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import configs, podkop, usage, reliability
-from .agent import Agent, AgentError, check_forward, connection_support, require_connection_support
+from . import backup, configs, podkop, usage, reliability
+from .agent import AGENT_FILES, Agent, AgentError, check_forward, connection_support, require_connection_support
 from .db import DB
 
 log = logging.getLogger("podkop_manager")
@@ -38,6 +38,7 @@ USAGE_SECONDS = 600      # the providers' numbers, read through the router
 # sh and tools first (as on a router), then podkop-engine-full's sing-box
 PROBE_PATH = os.environ.get("PODKOP_MANAGER_PROBE_PATH") or os.environ.get("PATH", "")
 PROBE_SECONDS = 3 * 3600
+BACKUP_SECONDS = 86400   # a copy of everything in the data folder this often
 HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in this time
 HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
 HEAL_RETRY_SECONDS = 10      # the router was busy reloading: try again after this
@@ -119,6 +120,7 @@ class RouterRuntime:
         self.exits: dict = {}              # section -> {server, ip, country, city, org, t} or {server, error, t}
         self.exit_task: asyncio.Task | None = None
         self.exit_ip = True                # False for an agent before 0.3.2 (no exit-ip)
+        self.exit_batch = True             # False for an agent before 0.10 (no exit-ips)
         self.moving = False                 # a move of rules for the traffic limit is under way
         self.local_probe: dict | None = None    # the last probe run on this server: state, times, folder
         self.connection_check: dict = {}
@@ -126,6 +128,8 @@ class RouterRuntime:
         self.check_cursor = 0
         self.last_payload = 0.0
         self.heal_lock = asyncio.Lock()     # its down groups are healed one at a time
+        self.upgrade: asyncio.Task | None = None    # the agent update being followed
+        self.heal_sections: set[str] = set()        # rules the next self-heal probe is for
 
     def snapshot(self) -> dict:
         return {"id": self.id, "name": self.row["name"], "host": self.row["host"], "port": self.row["port"],
@@ -156,6 +160,7 @@ class Hub:
             self._start_router(row)
         self.tasks.append(asyncio.create_task(self._scheduler()))
         self.tasks.append(asyncio.create_task(self._pruner()))
+        self.tasks.append(asyncio.create_task(self._backup_loop()))
         self._resume()
         if self.auto_engine and not shutil.which("sing-box", path=self.probe_path):
             self.download_engine()
@@ -232,8 +237,8 @@ class Hub:
                     rt.connection_check = {}
             if rt.status.get("fingerprint") != rt.names_fp:
                 self._got_config(rt, await rt.agent.call("config-get", timeout=30))
-            rt.proxies = None
-            if rt.status["podkop"]["running"]:
+            rt.proxies = rt.status.pop("proxies", None)      # agent 0.10: in the same answer
+            if rt.proxies is None and rt.status["podkop"]["running"]:
                 with contextlib.suppress(AgentError):
                     rt.proxies = await rt.agent.call("proxies", timeout=30)
             rt.online, rt.error, rt.down_since = True, "", None
@@ -274,6 +279,25 @@ class Hub:
             rt.exit_task = asyncio.create_task(self._read_exits(rt, todo))
 
     async def _read_exits(self, rt: RouterRuntime, todo: dict) -> None:
+        if rt.exit_batch:               # agent 0.10: every section in one call, looked up side by side
+            try:
+                got = await rt.agent.call("exit-ips", payload={"sections": list(todo)}, timeout=120)
+                for section, target in todo.items():
+                    e = got.get(section) if isinstance(got, dict) else None
+                    if isinstance(e, dict) and e.get("ip"):
+                        rt.exits[section] = {**e, "t": time.time()}
+                    else:
+                        rt.exits[section] = {"server": target, "t": time.time(),
+                                             "error": (e or {}).get("error") or "no answer"}
+                self.publish({"type": "router", "router": rt.snapshot()})
+                return
+            except AgentError as e:
+                if not (e.code == "bad_request" and e.message.startswith("unknown command")):
+                    for section, target in todo.items():
+                        rt.exits[section] = {"server": target, "error": e.message, "t": time.time()}
+                    self.publish({"type": "router", "router": rt.snapshot()})
+                    return
+                rt.exit_batch = False       # an agent before 0.10: one section at a time
         for section, target in todo.items():
             try:
                 e = await rt.agent.call("exit-ip", section, timeout=30)
@@ -558,11 +582,15 @@ class Hub:
     async def start_probe(self, rid: int, trigger: str = "manual") -> int:
         rt = self.get(rid)
         ps = self.db.probe_settings(rid)
-        if not ps.get("keys"):
-            raise AgentError("no_keys", "add your keys (subscription URLs) first")
+        links = self.link_keys(rid)         # single links are tested like the subscriptions' servers
+        if not ps.get("keys") and not links:
+            raise AgentError("no_keys", "add your keys (subscription URLs or links) first")
         if rid in self.probes and not self.probes[rid].done():
             raise AgentError("busy", "a probe is already running")
-        options = self.probe_options(rid)
+        options = self.probe_options(rid, rt.heal_sections if trigger == "heal" else None)
+        if trigger == "heal":
+            # quick: the dead rules' countries, pings only; speeds are checked at the next nightly run
+            options += ["-q", "--no-speed"]
         agent = [int(x) for x in (((rt.status or {}).get("agent") or {}).get("version") or "0").split(".") if x.isdigit()]
         if ps.get("test_from") == "manager":
             if why := self.local_probe_missing():
@@ -575,7 +603,9 @@ class Hub:
             return run_id
         if ps.get("fix_fingerprint") and agent >= [0, 3, 1]:
             options.append("--fix-fingerprint")    # test them as they will be used
-        await rt.agent.call("probe-start", payload={"keys": ps["keys"], "options": options}, timeout=30)
+        if links and not ps.get("keys") and agent < [0, 10, 0]:
+            raise AgentError("old_agent", "the router's podkop-agent is too old to test single links: update it")
+        await rt.agent.call("probe-start", payload={"keys": ps["keys"], "links": links, "options": options}, timeout=30)
         run_id = self.db.add_probe_run(rid, trigger, ps["keys"])
         self.probes[rid] = asyncio.create_task(self._track_probe(rt, run_id, trigger))
         self.publish({"type": "probe", "router_id": rid, "state": "running", "run": run_id})
@@ -608,14 +638,64 @@ class Hub:
                     self._event(rt, "auto_rule_empty", {"section": section})
         if state == "done" and (trigger == "heal" or (trigger == "schedule" and ps.get("auto_apply"))):
             try:
-                vid = await self.apply_probe(rt.id, st, note="self-heal probe" if trigger == "heal" else "nightly probe")
+                # a self-heal probe tested only its rules' countries: the other rules keep their servers
+                vid = await self.apply_probe(rt.id, st, note="self-heal probe" if trigger == "heal" else "nightly probe",
+                                             sections=set(rt.heal_sections) or None if trigger == "heal" else None)
             except (AgentError, ValueError) as e:
                 self._event(rt, "probe_apply_failed", {"message": str(e)})
         elif state != "done" and trigger == "heal":
             last = next((x for x in reversed(st.get("log") or []) if x.strip()), "")
             self._event(rt, "heal_probe_failed", {"message": last[:300] or "the probe failed"})
+        if trigger == "heal":
+            rt.heal_sections.clear()
         self.db.finish_probe_run(run_id, state, st, vid)
         self.publish({"type": "probe", "router_id": rt.id, "state": state, "run": run_id})
+
+    # --- the agent's update, from this manager's own router files ----------------------------
+    async def upgrade_agent(self, rid: int) -> str:
+        """Sends this manager's router files to the agent, which runs
+        install.sh --upgrade with them as a job; returns the job id."""
+        rt = self.get(rid)
+        if rt.upgrade and not rt.upgrade.done():
+            raise AgentError("busy", "an agent update is already running")
+        if rt.connection_lock.locked():
+            raise AgentError("busy", "a connection check is running; try again in a minute")
+        files = {Path(f).name: (self.src / f).read_text() for f in AGENT_FILES}
+        try:
+            job = (await rt.agent.call("upgrade", payload={"files": files}, timeout=60))["job"]
+        except AgentError as e:
+            if e.code == "bad_request" and e.message == "unknown command upgrade":
+                raise AgentError("manual", "this agent can't update itself yet: run the command on the router once") from None
+            raise
+        except (KeyError, TypeError):
+            raise AgentError("error", "podkop-agent gave an unexpected answer") from None
+        rt.upgrade = asyncio.create_task(self._track_upgrade(rt, job))
+        self.jobs.add(rt.upgrade)
+        rt.upgrade.add_done_callback(self.jobs.discard)
+        return job
+
+    async def _track_upgrade(self, rt: RouterRuntime, job: str) -> None:
+        data: dict = {}
+        async with rt.connection_lock:      # no connection check while the files change
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                try:
+                    data = await rt.agent.call("job", job, "2", timeout=30) or {}
+                except AgentError as e:
+                    log.info("upgrade job %s on %s: %s", job, rt.row["host"], e.message)
+                    await asyncio.sleep(3)
+                    continue
+                if data.get("state") in ("done", "failed"):
+                    break
+                self.publish({"type": "upgrade", "router_id": rt.id, "job": data})
+            else:
+                data = {"state": "failed", "message": "no answer about the update within 5 minutes"}
+        if data.get("state") == "done":
+            self._event(rt, "agent_upgraded", {"version": data.get("version") or ""})
+        else:
+            self._event(rt, "agent_upgrade_failed", {"message": data.get("message") or "the update failed"})
+        self.publish({"type": "upgrade", "router_id": rt.id, "job": data})
+        await self.refresh(rt)
 
     # --- probe on this server, through the router -------------------------------------------
     @property
@@ -678,7 +758,8 @@ class Hub:
                 ps = self.db.probe_settings(rt.id)
                 try:
                     nodes = await rt.agent.call("probe-nodes", payload={
-                        "keys": ps["keys"], "fix_fingerprint": bool(ps.get("fix_fingerprint"))}, timeout=600)
+                        "keys": ps["keys"], "links": self.link_keys(rt.id),
+                        "fix_fingerprint": bool(ps.get("fix_fingerprint"))}, timeout=600)
                 except AgentError as e:
                     out.write(f"podkop-manager: the router could not read the keys: {e.message}\n")
                     nodes = None
@@ -764,10 +845,10 @@ class Hub:
         # never the servers of keys moved away from for their traffic limit
         if avoided := self._avoided_links(rid):
             status = dict(status, rows=[r for r in status.get("rows") or [] if usage.norm(r.get("link") or "") not in avoided])
-        # each server's key, for rules that take only some keys; ids of keys removed since don't count,
-        # so a rule whose keys are all gone takes every key's servers again
+        # each server's key (a subscription, or a single link added as a key), for rules that take only
+        # some keys; ids of keys removed since don't count, so a rule whose keys are all gone takes every key's servers again
         keys, rk = self.db.keys(rid), self.db.rule_keys(rid)
-        subs, index = {k["id"] for k in keys if k["kind"] == "sub"}, usage.link_index(keys)
+        subs, index = {k["id"] for k in keys}, usage.link_index(keys)
         ips = self.db.get_setting(f"entry_ips:{rid}", {}) or {}
         rows = [dict(r, key=index.get(usage.norm(r.get("link") or "")),
                      entry_ip=r.get("entry_ip") or ips.get(podkop.link_host(r.get("link") or "")))
@@ -799,12 +880,13 @@ class Hub:
                 self.db.set_auto_rule(rid, r["section"], podkop.check_auto_rule(dict(r, countries=codes)))
         self.db.set_probe_settings(rid, options=[])
 
-    def probe_options(self, rid: int) -> list:
-        """The probe's options for a run, from the rules: their countries, the
-        loosest limits, and the YouTube check if a rule needs it. Rules pick
-        by exit country, so relays whose entry is elsewhere (e.g. whitelist
-        bypasses entering in Russia) are tested too."""
-        rules = self.db.auto_rules(rid)
+    def probe_options(self, rid: int, sections: set | None = None) -> list:
+        """The probe's options for a run, from the rules (or only these
+        sections' rules): their countries, the loosest limits, and the YouTube
+        check if a rule needs it. Rules pick by exit country, so relays whose
+        entry is elsewhere (e.g. whitelist bypasses entering in Russia) are
+        tested too."""
+        rules = [r for r in self.db.auto_rules(rid) if sections is None or r["section"] in sections]
         countries = sorted({c for r in rules for c in r["countries"]})
         out = ["--countries", ",".join(countries) if rules and all(r["countries"] for r in rules) else "all",
                "--no-entry-check"]
@@ -951,13 +1033,19 @@ class Hub:
         return config
 
     # --- URLTest rules that take every server of their keys (keys chosen, no probe) -----------
+    def link_keys(self, rid: int) -> list:
+        """The single links added as keys of their own, for the probe."""
+        return [k["url"] for k in self.db.keys(rid) if k["kind"] == "link"]
+
     def sub_links(self, rid: int) -> list:
-        """The router's subscriptions, each with its servers podkop can build
-        (with the chrome fingerprint, if the probe uses it)."""
+        """The router's keys, each with its servers podkop can build (with the
+        chrome fingerprint, if the probe uses it): a subscription's list, or
+        the single link a key is."""
         fix = self.db.probe_settings(rid).get("fix_fingerprint")
-        return [{"id": k["id"], "label": usage.key_label(k),
-                 "links": [podkop.fix_fingerprint(x) if fix else x for x in k["links"] if podkop.link_protocol(x) in podkop.PROTOCOLS]}
-                for k in self.db.keys(rid) if k["kind"] == "sub"]
+        return [{"id": k["id"], "label": usage.key_label(k), "kind": k["kind"],
+                 "links": [podkop.fix_fingerprint(x) if fix else x for x in (k["links"] if k["kind"] == "sub" else [k["url"]])
+                           if podkop.link_protocol(x) in podkop.PROTOCOLS]}
+                for k in self.db.keys(rid)]
 
     def key_rule_links(self, rid: int) -> dict:
         """{section: links} of the rules that take every server of their keys:
@@ -1029,11 +1117,11 @@ class Hub:
         return {usage.norm(link) for k in self.db.keys(rid) if k["action"] == "avoid" and (k["acted_until"] or 0) > now
                 for link in (k["links"] if k["kind"] == "sub" else [k["url"]])}
 
-    def probe_config(self, rid: int, cur: dict, status: dict) -> dict:
+    def probe_config(self, rid: int, cur: dict, status: dict, sections: set | None = None) -> dict:
         """The router's config with the probe's lists and the rules by country
-        filled in, without the servers of keys moved away from; ValueError
-        when nothing would change."""
-        picks = self.auto_picks(rid, status)
+        (or only these sections' rules) filled in, without the servers of keys
+        moved away from; ValueError when nothing would change."""
+        picks = {k: v for k, v in self.auto_picks(rid, status).items() if sections is None or k in sections}
         if not any(p["links"] for p in picks.values()):
             raise ValueError("the probe found no server for any rule")
         return podkop.merge_probe(cur["config"], picks)
@@ -1105,6 +1193,7 @@ class Hub:
         if not self.db.auto_rule(rt.id, section):
             self._event(rt, "heal_no_probe", {"section": section, "message": "no rule takes this section's servers from the probe"})
             return
+        rt.heal_sections.add(section)       # the next self-heal probe is for this rule too
         if rt.id in self.probes and not self.probes[rt.id].done():
             return
         if time.time() - (self.db.get_setting(f"heal_probe:{rt.id}") or 0) < HEAL_PROBE_SECONDS:
@@ -1115,9 +1204,9 @@ class Hub:
         except AgentError as e:
             self._event(rt, "heal_probe_failed", {"section": section, "message": e.message})
 
-    async def apply_probe(self, rid: int, status: dict, note: str) -> int:
+    async def apply_probe(self, rid: int, status: dict, note: str, sections: set | None = None) -> int:
         cur = await self.config(rid)
-        new = self.probe_config(rid, cur, status)
+        new = self.probe_config(rid, cur, status, sections)
         return (await self.apply(rid, cur["fingerprint"], new, note, "probe"))["version"]
 
     # --- keys and usage --------------------------------------------------------------------
@@ -1189,8 +1278,30 @@ class Hub:
         now = time.time()
         since = now - 15 * usage.DAY
         traffic = self.db.traffic(rid, since)
+        rows = self.db.keys(rid)
         keys = [usage.key_usage(k, self.db.key_usage(k["id"], since), [r for r in traffic if r["key_id"] == k["id"]], now)
-                for k in self.db.keys(rid)]
+                for k in rows]
+        # what the last probe found of each key's servers, and the rules that use them now
+        index = usage.link_index(rows)
+        st = self.db.last_probe_result(rid) or {}
+        probe = {k["id"]: {"tested": 0, "good": 0, "flaky": 0, "bad": 0} for k in keys}
+        for r in st.get("rows") or []:
+            if (kid := index.get(usage.norm(r.get("link") or ""))) in probe:
+                v = r.get("verdict")
+                probe[kid]["tested"] += 1
+                probe[kid]["good" if v in ("GOOD", "OK") else "flaky" if v == "FLAKY" else "bad"] += 1
+        cfg = getattr(self.routers.get(rid), "config", None)
+        rules: dict[int, list] = {k["id"]: [] for k in keys}
+        if cfg:
+            for section, link in podkop.tag_links(cfg["config"]).values():
+                kid = index.get(usage.norm(link))
+                if kid in rules and section not in rules[kid]:
+                    rules[kid].append(section)
+        for k in keys:
+            k["probe"] = dict(probe[k["id"]], finished=st.get("finished") if probe[k["id"]]["tested"] else None)
+            k["rules"] = rules[k["id"]]
+            if k["kind"] == "link":
+                k["servers"] = 1
         return {"now": now, "keys": keys,
                 "servers": usage.servers_today(traffic, {k["id"]: k["label"] for k in keys}, now)}
 
@@ -1294,6 +1405,17 @@ class Hub:
                     return          # the router is away: try again in 30 s, within the hour
                 self._event(self.routers[rid], "probe_not_started", {"message": e.message})
             self.db.set_probe_settings(rid, last_run_day=now.strftime("%Y-%m-%d"))
+
+    async def _backup_loop(self) -> None:
+        """A copy of everything in the data folder once a day (backup.KEEP kept)."""
+        while True:
+            try:
+                last = backup.saved(self.key)
+                if self.key.exists() and (not last or time.time() - last[0]["t"] >= BACKUP_SECONDS):
+                    await asyncio.to_thread(backup.save, self.db, self.key)
+            except Exception:  # noqa: BLE001 - e.g. a full disk; try again in an hour
+                log.exception("daily backup")
+            await asyncio.sleep(3600)
 
     async def _pruner(self) -> None:
         while True:

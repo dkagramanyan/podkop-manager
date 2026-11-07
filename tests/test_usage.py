@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -337,10 +338,22 @@ def test_exit_ip_is_looked_up_when_the_server_changes(tmp_path: Path):
     calls = []
 
     class Agent:
-        async def call(self, cmd, section, timeout=0):
-            calls.append(section)
-            if section == "work":
+        batch = False               # an agent before 0.10 has no exit-ips
+
+        async def call(self, cmd, *args, payload=None, timeout=0):
+            if cmd == "exit-ips":
+                if not self.batch:
+                    raise AgentError("bad_request", "unknown command exit-ips")
+                calls.append(tuple(payload["sections"]))
+                return {s: self.one(s) for s in payload["sections"]}
+            calls.append(args[0])
+            if args[0] == "work":
                 raise AgentError("exit_unknown", "no answer from ipinfo.io through wg0")
+            return self.one(args[0])
+
+        def one(self, section):
+            if section == "work":
+                return {"section": section, "error": "no answer from ipinfo.io through wg0"}
             return {"section": section, "server": now["main"], "ip": "203.0.113.5", "country": "DE", "city": "", "org": ""}
 
     rt = RouterRuntime(db.router(rid), tmp_path / "key")
@@ -364,9 +377,19 @@ def test_exit_ip_is_looked_up_when_the_server_changes(tmp_path: Path):
                 await rt.exit_task
 
     asyncio.run(run([poll]))
-    assert calls == ["main", "work"]
+    assert calls == ["main", "work"] and rt.exit_batch is False
     assert rt.exits["main"]["ip"] == "203.0.113.5" and rt.exits["work"]["error"].startswith("no answer")
     asyncio.run(run([poll]))                       # nothing changed: no lookup
+    assert calls == ["main", "work"]
+    # agent 0.10: every section in one call
+    rt.agent.batch, rt.exit_batch, rt.exits = True, True, {}
+    calls.clear()
+    asyncio.run(run([poll]))
+    assert calls == [("main", "work")]
+    assert rt.exits["main"]["ip"] == "203.0.113.5" and rt.exits["work"]["error"].startswith("no answer")
+    rt.agent.batch, rt.exit_batch, rt.exits = False, False, {}
+    calls.clear()
+    asyncio.run(run([poll]))
     assert calls == ["main", "work"]
     now["main"] = "main-1-out"                     # urltest moved: only that section again
     asyncio.run(run([poll]))
@@ -597,7 +620,7 @@ def test_local_probe_tests_the_routers_nodes_here(tmp_path: Path):
     run = db.add_probe_run(rid, "manual", [])
     asyncio.run(hub._run_local_probe(rt, run, "manual", ["--countries", "NL"]))
     # then the servers' addresses, resolved on the router, for picks spread across networks
-    assert asked == [(("probe-nodes",), {"keys": ["https://sub.example.com/abc"], "fix_fingerprint": False}),
+    assert asked == [(("probe-nodes",), {"keys": ["https://sub.example.com/abc"], "links": [], "fix_fingerprint": False}),
                      (("resolve",), {"hosts": ["h"]})]
     st = db.probe_result(run)
     assert db.probe_runs(rid)[0]["state"] == "done" and st["local"]
@@ -640,3 +663,79 @@ def test_engine_download_is_checked_and_unpacked(tmp_path: Path, monkeypatch):
         hubmod.fetch_engine(tmp_path / "other", "x86_64")
     with pytest.raises(ValueError, match="no build"):
         hubmod.fetch_engine(dest, "mips")
+
+
+def test_single_links_are_probe_sources(tmp_path: Path):
+    """A link added as a key is tested by the probe like a subscription's
+    servers, can be chosen for a rule, and shows what the probe found."""
+    import asyncio
+    from podkop_manager.agent import AgentError
+    from podkop_manager.hub import RouterRuntime
+    db = DB(tmp_path / "m.db")
+    rid = db.add_router("home", "192.168.1.1", 22, "ssh-ed25519 AAAA")
+    hub = Hub(db, tmp_path / "key", Path(__file__).resolve().parents[1])
+    rt = RouterRuntime(db.router(rid), tmp_path / "key")
+    hub.routers[rid] = rt
+    calls = []
+
+    class Agent:
+        async def call(self, name, *args, payload=None, **kwargs):
+            calls.append((name, payload))
+            return {}
+    rt.agent = Agent()
+    rt.status = {"agent": {"version": "0.10.0"}}
+    with pytest.raises(AgentError, match="add your keys"):
+        asyncio.run(hub.start_probe(rid))
+    own = db.add_link_key(rid, "vless://u@own.example:443#own", "own", 5)
+    db.set_probe_settings(rid, keys=["https://sub.example/k"])
+    db.sync_sub_keys(rid, ["https://sub.example/k"])
+    sub = next(k["id"] for k in db.keys(rid) if k["kind"] == "sub")
+    db.update_key(sub, links=["vless://u@a.example:443#A"])
+    asyncio.run(hub.start_probe(rid))
+    hub.probes[rid].cancel()
+    assert calls[-1][0] == "probe-start"
+    assert calls[-1][1]["keys"] == ["https://sub.example/k"] and calls[-1][1]["links"] == ["vless://u@own.example:443#own"]
+    # a rule restricted to the link key takes only its server from the probe's rows
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 5}))
+    db.set_rule_keys(rid, "main", [own])
+    st = {"state": "done", "finished": "2026-11-07T10:00:00Z", "rows": [
+        {"link": "vless://u@own.example:443#own", "verdict": "GOOD", "median": 0.1},
+        {"link": "vless://u@a.example:443#A", "verdict": "OK", "median": 0.2}]}
+    assert hub.auto_picks(rid, st)["main"]["links"] == ["vless://u@own.example:443#own"]
+    assert [(k["kind"], k["links"]) for k in hub.sub_links(rid)] == [
+        ("sub", ["vless://u@a.example:443#A"]), ("link", ["vless://u@own.example:443#own"])]
+    # the usage page: what the last probe found of each key and the rules that use it now
+    run = db.add_probe_run(rid, "manual")
+    db.finish_probe_run(run, "done", st)
+    rt.config = {"config": {"sections": [{"name": "main", "type": "section", "options": {
+        "connection_type": "proxy", "proxy_config_type": "urltest", "urltest_proxy_links": ["vless://u@own.example:443#own"]}}]}}
+    by = {k["id"]: k for k in hub.usage(rid)["keys"]}
+    assert by[own]["servers"] == 1 and by[own]["probe"] == {"tested": 1, "good": 1, "flaky": 0, "bad": 0, "finished": "2026-11-07T10:00:00Z"}
+    assert by[own]["rules"] == ["main"] and by[sub]["rules"] == [] and by[sub]["probe"]["tested"] == 1
+
+
+def test_agent_probe_start_takes_single_links(tmp_path: Path):
+    """The agent writes the links to a file the probe reads (-f) next to the subscriptions (-s)."""
+    import json
+    import subprocess
+    agent = Path(__file__).resolve().parents[1] / "router/podkop-agent"
+    script = f"""
+    . "{agent}" help >/dev/null
+    RUN="{tmp_path}"; PROBE=/bin/true
+    probe_check() {{ :; }}; spawn() {{ echo "$@" > "$RUN/spawned"; }}; event() {{ :; }}
+    cmd_probe_start
+    """
+    good = subprocess.run(["sh", "-c", script], input=json.dumps(
+        {"keys": ["https://sub.example/k"], "links": ["vless://u@h:443#x"], "options": ["-q"]}),
+        text=True, capture_output=True, timeout=20)
+    assert good.returncode == 0, good.stderr
+    assert (tmp_path / "probe/links.txt").read_text() == "vless://u@h:443#x\n"
+    assert (tmp_path / "spawned").read_text().strip() == "_run-probe"
+    for payload in ({"keys": [], "links": [], "options": []}, {"keys": [], "links": ["http://not-a-link"], "options": []}):
+        (tmp_path / "probe/state").write_text("none")
+        bad = subprocess.run(["sh", "-c", script], input=json.dumps(payload), text=True, capture_output=True, timeout=20)
+        assert bad.returncode != 0 and "bad_request" in bad.stdout, payload
+    (tmp_path / "probe/state").write_text("none")
+    only = subprocess.run(["sh", "-c", script], input=json.dumps({"keys": [], "links": ["ss://abc@h:1#s"], "options": []}),
+                          text=True, capture_output=True, timeout=20)
+    assert only.returncode == 0, only.stderr

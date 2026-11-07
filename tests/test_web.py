@@ -22,6 +22,7 @@ class FakeRouter:
     status = {"fingerprint": "fp1", "podkop": {"version": "0.7.24"}}
     row = {"name": "home"}
     local_probe = None
+    online = True
 
     def snapshot(self):
         return {"id": self.id, "draft": self.draft}
@@ -368,3 +369,76 @@ def test_rule_keys_api(tmp_path):
         assert c.get("/api/routers/1/rule-keys").json()["links"] == {"main": ["trojan://m@h:2#M"]}
         assert c.put("/api/routers/1/rule-keys/main", json={"keys": [], "links": []}, headers=H).json() == {"keys": [], "links": []}
         assert c.get("/api/routers/1/rule-keys").json()["rules"] == {}
+
+
+def test_agent_update_from_the_manager(tmp_path, monkeypatch):
+    calls = []
+
+    async def upgrade_agent(self, rid):
+        calls.append(rid)
+        return "j1"
+
+    monkeypatch.setattr(FakeHub, "upgrade_agent", upgrade_agent, raising=False)
+    with client(tmp_path, with_router=True) as c:
+        assert c.post("/api/routers/1/agent-upgrade", headers=H).status_code == 401
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        assert c.post("/api/routers/1/agent-upgrade").status_code == 403       # no manager header
+        assert c.post("/api/routers/1/agent-upgrade", headers=H).json() == {"job": "j1"}
+        assert c.post("/api/routers/9/agent-upgrade", headers=H).status_code == 404
+        assert calls == [1]
+
+
+def test_health_needs_no_login(tmp_path):
+    with client(tmp_path, with_router=True) as c:
+        r = c.get("/health")
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert r.json()["routers"] == 1 and "online" in r.json()
+        assert "home" not in r.text                      # no names without a login
+        c.db.conn.close()
+        assert c.get("/health").status_code == 503
+
+
+def test_login_limit_per_address(tmp_path, monkeypatch):
+    monkeypatch.setattr(web, "LOGIN_FAILURES", 3)
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    with client(tmp_path) as c:
+        for _ in range(3):
+            r = c.post("/login", data={"user": "admin", "password": "wrong"}, follow_redirects=False)
+            assert r.headers["location"] == "/login?bad=1"
+        # the right password is not even tried any more
+        r = c.post("/login", data={"user": "admin", "password": "secret-pass"}, follow_redirects=False)
+        assert r.headers["location"] == "/login?bad=locked"
+        assert c.get("/api/schema").status_code == 401
+        # the window passes
+        monkeypatch.setattr(web.time, "time", lambda: 1e12)
+        r = c.post("/login", data={"user": "admin", "password": "secret-pass"}, follow_redirects=False)
+        assert r.headers["location"] == "/"
+        assert c.get("/api/schema").status_code == 200
+
+
+async def _no_sleep(_):
+    pass
+
+
+def test_saved_backups(tmp_path, monkeypatch):
+    from podkop_manager import backup
+    import asyncssh
+    key = tmp_path / "data" / "id_ed25519"
+    key.parent.mkdir()
+    asyncssh.generate_private_key("ssh-ed25519").write_private_key(str(key))
+    monkeypatch.setattr(FakeHub, "key", key)
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        assert c.get("/api/backups").json() == {"backups": [], "keep": backup.KEEP}
+        names = []
+        for i in range(3):
+            monkeypatch.setattr(backup.time, "strftime", lambda fmt, *a, i=i: f"2026110{i}-1200" if "%Y%m%d" in fmt else "t")
+            names.append(backup.save(c.db, key, keep=2).name)
+        rows = c.get("/api/backups").json()["backups"]
+        assert [r["name"] for r in rows] == names[:0:-1]           # the oldest is gone, newest first
+        assert (key.parent / "backups" / names[0]).exists() is False
+        r = c.get(f"/api/backups/{names[2]}")
+        assert r.status_code == 200 and r.headers["content-type"] == "application/gzip"
+        assert backup.restore(DB(tmp_path / "r.db"), tmp_path / "rkey", r.content).startswith("ssh-ed25519")
+        assert c.get("/api/backups/..%2Fid_ed25519").status_code == 404
+        assert c.get("/api/backups/podkop-manager-99999999-9999.tar.gz").status_code == 404

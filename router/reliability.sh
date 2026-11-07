@@ -13,6 +13,10 @@ RELIABILITY_TAG_JQ='def valid_tag:
 # BusyBox builds may omit timeout. Bound the lookup ourselves using only
 # shell job control and sleep; kill and reap it on expiry or cancellation.
 # This is specific to nslookup, which runs as a single child process.
+# the waits below are counted in ticks of one second; tests set a shorter
+# tick (PODKOP_DIAG_TICK=0.1) and run the same code in a tenth of the time
+DIAG_TICK=${PODKOP_DIAG_TICK:-1}
+
 diagnostic_lookup() (
   _dl_limit=$1; shift
   _dl_pid=''; _dl_elapsed=0
@@ -21,7 +25,7 @@ diagnostic_lookup() (
   nslookup "$@" & _dl_pid=$!
   while kill -0 "$_dl_pid" 2>/dev/null; do
     [ "$_dl_elapsed" -lt "$_dl_limit" ] || exit 124
-    sleep 1
+    sleep "$DIAG_TICK"
     _dl_elapsed=$((_dl_elapsed + 1))
   done
   wait "$_dl_pid"; _dl_rc=$?
@@ -184,7 +188,7 @@ cmd_diagnostics() (
   sing-box check -c "$_dir/config.json" >/dev/null 2>&1 || fail unsupported "engine cannot run these diagnostics"
   # 7>&-: a sing-box left behind (the check killed outright) must not keep the lock
   sing-box run -c "$_dir/config.json" > "$_dir/engine.log" 2>&1 7>&- & _pid=$!
-  sleep 1
+  sleep "$DIAG_TICK"
   kill -0 "$_pid" 2>/dev/null || fail collector "diagnostic engine did not start"
   # Test DNS separately. Provider DNS comes from the WAN, never a guessed IP.
   _dns=false; diagnostic_lookup 6 example.com 127.0.0.42 > "$_dir/dns" 2>&1 && _dns=true

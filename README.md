@@ -30,24 +30,34 @@ docker compose up -d --build
 Open `http://<server>:8080`. Everything you set lives in `.env`: the port,
 the web login and password. After changing
 it: `docker compose up -d`. Update: `git pull && docker compose up -d --build`.
-Data (database, SSH keys) is in the `podkop-manager_data` volume. Logs:
-`docker compose logs -f`.
+Data (database, SSH keys) is in the `podkop-manager_data` volume; a copy of
+it is saved there daily (the last 14 kept, listed and downloadable under
+**Settings → Backup**). Logs: `docker compose logs -f`. `GET /health` answers
+without a login (Docker's health check uses it: `docker compose ps` shows
+*unhealthy* when the interface stops answering). Behind a reverse proxy with
+HTTPS set `PODKOP_MANAGER_HTTPS=1` in `.env`, so the login cookie is sent
+over HTTPS only. Ten wrong logins from one address lock it out for ten
+minutes.
 
 Router agents are updated separately. After updating Manager, open
-**Settings → Update agent** (also available in **Connection health**) and run
-the shown command as root on the OpenWrt router. It preserves SSH keys,
-forwarding access, firewall rules, service state and Podkop settings. Click
-**Done, check the router** afterwards. Connection health needs agent 0.8.0 or
+**Settings → Update agent** (also available in **Connection health**) and
+click **Update from this manager**: the manager sends its own router files
+over SSH and the agent installs them (agent 0.10 or newer; an older agent
+needs the command shown under "Or run a command" pasted once, as root on the
+router). Either way SSH keys, forwarding access, firewall rules, service
+state and Podkop settings are preserved, and a failed update restores the
+previous agent. Connection health needs agent 0.8.0 or
 newer with its `reliability.sh` helper; older agents show an upgrade message.
 Use agent 0.8.2 or newer on routers without a `timeout` command: DNS checks
 enforce their own six-second limit and do not require extra packages.
 Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
-Self-heal (below) needs agent 0.9.0 or newer.
+Self-heal (below) needs agent 0.9.0 or newer; updating from the manager
+needs agent 0.10.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.33.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.33.1
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.34.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.34.0
 ```
 
 ## Add a router
@@ -68,10 +78,16 @@ that already runs there are taken into **Keys and usage** and the rules.
 ## Good to know
 
 - Changes collect in a draft until **Review and apply**.
+- **Keys and usage** lists every key: a subscription (its servers come from
+  the provider) or a single link of your own; the probe tests the servers of
+  both at every run. Each row shows today's usage with the limit, the period,
+  what the last probe found of the key's servers and the rules that use it;
+  a row opens to its chart and the split by rule. Single links need agent
+  0.10.0 to be tested.
 - A **Fastest (URLTest)** rule can take **Servers from keys**: every
-  server of the subscriptions you pick (e.g. one provider), plus your own
-  servers if you add some. When a provider changes its servers, the manager
-  applies the new list by itself and keeps your own.
+  server of the keys you pick (e.g. one provider, or a single link), plus
+  your own servers if you add some. When a provider changes its servers, the
+  manager applies the new list by itself and keeps your own.
 - A **Fastest (URLTest)** rule can **Take links from probe**: region,
   protocol, exit IP, name, ping, speed, YouTube and how many to keep, from
   the rule's keys if it has some. Its
@@ -85,7 +101,9 @@ that already runs there are taken into **Keys and usage** and the rules.
   router's line works, the router lends it up to 3
   working servers of other rules at once, in memory only. If there is
   nothing to lend, the manager adds servers the rule had in earlier applied
-  versions. The manager then runs the probe and applies its servers. Borrowed
+  versions. The manager then runs a quick probe (the down rules' countries,
+  pings only, no speed test) and gives those rules its servers; the other
+  rules keep theirs until the nightly probe. Borrowed
   servers go away when the rule's own servers answer again or its settings
   change, and podkop's lists are downloaded again if they failed while the
   rule was down. Rules switched off there (e.g. one that must keep its own

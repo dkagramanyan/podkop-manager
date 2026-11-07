@@ -186,7 +186,7 @@ def test_upgrade_preserves_pairing_settings_and_service_state(router_files, stop
     assert all(p.read_bytes() == data for p, data in before.items())
     assert (root / "usr/share/podkop-agent/reliability.sh").read_bytes() == (src / "reliability.sh").read_bytes()
     version = subprocess.check_output([str(root / "usr/bin/podkop-agent"), "version"], env=env, text=True)
-    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "resolve"]
+    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "resolve", "upgrade"]
     log = Path(env["TEST_INIT_LOG"]).read_text()
     assert ("new:restart" in log) is not stopped
     assert "enable" not in log and "stop\n" not in log
@@ -241,3 +241,105 @@ def test_upgrade_waits_for_a_running_connection_check(router_files):
     result = run()
     assert result.returncode == 0, result.stderr
     assert "waiting for a connection check to finish" in result.stdout and "upgraded" in result.stdout
+
+
+def test_upgrade_ends_a_leftover_check_sing_box(router_files):
+    """A test sing-box of a connection check cut off before agent 0.9.1 keeps
+    the check's lock; the installer ends it, never podkop's own sing-box."""
+    root, src, env, run = router_files
+    (root / "tmp/podkop-agent").mkdir(exist_ok=True)
+    lock = root / "tmp/podkop-agent/diagnostics.lock"
+    holders = []
+    for name in (f"sing-box run -c {root}/tmp/podkop-agent/check.abc123/config.json",
+                 f"sing-box run -c {root}/etc/sing-box/config.json"):
+        # exec -a names the process; GNU bash and sleep by path: the router-compatibility job puts BusyBox
+        # first, and BusyBox picks its applet from the process name
+        holders.append(subprocess.Popen(["/bin/bash", "-c", 'exec 7>"$1"; [ "$3" = own ] || flock 7; exec -a "$2" /bin/sleep 30',
+                                         "_", str(lock), name, "own" if "etc" in name else "lock"]))
+    env["PODKOP_INSTALL_WAIT"] = "5"
+    try:
+        result = run()
+        assert result.returncode == 0, result.stderr
+        assert "ended a leftover connection check" in result.stdout and "upgraded" in result.stdout
+        assert holders[0].wait(timeout=5) != 0           # the leftover was ended
+        assert holders[1].poll() is None                  # podkop's own sing-box runs on
+    finally:
+        for p in holders:
+            p.kill()
+
+
+def test_agent_upgrade_command_runs_the_installer(router_files):
+    """The manager's files arrive as JSON; the agent runs install.sh --upgrade
+    with them as a job and the new agent answers afterwards."""
+    root, src, env, run = router_files
+    agent = root / "usr/bin/podkop-agent"
+    agent.write_text((src / "podkop-agent").read_text())
+    (root / "usr/share/podkop-agent").mkdir(parents=True, exist_ok=True)
+    (root / "usr/share/podkop-agent/reliability.sh").write_text((src / "reliability.sh").read_text())
+    files = {name: (src / name).read_text() for name in ("podkop-agent", "podkop-agent.init", "probe.sh", "reliability.sh")}
+    files["install.sh"] = (root.parent / "install.sh").read_text()
+    bad = subprocess.run([str(agent), "upgrade"], input=json.dumps({"files": {"podkop-agent": "x"}}),
+                         env=env, text=True, capture_output=True, timeout=15)
+    assert json.loads(bad.stdout.splitlines()[-1])["error"]["code"] == "bad_request"
+    started = subprocess.run([str(agent), "upgrade"], input=json.dumps({"files": files}),
+                             env=env, text=True, capture_output=True, timeout=15)
+    assert started.returncode == 0, started.stderr
+    job = json.loads(started.stdout.splitlines()[-1])["data"]["job"]
+    job_file = root / "tmp/podkop-agent/jobs" / f"{job}.json"
+    import time
+    for _ in range(100):
+        data = json.loads(job_file.read_text())
+        if data["state"] in ("done", "failed"):
+            break
+        time.sleep(0.2)
+    assert data["state"] == "done", data
+    assert data["version"] == json.loads(subprocess.check_output([str(agent), "version"], env=env, text=True))["data"]["version"]
+    assert "upgraded" in data["message"]
+    assert (root / "usr/share/podkop-agent/install.sh").exists()
+    assert not list((root / "tmp/podkop-agent").glob("upgrade.*"))
+    assert "new:restart" in Path(env["TEST_INIT_LOG"]).read_text()
+
+
+def test_manager_updates_the_agent_with_its_own_files(tmp_path):
+    db = DB(tmp_path / "manager.db")
+    rid = db.add_router("test", "router", 22, "ssh-ed25519 AAAA")
+    hub = Hub(db, tmp_path / "key", ROOT)
+    rt = RouterRuntime(db.router(rid), tmp_path / "key")
+    hub.routers[rid] = rt
+    sent = {}
+    states = iter([{"state": "running"}, {"state": "done", "version": "0.10.0", "message": "podkop-agent 0.10.0 upgraded"}])
+
+    class Agent:
+        old = True
+
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "upgrade":
+                if self.old:
+                    raise AgentError("bad_request", "unknown command upgrade")
+                sent.update(payload["files"])
+                return {"job": "j1"}
+            if name == "job":
+                return next(states)
+            if name == "status":
+                return {"agent": {"version": "0.10.0", "capabilities": CAPS + ["heal", "resolve", "upgrade"]},
+                        "fingerprint": "fp", "podkop": {"running": False}}
+            if name == "config-get":
+                return {"config": {"sections": []}, "fingerprint": "fp"}
+            raise AssertionError(name)
+
+    rt.agent = Agent()
+
+    async def go():
+        with pytest.raises(AgentError) as err:
+            await hub.upgrade_agent(rid)
+        assert err.value.code == "manual"
+        rt.agent.old = False
+        assert await hub.upgrade_agent(rid) == "j1"
+        with pytest.raises(AgentError, match="already running"):
+            await hub.upgrade_agent(rid)
+        await rt.upgrade
+    asyncio.run(go())
+    assert set(sent) == {"podkop-agent", "podkop-agent.init", "install.sh", "probe.sh", "reliability.sh"}
+    assert sent["podkop-agent"] == (ROOT / "router/podkop-agent").read_text()
+    assert [(e["type"], e["data"]) for e in db.events(rid)][-1] == ("agent_upgraded", {"version": "0.10.0"})
+    assert rt.online and rt.status["agent"]["version"] == "0.10.0"

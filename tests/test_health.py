@@ -79,8 +79,8 @@ def test_health_verdict_distinguishes_stale_failed_and_partial_checks():
     node = shutil.which("node")
     if not node:
         pytest.skip("node is needed to check browser health verdicts")
-    source = (Path(__file__).resolve().parents[1] / "podkop_manager/static/app.js").read_text()
-    helpers = source[source.index("function healthPath("):source.index("async function viewReliability(")]
+    source = (Path(__file__).resolve().parents[1] / "podkop_manager/static/reliability.js").read_text()
+    helpers = source[source.index("function healthPath("):source.index("async function viewReliability(")].replace("export ", "")
     script = helpers + r'''
 const assert = require('node:assert/strict');
 const paths = () => ['https://a.test', 'https://b.test'].map(target => ({target, exit: 0, code: 204, seconds: .1}));
