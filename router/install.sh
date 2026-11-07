@@ -143,10 +143,21 @@ if [ "$UPGRADE" = 1 ]; then
   mkdir -p /tmp/podkop-agent || die "cannot create agent runtime directory"
   exec 8> /tmp/podkop-agent/install.lock
   flock -n 8 || die "another agent upgrade is running"
+  # an apply or a connection check (the manager runs them every minute or so)
+  # finishes within seconds: wait for it, up to 90 s each (BusyBox flock has no -w)
+  WAIT=${PODKOP_INSTALL_WAIT:-90}
+  wait_lock() {
+    _wl=0
+    until flock -n "$1"; do
+      [ "$_wl" = 0 ] && echo "waiting for $2 to finish..."
+      [ "$_wl" -ge "$WAIT" ] && return 1
+      sleep 1; _wl=$((_wl + 1))
+    done
+  }
   exec 9> /tmp/podkop-agent/apply.lock
-  flock -n 9 || die "an apply or recovery is running; try again in a minute"
+  wait_lock 9 "an apply or recovery" || die "an apply or recovery is running for more than $WAIT s; try again in a minute"
   exec 7> /tmp/podkop-agent/diagnostics.lock
-  flock -n 7 || die "a connection check is running; try again in a minute"
+  wait_lock 7 "a connection check" || die "a connection check is running for more than $WAIT s; see who holds /tmp/podkop-agent/diagnostics.lock"
   /etc/init.d/podkop-agent running >/dev/null 2>&1 && WAS_RUNNING=1
   for _f in $FILES; do
     if [ -e "$_f" ]; then
