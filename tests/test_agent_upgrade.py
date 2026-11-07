@@ -252,7 +252,8 @@ def test_upgrade_ends_a_leftover_check_sing_box(router_files):
     holders = []
     for name in (f"sing-box run -c {root}/tmp/podkop-agent/check.abc123/config.json",
                  f"sing-box run -c {root}/etc/sing-box/config.json"):
-        holders.append(subprocess.Popen(["bash", "-c", 'exec 7>"$1"; [ "$3" = own ] || flock 7; exec -a "$2" sleep 30',
+        # exec -a names the process; GNU bash by path, since the router-compatibility job puts BusyBox first
+        holders.append(subprocess.Popen(["/bin/bash", "-c", 'exec 7>"$1"; [ "$3" = own ] || flock 7; exec -a "$2" sleep 30',
                                          "_", str(lock), name, "own" if "etc" in name else "lock"]))
     env["PODKOP_INSTALL_WAIT"] = "5"
     try:

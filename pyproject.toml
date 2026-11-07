@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "podkop-manager"
 description = "Manage podkop on OpenWrt routers from a Linux server"
-requires-python = ">=3.10"
+requires-python = ">=3.11"     # the pinned Starlette (requirements.txt) needs 3.11
 dynamic = ["version"]
 dependencies = [
   "fastapi>=0.110",

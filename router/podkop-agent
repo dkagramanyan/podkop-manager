@@ -827,7 +827,7 @@ cmd_upgrade() {
 
 run_upgrade() {
   _id=$1; _d=$(cat "$RUN/jobs/$_id.dir" 2>/dev/null)
-  [ -n "$_d" ] && [ -f "$_d/install.sh" ] || { job_end "$_id" failed "the upgrade files are gone"; return; }
+  if [ -z "$_d" ] || [ ! -f "$_d/install.sh" ]; then job_end "$_id" failed "the upgrade files are gone"; return; fi
   job_set "$_id" '.state = "running"'
   if PODKOP_INSTALL_WAIT=120 sh "$_d/install.sh" --upgrade --src "$_d" > "$_d/log" 2>&1; then
     job_end "$_id" "done" "$(tail -n 1 "$_d/log")" \
