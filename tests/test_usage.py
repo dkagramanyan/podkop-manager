@@ -596,7 +596,9 @@ def test_local_probe_tests_the_routers_nodes_here(tmp_path: Path):
     rt.agent = Agent()
     run = db.add_probe_run(rid, "manual", [])
     asyncio.run(hub._run_local_probe(rt, run, "manual", ["--countries", "NL"]))
-    assert asked == [(("probe-nodes",), {"keys": ["https://sub.example.com/abc"], "fix_fingerprint": False})]
+    # then the servers' addresses, resolved on the router, for picks spread across networks
+    assert asked == [(("probe-nodes",), {"keys": ["https://sub.example.com/abc"], "fix_fingerprint": False}),
+                     (("resolve",), {"hosts": ["h"]})]
     st = db.probe_result(run)
     assert db.probe_runs(rid)[0]["state"] == "done" and st["local"]
     assert [(r["node"], r["link"]) for r in st["rows"]] == [("A", "vless://a@h:1#A"), ("B", "vless://b@h:2#B")]

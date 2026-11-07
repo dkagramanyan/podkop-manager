@@ -363,6 +363,18 @@ class DB:
                      "ORDER BY id DESC LIMIT 1", rid)
         return json.loads(r["result"]) if r else None
 
+    def last_probe_finished(self, rid: int) -> float:
+        """When the newest successful run ended (0: never)."""
+        r = self.one("SELECT finished FROM probe_runs WHERE router_id = ? AND state = 'done' AND result IS NOT NULL "
+                     "ORDER BY id DESC LIMIT 1", rid)
+        return (r or {}).get("finished") or 0
+
+    def applied_configs(self, rid: int, limit: int = 50) -> list[dict]:
+        """The configs of the router's applied versions, newest first."""
+        return [json.loads(r["config"]) for r in self.q(
+            "SELECT config FROM versions WHERE router_id = ? AND state = 'applied' AND config IS NOT NULL "
+            "ORDER BY id DESC LIMIT ?", rid, limit)]
+
     # --- keys: subscriptions (the probe's keys) and single links, with usage ---------------
     def keys(self, rid: int) -> list[dict]:
         rows = self.q("SELECT * FROM keys WHERE router_id = ? ORDER BY kind DESC, id", rid)

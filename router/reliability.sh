@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck shell=dash disable=SC2034,SC2317
+# shellcheck shell=dash disable=SC1091,SC2016,SC2034,SC2317,SC2329
 # Sourced by podkop-agent. Diagnostics never change UCI or production listeners.
 
 # OpenWrt's standard jq is built without Oniguruma: test/match are unavailable.
@@ -236,4 +236,257 @@ cmd_diagnostics() (
       router_dns:$dns,primary_dns:$primary,provider_dns:$pdns,provider:$provider,gateway:$gateway,load:$load,available_kib:$mem,
       wan:{up:$wan.up,uptime:$wan.uptime,device:$wan.l3_device},method:"isolated engine through router"}' "$_dir/nodes")"
 )
+
+# --- dead groups: self-heal -----------------------------------------------------------
+#
+# A URLTest group whose own servers all fail (no successful test for two test
+# intervals, at least 6 minutes) while the WAN answers is "down": the agent
+# reports group_down and, at once, borrows up to 3 working servers of other
+# groups into it, in RAM only (sing-box's config, reloaded in place). The
+# manager may add servers of its own (heal-links, a 2-hour lease) and runs the
+# probe. When one of the group's own servers works again, or podkop's settings
+# change (an apply), the borrowed servers go away.
+#
+# $ETC/heal-off: sections that are never healed and never lend their servers,
+#   one per line ("*" = self-heal off). Written only when it changes (flash).
+# $RUN/heal/state.json: {fingerprint, groups: {<section>: {dead_since, reported,
+#   added: [borrowed tags], extra: [manager tags], lease, hold}}}
+# $RUN/heal/extra.json: {<section>: [outbounds built from the manager's links]}
+
+HEAL_LEASE=7200      # the manager's links, unless it sends them again
+HEAL_HOLD=600        # after a failed reload, no new try for this long
+
+heal_off_json() {
+  if [ -s "$ETC/heal-off" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/heal-off"; else echo '[]'; fi
+}
+
+HEAL_PLAN_JQ='
+def alive($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) > 0;
+def delay($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) as $d | if $d > 0 then $d else 1000000 end;
+def secs: (.[-1:]) as $u | (.[:-1] | tonumber? // null) as $n
+  | if $n == null then 180 elif $u == "s" then $n elif $u == "m" then $n * 60 elif $u == "h" then $n * 3600 else 180 end;
+def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
+($st[0] // {}) as $s
+| (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end) as $old
+| ($off | index("*") != null) as $alloff
+| [($cfg[0].outbounds // [])[] | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
+   | (.tag[:-12]) as $sec | ($old[$sec] // {}) as $o
+   | (($o.added // []) + ($o.extra // [])) as $ours
+   | {sec: $sec, off: ($alloff or ($off | index($sec) != null)),
+      after: ([360, ((.interval // "3m") | secs) * 2 + 60] | max),
+      added: ($o.added // []), extra: ($o.extra // []), lease: ($o.lease // 0), hold: ($o.hold // 0),
+      dead_since: $o.dead_since, reported: ($o.reported // false),
+      orig: [((.outbounds // []) + (.fallbacks // []))[] | select(. as $t | $ours | index($t) | not)]}] as $G
+| [$G[] | select(.off | not) | .sec as $sec | .orig[] | select(alive(.)) | {sec: $sec, tag: ., d: delay(.)}] as $live
+| reduce $G[] as $g ({groups: {}, events: [], apply: false, lists: false, due: false};
+    if $g.off then
+      if (($g.added + $g.extra) | length) > 0 then .apply = true else . end
+    elif ([$g.orig[] | select(alive(.))] | length) > 0 then
+      if (($g.added + $g.extra) | length) > 0 or $g.reported then
+        .apply = (.apply or (($g.added + $g.extra) | length) > 0) | .lists = true
+        | .events += [{type: "group_recovered", data: {section: $g.sec, servers: ($g.added + $g.extra)}}]
+      else . end
+    else
+      ($g.dead_since // $now) as $since
+      | (($g.extra | length) > 0 and $g.lease < $now) as $expired
+      | (if $expired then [] else $g.extra end) as $extra
+      | if $now - $since < $g.after then .groups[$g.sec] = {dead_since: $since}
+        elif $wan != true then
+          .due = true
+          | .groups[$g.sec] = {dead_since: $since, reported: $g.reported, added: $g.added, extra: $extra,
+                               lease: $g.lease, hold: $g.hold}
+          | if $expired then .apply = true else . end
+        else
+          (if ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
+           else [$live | sort_by(.d)[] | select(.sec != $g.sec) | .tag | select(. as $t | $g.orig | index($t) | not)]
+                | dedupe | .[:3] end) as $donors
+          | .groups[$g.sec] = {dead_since: $since, reported: true, added: $donors, extra: $extra,
+                               lease: (if $expired then 0 else $g.lease end), hold: $g.hold}
+          | if $donors != $g.added or $expired then .apply = true else . end
+          | if ($donors | length) > 0 and $donors != $g.added then .lists = true else . end
+          | if ($g.reported | not) or $expired then
+              .events += [{type: "group_down", data: {section: $g.sec, servers: $g.orig, borrowed: $donors,
+                                                      down_seconds: ($now - $since)}}]
+            else . end
+        end
+    end)
+| {state: {fingerprint: $fp, groups: .groups}, events, apply, lists, due}'
+
+# heal_plan <sing-box config> <proxies file> <fingerprint> <wan: true|false|null>
+heal_plan() {
+  jq -nc --slurpfile cfg "$1" --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" --arg fp "$3" \
+    --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" "$HEAL_PLAN_JQ"
+}
+
+# heal_filter <in> <out>: sing-box's config with the borrowed servers and the
+# manager's in their groups; a state for other podkop settings changes nothing
+heal_filter() {
+  if [ ! -s "$RUN/heal/state.json" ]; then cp "$1" "$2"; return; fi
+  [ -s "$RUN/heal/extra.json" ] || echo '{}' > "$RUN/heal/extra.json"
+  jq --slurpfile st "$RUN/heal/state.json" --slurpfile ex "$RUN/heal/extra.json" --arg fp "$(config_fp)" '
+    ($st[0] // {}) as $s | ($ex[0] // {}) as $x
+    | if ($s.fingerprint // "") != $fp then . else
+      reduce (($s.groups // {}) | to_entries[]) as $g (.;
+        "\($g.key)-urltest-out" as $ut
+        | ($g.value.extra // []) as $et
+        | [($x[$g.key] // [])[] | select(.tag as $t | $et | index($t))] as $o
+        | if (any(.outbounds[]?; .tag == $ut) | not) then . else
+            [.outbounds[]?.tag] as $have
+            | .outbounds += [$o[] | select(.tag as $t | $have | index($t) | not)]
+            | [.outbounds[]?.tag] as $all
+            | [($g.value.added // [])[], $o[].tag] as $want
+            | (.outbounds[] | select(.tag == $ut) | .outbounds) |= (. as $cur
+                | $cur + [$want[] | select(. as $t | ($all | index($t)) and ($cur | index($t) | not))])
+          end)
+      end' "$1" > "$2"
+}
+
+# heal_wan: the provider's line answers (a lookup straight to an outside DNS
+# server, which podkop does not route), so a dead group is not just a WAN outage
+heal_wan() {
+  _hd=$(ubus call network.interface.wan status 2>/dev/null | jq -r '.["dns-server"][0] // empty')
+  for _hs in $_hd 77.88.8.8 8.8.8.8; do
+    case "$_hs" in ""|*[!0-9.]*) continue ;; esac
+    diagnostic_lookup 4 example.com "$_hs" 2>/dev/null |
+      awk '/^Name:/ { n = 1; next } n && /^Address/ { f = 1 } END { exit !f }' && return 0
+  done
+  return 1
+}
+
+# heal_lists: podkop's last list update failed (its lists come through the
+# proxy): once a group works again, update them now, not at the next hour
+heal_lists() {
+  [ -n "$(find "$RUN/heal/lists.t" -mmin -30 2>/dev/null)" ] && return 0
+  logread 2>/dev/null | awk '/Starting lists update/ { f = 0 } /\[error\] Download .* failed/ { f = 1 } END { exit !f }' || return 0
+  touch "$RUN/heal/lists.t"
+  logger -t podkop-agent "self-heal: podkop's lists failed to download; updating them again"
+  setsid sh -c 'sleep 30; podkop list_update' </dev/null >/dev/null 2>&1 &
+}
+
+# heal_events <plan>
+heal_events() {
+  printf '%s' "$1" | jq -c '.events[]' | while IFS= read -r _he; do
+    event "$(printf '%s' "$_he" | jq -r .type)" "$(printf '%s' "$_he" | jq -c .data)"
+  done
+}
+
+# heal_commit <new state json> <marker>: reload sing-box with it (holds the
+# apply lock); on failure the old state stays, with a hold on new tries
+heal_commit() {
+  exec 9> "$RUN/apply.lock"; flock -n 9 || { exec 9>&-; return 2; }
+  cp "$RUN/heal/state.json" "$RUN/heal/state.old"
+  printf '%s\n' "$1" > "$RUN/heal/state.json"
+  if ! _hwhy=$(hot_apply "$2"); then
+    jq -c --argjson h "$(($(date +%s) + HEAL_HOLD))" '.groups |= map_values(.hold = $h | .added = [] | .extra = [])' \
+      "$RUN/heal/state.json" > "$RUN/heal/state.t" && mv "$RUN/heal/state.t" "$RUN/heal/state.json"
+    rm -f "$RUN/heal/state.old"
+    hot_apply "self-heal undone" >/dev/null 2>&1
+    exec 9>&-
+    event heal_failed "$(jq -nc --arg r "$_hwhy" '{reason: $r}')"
+    return 1
+  fi
+  rm -f "$RUN/heal/state.old"
+  exec 9>&-
+  return 0
+}
+
+# heal_check: one round (the daemon runs it every minute)
+heal_check() {
+  mkdir -p "$RUN/heal"
+  _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
+  [ -s "$_hc" ] || return 0
+  proxies > "$RUN/heal/proxies.json" 2>/dev/null
+  jq -e '.proxies' "$RUN/heal/proxies.json" >/dev/null 2>&1 || return 0
+  _hf=$(config_fp) || return 0
+  [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
+  _hplan=$(heal_plan "$_hc" "$RUN/heal/proxies.json" "$_hf" null) || return 0
+  if [ "$(printf '%s' "$_hplan" | jq -r .due)" = true ]; then
+    if heal_wan; then _hw=true; else _hw=false; fi
+    _hplan=$(heal_plan "$_hc" "$RUN/heal/proxies.json" "$_hf" "$_hw") || return 0
+  fi
+  _hnew=$(printf '%s' "$_hplan" | jq -c .state)
+  if [ "$(printf '%s' "$_hplan" | jq -r .apply)" = true ]; then
+    heal_commit "$_hnew" "self-heal: $(printf '%s' "$_hplan" | jq -r '[.state.groups | to_entries[]
+      | "\(.key) +\((.value.added // []) + (.value.extra // []) | length)"] | join(", ") | if . == "" then "borrowed servers removed" else . end')"
+    case $? in 2) return 0 ;; 1) heal_events "$_hplan"; return 0 ;; esac
+  else
+    printf '%s\n' "$_hnew" > "$RUN/heal/state.json"
+  fi
+  heal_events "$_hplan"
+  [ "$(printf '%s' "$_hplan" | jq -r .lists)" = true ] && heal_lists
+  return 0
+}
+
+# heal_status: for "status" and "heal"
+heal_status() {
+  _hf=$(config_fp 2>/dev/null)
+  jq -nc --argjson off "$(heal_off_json)" --slurpfile st "$RUN/heal/state.json" --arg fp "$_hf" '
+    ($st[0] // {}) as $s
+    | {off: $off, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' 2>/dev/null ||
+    jq -nc --argjson off "$(heal_off_json)" '{off: $off, groups: {}}'
+}
+
+cmd_heal() { reply "$(heal_status)"; }
+
+# heal-off: stdin {"sections": [names, or "*"]}
+cmd_heal_off() {
+  _hr=$(head -c 65536)
+  printf '%s' "$_hr" | jq -e '(.sections | type == "array" and length <= 100)
+    and all(.sections[]; type == "string" and (. == "*" or (length > 0 and (explode | all(. == 95
+      or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)))))) ' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"sections": [section names, or "*"]}'
+  printf '%s' "$_hr" | jq -r '.sections | unique | .[]' > "$RUN/heal-off.t"
+  if [ -s "$RUN/heal-off.t" ]; then
+    cmp -s "$RUN/heal-off.t" "$ETC/heal-off" 2>/dev/null ||
+      { cp "$RUN/heal-off.t" "$ETC/heal-off.t" && mv "$ETC/heal-off.t" "$ETC/heal-off"; } || fail error "could not write $ETC/heal-off"
+  else
+    rm -f "$ETC/heal-off"
+  fi
+  rm -f "$RUN/heal-off.t"
+  event heal_off "$(jq -nc --argjson s "$(heal_off_json)" '{sections: $s}')"
+  reply "$(heal_status)"
+}
+
+# heal-links: stdin {"section", "fingerprint", "links": [up to 5]}: the
+# manager's servers for a down group, built by podkop's parser, in RAM only
+cmd_heal_links() {
+  _hr=$(head -c 65536)
+  printf '%s' "$_hr" | jq -e '(.section | type == "string") and (.fingerprint | type == "string")
+    and (.links | type == "array" and length > 0 and length <= 5 and all(type == "string"))' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"section": ..., "fingerprint": ..., "links": [up to 5]}'
+  _hs=$(printf '%s' "$_hr" | jq -r .section)
+  case "$_hs" in ""|*[!A-Za-z0-9_]*) fail bad_request "section name expected" ;; esac
+  heal_off_json | jq -e --arg s "$_hs" 'index($s) or index("*")' >/dev/null && fail heal_off "self-heal is off for $_hs"
+  _hf=$(config_fp) || fail busy "configuration unavailable"
+  [ "$(printf '%s' "$_hr" | jq -r .fingerprint)" = "$_hf" ] || fail conflict "podkop's settings changed"
+  _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
+  jq -e --arg t "$_hs-urltest-out" 'any(.outbounds[]?; .tag == $t and .type == "urltest")' "$_hc" >/dev/null 2>&1 ||
+    fail not_found "section $_hs has no URLTest group"
+  mkdir -p "$RUN/heal"
+  _hi=0; : > "$RUN/heal/links.t"
+  printf '%s' "$_hr" | jq -r '.links[]' | while IFS= read -r _hl; do
+    _hi=$((_hi + 1))
+    ( set +u; . "$PODKOP_LIB/sing_box_config_facade.sh"
+      log() { :; }
+      sing_box_cf_add_proxy_outbound '{"outbounds":[]}' "$_hs-heal-$_hi" "$_hl" 0 ) 2>/dev/null |
+      jq -c --arg t "$_hs-heal-$_hi-out" '.outbounds[0] | select(type == "object") | .tag = $t' >> "$RUN/heal/links.t" 2>/dev/null
+  done
+  _hn=$(jq -sc '.' "$RUN/heal/links.t"); rm -f "$RUN/heal/links.t"
+  [ "$(printf '%s' "$_hn" | jq length)" -gt 0 ] || fail bad_request "podkop cannot read these links"
+  [ -s "$RUN/heal/extra.json" ] || echo '{}' > "$RUN/heal/extra.json"
+  jq -c --arg s "$_hs" --argjson o "$_hn" '.[$s] = $o' "$RUN/heal/extra.json" > "$RUN/heal/extra.t" &&
+    mv "$RUN/heal/extra.t" "$RUN/heal/extra.json"
+  [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
+  _hnew=$(jq -c --arg fp "$_hf" --arg s "$_hs" --argjson o "$_hn" --argjson now "$(date +%s)" --argjson l "$HEAL_LEASE" '
+    (if (.fingerprint // "") == $fp then . else {fingerprint: $fp, groups: {}} end)
+    | .groups[$s] = ((.groups[$s] // {dead_since: $now}) + {reported: true, extra: [$o[].tag], lease: ($now + $l), hold: 0})' \
+    "$RUN/heal/state.json")
+  heal_commit "$_hnew" "self-heal: $_hs +$(printf '%s' "$_hn" | jq length) from the manager"
+  case $? in
+    2) fail busy "an apply is in progress" ;;
+    1) fail recovery_failed "sing-box did not take the servers" ;;
+  esac
+  event heal_links "$(jq -nc --arg s "$_hs" --argjson o "$_hn" '{section: $s, servers: [$o[].tag]}')"
+  reply "$(heal_status)"
+}
 # end of podkop reliability

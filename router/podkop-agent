@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.8.3"
+AGENT_VERSION="0.9.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,8 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    printf '["diagnostics","eligibility"]'
-  else printf '[]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve"]'
+    else printf '["diagnostics","eligibility","resolve"]'; fi
+  else printf '["resolve"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -360,6 +361,11 @@ hot_apply() {
   if ! podkop_build "$_hb" || [ -s "$_hb.err" ] || ! jq -e '.outbounds' "$_hb" >/dev/null 2>&1; then
     echo "podkop could not build the config: $(head -n 1 "$_hb.err" 2>/dev/null)"; rm -f "$_hb" "$_hb.err"; return 1
   fi
+  if command -v heal_filter >/dev/null 2>&1; then
+    if ! { heal_filter "$_hb" "$_hb.s" && mv "$_hb.s" "$_hb"; }; then
+      rm -f "$_hb" "$_hb.s" "$_hb.err"; echo "invalid self-heal state"; return 1
+    fi
+  fi
   if ! { jq "$HEALTH_JQ" "$_hb" > "$_hb.i" && mv "$_hb.i" "$_hb"; }; then
     rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
   fi
@@ -417,7 +423,11 @@ health_on() {
   _ip=$(singbox_pid)
   if [ -z "$_ic" ] || [ ! -f "$_ic" ] || [ -z "$_ip" ]; then return 0; fi
   [ "$(cat "$RUN/health.failed" 2>/dev/null)" = "$_ip" ] && return 0
-  jq "$HEALTH_JQ" "$_ic" > "$RUN/health.json" 2>/dev/null || { rm -f "$RUN/health.json"; return 0; }
+  if command -v heal_filter >/dev/null 2>&1; then
+    heal_filter "$_ic" "$RUN/health.in" 2>/dev/null || cp "$_ic" "$RUN/health.in"
+  else cp "$_ic" "$RUN/health.in"; fi
+  jq "$HEALTH_JQ" "$RUN/health.in" > "$RUN/health.json" 2>/dev/null || { rm -f "$RUN/health.json" "$RUN/health.in"; return 0; }
+  rm -f "$RUN/health.in"
   if command -v reliability_filter >/dev/null 2>&1; then
     reliability_filter "$RUN/health.json" "$RUN/health.filtered" && mv "$RUN/health.filtered" "$RUN/health.json" || return 0
   fi
@@ -726,7 +736,7 @@ daemon() {
   mkdir -p "$RUN/jobs" "$ETC"
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
   undo_interrupted
-  _last=""; _down=0
+  _last=""; _down=0; _heal=0
   while :; do
     sleep 15
     [ -n "$(singbox_pid)" ] && traffic_poll
@@ -739,6 +749,9 @@ daemon() {
     _pid=$(singbox_pid)
     if [ -n "$_pid" ]; then
       if command -v reliability_expire >/dev/null 2>&1; then reliability_expire; fi
+      # dead groups, once a minute
+      _heal=$(( (_heal + 1) % 4 ))
+      if [ "$_heal" = 0 ] && command -v heal_check >/dev/null 2>&1; then heal_check; fi
       [ "$_down" -ge 2 ] && event podkop_up
       _down=0
       # tried every round until the Clash API answers and the pins are back;
@@ -784,13 +797,14 @@ cmd_status() {
     --arg fs "$(tail -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" --arg fst "$(head -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" \
     --arg pb "$([ -x "$PROBE" ] && sed -n 's/^VERSION="\(.*\)"/\1/p' "$PROBE")" \
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" --arg eng "$(sing-box version 2>/dev/null | grep -q 'tools.decode-link' && echo 1)" \
+    --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $model, openwrt: $os, utc_offset: $tz},
       podkop: {version: $pk, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
       singbox: {version: $sb, features: ($feat | split(",") | map(select(. != "")))},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $pb, cron: $pcron},
-      engine: ($eng == "1"),
+      engine: ($eng == "1"), heal: $heal,
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')"
 }
 
@@ -1199,6 +1213,27 @@ cmd_probe_status() {
       lists: {main: $main, main_fallback: $mainfb, youtube: $yt, youtube_fallback: $ytfb}}')"
 }
 
+# resolve_host <name>: its IPv4 address from outside DNS servers (the router's
+# own DNS may give podkop's fake 198.18.x addresses)
+resolve_host() {
+  case "$1" in *[!0-9.]*) ;; *) echo "$1"; return ;; esac
+  for _ns in 77.88.8.8 8.8.8.8; do
+    _a=$(nslookup "$1" "$_ns" 2>/dev/null | awk '/^Name:/ { n = 1; next } n && /^Address/ { sub(/^Address[^:]*: */, ""); sub(/ .*/, ""); if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print; exit } }')
+    case "$_a" in ""|198.18.*|198.19.*) ;; *) echo "$_a"; return ;; esac
+  done
+}
+
+# resolve: stdin {"hosts": [names]} -> {name: IPv4}, for the servers' networks
+cmd_resolve() {
+  _rq=$(head -c 65536)
+  printf '%s' "$_rq" | jq -e '.hosts | type == "array" and length <= 400 and all(type == "string")' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"hosts": [...]}'
+  reply "$(printf '%s' "$_rq" | jq -r '.hosts | unique | .[]' | while IFS= read -r _h; do
+      case "$_h" in ""|*[!A-Za-z0-9.-]*) continue ;; esac
+      _a=$(resolve_host "$_h"); [ -n "$_a" ] && printf '%s\t%s\n' "$_h" "$_a"
+    done | jq -Rsc 'split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: .[1]}) | from_entries')"
+}
+
 # --- dispatch -----------------------------------------------------------------------
 
 mkdir -p "$RUN/jobs" "$ETC" 2>/dev/null
@@ -1220,6 +1255,10 @@ _cmd=${1:-help}; [ $# -gt 0 ] && shift
 case "$_cmd" in
   diagnostics)   command -v cmd_diagnostics >/dev/null || fail unsupported "reinstall agent for diagnostics"; cmd_diagnostics ;;
   eligibility)   command -v cmd_eligibility >/dev/null || fail unsupported "reinstall agent for eligibility"; cmd_eligibility ;;
+  heal)          command -v cmd_heal >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal ;;
+  heal-off)      command -v cmd_heal_off >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_off ;;
+  heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
+  resolve)       cmd_resolve ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
   validate)      cmd_validate ;;
@@ -1254,7 +1293,7 @@ case "$_cmd" in
       _run-probe) run_probe ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

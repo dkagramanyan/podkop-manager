@@ -62,5 +62,5 @@ jobs:
             exit 1
           fi
           echo "$build/bin" >> "$GITHUB_PATH"
-      - name: Test router diagnostics, recovery and upgrades
-        run: python -m pytest -q tests/test_reliability.py tests/test_agent_upgrade.py
+      - name: Test router diagnostics, recovery, self-heal and upgrades
+        run: python -m pytest -q tests/test_reliability.py tests/test_agent_upgrade.py tests/test_heal.py

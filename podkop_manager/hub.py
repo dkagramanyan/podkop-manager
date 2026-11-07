@@ -28,7 +28,7 @@ log = logging.getLogger("podkop_manager")
 FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "failed"}
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
-ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted")
+ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down")
 POLL_SECONDS = 30
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
@@ -38,6 +38,9 @@ USAGE_SECONDS = 600      # the providers' numbers, read through the router
 # sh and tools first (as on a router), then podkop-engine-full's sing-box
 PROBE_PATH = os.environ.get("PODKOP_MANAGER_PROBE_PATH") or os.environ.get("PATH", "")
 PROBE_SECONDS = 3 * 3600
+HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in this time
+HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
+STALE_PICKS = 86400          # a loaded config takes the last probe's servers only if it is this recent
 # podkop-engine-full's sing-box (static, with the SSH outbound) for probes run
 # here: downloaded once, when asked for, into the data folder (bin/)
 ENGINE_VERSION = "1.13.21-r14"
@@ -312,6 +315,10 @@ class Hub:
         self.db.add_event(rt.id, typ, dict(data, agent_time=m.get("t")))
         if typ in ALERT_EVENTS:
             rt.alert = {"type": typ, "t": time.time()}
+        if typ == "group_down":
+            self._background(rt, self.heal(rt, data))
+        elif typ == "group_recovered" and (rt.alert or {}).get("type") == "group_down":
+            rt.alert = None
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])
         self.publish({"type": "event", "router_id": rt.id, "event": typ, "data": data, "t": m.get("t")})
@@ -462,6 +469,14 @@ class Hub:
         self._follow_job(rt, vid, job)
         return {"version": vid, "job": job}
 
+    def _background(self, rt: RouterRuntime, coro) -> None:
+        """A task of the router's, stopped with it."""
+        task = asyncio.create_task(coro)
+        self.jobs.add(task)
+        task.add_done_callback(self.jobs.discard)
+        rt.tasks.append(task)
+        task.add_done_callback(lambda t: t in rt.tasks and rt.tasks.remove(t))
+
     def _follow_job(self, rt: RouterRuntime, vid: int, job: str) -> None:
         task = asyncio.create_task(self._track_job(rt, vid, job))
         self.jobs.add(task)
@@ -575,14 +590,18 @@ class Hub:
         vid = None
         ps = self.db.probe_settings(rt.id)
         if state == "done":
+            await self._entry_ips(rt, st)
             for section, pick in self.auto_picks(rt.id, st).items():
                 if not pick["links"]:
                     self._event(rt, "auto_rule_empty", {"section": section})
-        if state == "done" and trigger == "schedule" and ps.get("auto_apply"):
+        if state == "done" and (trigger == "heal" or (trigger == "schedule" and ps.get("auto_apply"))):
             try:
-                vid = await self.apply_probe(rt.id, st, note="nightly probe")
+                vid = await self.apply_probe(rt.id, st, note="self-heal probe" if trigger == "heal" else "nightly probe")
             except (AgentError, ValueError) as e:
                 self._event(rt, "probe_apply_failed", {"message": str(e)})
+        elif state != "done" and trigger == "heal":
+            last = next((x for x in reversed(st.get("log") or []) if x.strip()), "")
+            self._event(rt, "heal_probe_failed", {"message": last[:300] or "the probe failed"})
         self.db.finish_probe_run(run_id, state, st, vid)
         self.publish({"type": "probe", "router_id": rt.id, "state": state, "run": run_id})
 
@@ -893,7 +912,7 @@ class Hub:
     def load_config(self, rid: int, saved: dict) -> dict:
         """A saved config as the router's new draft: its rules that take
         servers from the probe replace the router's for those sections, and
-        get the last probe's servers right away."""
+        get the last probe's servers right away (when it is less than a day old)."""
         config = saved["config"]
         self.keep_rules(rid)
         for s in config["sections"]:
@@ -903,10 +922,14 @@ class Hub:
                 self.db.set_auto_rule(rid, s["name"], saved["rules"][s["name"]])
             else:
                 self.db.delete_auto_rule(rid, s["name"])
-        if saved["rules"] and (last := self.db.last_probe_result(rid)):
-            with contextlib.suppress(ValueError):
-                config = self.probe_config(rid, {"config": config}, last)
         rt = self.get(rid)
+        if saved["rules"] and (last := self.db.last_probe_result(rid)):
+            if time.time() - self.db.last_probe_finished(rid) <= STALE_PICKS:
+                with contextlib.suppress(ValueError):
+                    config = self.probe_config(rid, {"config": config}, last)
+            else:
+                self._event(rt, "stale_probe_not_used", {"message": "the last probe is older than a day: the file's "
+                                                         "servers are kept; run the probe to pick new ones"})
         self.db.set_draft(rid, config, (rt.status or {}).get("fingerprint") or "")
         self.update_draft(rt)
         self.publish({"type": "router", "router": rt.snapshot()})
@@ -999,6 +1022,74 @@ class Hub:
         if not any(p["links"] for p in picks.values()):
             raise ValueError("the probe found no server for any rule")
         return podkop.merge_probe(cur["config"], picks)
+
+    # --- self-heal: a URLTest group whose servers all fail -------------------------------------
+    async def _entry_ips(self, rt: RouterRuntime, st: dict) -> None:
+        """Each probe row's server IP (resolved on the router, where podkop's
+        fake DNS answers are skipped), for picks spread across networks."""
+        rows = st.get("rows") or []
+        hosts = {podkop.link_host(r.get("link") or "") for r in rows if not r.get("entry_ip")} - {""}
+        ips = {h: h for h in hosts if podkop.entry_net(h)}
+        todo = sorted(hosts - set(ips))
+        if todo:
+            with contextlib.suppress(AgentError):        # an older agent: picks as before
+                got = await rt.agent.call("resolve", payload={"hosts": todo[:400]}, timeout=300)
+                if isinstance(got, dict):
+                    ips.update({h: ip for h, ip in got.items() if isinstance(ip, str)})
+        for r in rows:
+            if not r.get("entry_ip") and (ip := ips.get(podkop.link_host(r.get("link") or ""))):
+                r["entry_ip"] = ip
+
+    def heal_links(self, rid: int, section: str, current: dict | None) -> list:
+        """Servers the section had in earlier applied versions and has not now,
+        newest first: the router's last configs that worked."""
+        def links(cfg: dict) -> list:
+            o = podkop.sections_by_name(cfg).get(section, {}).get("options", {})
+            out = []
+            for k in ("urltest_proxy_links", "urltest_fallback_links"):
+                v = o.get(k) or []
+                out += v if isinstance(v, list) else [v]
+            return out
+        avoided = self._avoided_links(rid)
+        have = {x.split("#", 1)[0] for x in links(current or {"sections": []})}
+        out: list = []
+        for cfg in self.db.applied_configs(rid):
+            for link in links(cfg):
+                ident = link.split("#", 1)[0]
+                if ident not in have and usage.norm(link) not in avoided:
+                    have.add(ident)
+                    out.append(link)
+                if len(out) >= HEAL_LINKS:
+                    return out
+        return out
+
+    async def heal(self, rt: RouterRuntime, data: dict) -> None:
+        """A group is down on the router (it borrowed what it could from other
+        groups already): lend it the servers of earlier versions when it found
+        none, and run the probe, whose servers are applied when it is done."""
+        section = str(data.get("section") or "")
+        if not section:
+            return
+        if not data.get("borrowed"):
+            try:
+                cfg = await self.config(rt.id)
+                if links := self.heal_links(rt.id, section, cfg["config"]):
+                    await rt.agent.call("heal-links", payload={
+                        "section": section, "fingerprint": cfg["fingerprint"], "links": links}, timeout=120)
+            except AgentError as e:
+                self._event(rt, "heal_links_failed", {"section": section, "message": e.message})
+        if not self.db.auto_rule(rt.id, section):
+            self._event(rt, "heal_no_probe", {"section": section, "message": "no rule takes this section's servers from the probe"})
+            return
+        if rt.id in self.probes and not self.probes[rt.id].done():
+            return
+        if time.time() - (self.db.get_setting(f"heal_probe:{rt.id}") or 0) < HEAL_PROBE_SECONDS:
+            return
+        self.db.set_setting(f"heal_probe:{rt.id}", time.time())
+        try:
+            await self.start_probe(rt.id, "heal")
+        except AgentError as e:
+            self._event(rt, "heal_probe_failed", {"section": section, "message": e.message})
 
     async def apply_probe(self, rid: int, status: dict, note: str) -> int:
         cur = await self.config(rid)
