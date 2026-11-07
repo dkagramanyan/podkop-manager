@@ -223,6 +223,7 @@ function routerState(rt) {
 
 // a change undone on the router in the last day
 const recentAlert = (rt) => (rt.alert && Date.now() / 1000 - rt.alert.t < 86400 ? rt.alert : null);
+const alertText = (a) => (a.type === "group_down" ? `a rule's servers stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
 const draftChanges = (rt) => (rt.draft && rt.draft.changes) || 0;
 
 // "running, 4 changes not applied" and its color, for the router list
@@ -233,7 +234,7 @@ function routerLine(rt) {
     return { cls: "bad", text: `offline${since}${rt.error ? ", " + rt.error : ""}` };
   }
   const a = recentAlert(rt);
-  if (a) return { cls: "warn", text: `${st.label}, a change was undone ${ago(a.t)}` };
+  if (a) return { cls: "warn", text: `${st.label}, ${alertText(a)}` };
   const n = draftChanges(rt);
   return { cls: "", text: n ? `${st.label}, ${plural(n, "change")} not applied` : st.label };
 }
@@ -354,7 +355,7 @@ function switcher(rt) {
   const alerts = others.map((x) => {
     if (!x.online) return { x, text: `${x.name} is offline` };
     const a = recentAlert(x);
-    return a ? { x, text: `${x.name}: a change was undone ${ago(a.t)}` } : null;
+    return a ? { x, text: `${x.name}: ${alertText(a)}` } : null;
   }).filter(Boolean);
   const btn = h("button", { type: "button", class: "switcher", "aria-expanded": String(switchOpen), "aria-controls": "router-list",
     onclick: (e) => { e.stopPropagation(); switchOpen = !switchOpen; drawSide(); } },
@@ -568,11 +569,22 @@ const EVENT_TEXT = {
   keys_sync_failed: (d) => `A provider's new servers were not applied: ${d.message}`,
   usage_threshold: (d) => `${d.key} used ${Math.round(d.pct)}% of today's traffic${d.action === "avoid" ? ", rules move to other keys" : ""}`,
   usage_move_failed: (d) => `Rules not moved for the traffic limit: ${d.message}`,
+  group_down: (d) => `${d.section}: none of its servers answers${(d.borrowed || []).length ? `, borrowed ${plural(d.borrowed.length, "working server")} of other rules` : ", nothing to borrow"}`,
+  group_recovered: (d) => `${d.section}: its own servers answer again${(d.servers || []).length ? ", borrowed servers removed" : ""}`,
+  heal_links: (d) => `${d.section}: got ${plural((d.servers || []).length, "server")} of earlier versions while it is down`,
+  heal_links_failed: (d) => `${d.section}: servers of earlier versions not lent: ${d.message}`,
+  heal_failed: (d) => `Self-heal could not reload sing-box: ${d.reason}`,
+  heal_probe_failed: (d) => `Self-heal probe failed: ${d.message}`,
+  heal_no_probe: (d) => `${d.section}: ${d.message}, so self-heal can't find new servers`,
+  heal_off: (d) => ((d.sections || []).includes("*") ? "Self-heal switched off" : (d.sections || []).length ? `Self-heal off for ${d.sections.join(", ")}` : "Self-heal on for every rule"),
+  stale_probe_not_used: (d) => d.message,
 };
 const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
   recovery_gave_up: "bad", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
+  group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
+  heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
 };
 
@@ -984,6 +996,7 @@ async function viewReliability(main, id) {
   let dirty = false, checking = false, saving = false, settingsForm;
   let enabled, automatic, interval, cooldown, save, reset, settingsNote;
   let query = "", source = "all", kind = "all";
+  let heal = null, healDraft = null, healSaving = false;
   const opened = new Set();
   const endpoint = `/api/routers/${id}/reliability`;
   const table = (headers, rows) => h("div", { class: "scroll-x" }, h("table", {},
@@ -1001,9 +1014,10 @@ async function viewReliability(main, id) {
     extra ? h("span", { class: "small muted" }, extra) : null), h("div", { class: "health-detail-body stack" }, body));
   const load = async () => {
     const token = ++request;
-    const next = await api("GET", `${endpoint}?hours=${hours}`);
+    const [next, nextHeal] = await Promise.all([api("GET", `${endpoint}?hours=${hours}`),
+      api("GET", `/api/routers/${id}/heal`).catch(() => null)]);
     if (left || token !== request) return;
-    data = next; draw();
+    data = next; heal = nextHeal; draw();
   };
   const markDirty = () => { dirty = true; syncSettings(); };
   const syncSettings = () => {
@@ -1084,6 +1098,52 @@ async function viewReliability(main, id) {
     badge(r.exit === 0 && r.code >= 200 && r.code < 400 ? "up" : r.exit === 0 ? "degraded" : "down",
       r.exit === 0 ? `HTTP ${r.code}` : `Request failed (curl ${r.exit})`),
     Number.isFinite(r.seconds) ? `${Math.round(r.seconds * 1000)} ms` : "–", r.bytes == null ? "–" : `${(r.bytes / 1024).toFixed(1)} KiB / 64 KiB`]));
+  // Self-heal: a URLTest group whose own servers all fail borrows working
+  // servers on the router and the probe runs; sections switched off are left alone.
+  const healCard = () => {
+    if (!heal) return null;
+    if (!heal.supported) return h("section", { class: "card pad stack" }, h("h2", {}, "Self-heal"),
+      h("p", { class: "small muted" }, "Needs podkop-agent 0.9.0 or newer on the router."),
+      h("div", { class: "row" }, h("button", { class: "btn", onclick: () => updateAgent(id, load) }, "Update agent")));
+    const off = healDraft || new Set(heal.off);
+    const allOff = off.has("*");
+    const toggle = (name, on) => {
+      healDraft = new Set(off);
+      if (name === "*") { if (on) healDraft.delete("*"); else healDraft.add("*"); }
+      else if (on) healDraft.delete(name); else healDraft.add(name);
+      draw();
+    };
+    const status = name => {
+      const g = heal.groups[name];
+      if (!g) return h("span", { class: "pill ok" }, "Working");
+      const n = (g.added || []).length + (g.extra || []).length;
+      if (!g.reported) return h("span", { class: "pill warn" }, `No server answers since ${longWhen(g.dead_since)}`);
+      return h("div", { class: "col" }, h("span", { class: "pill bad" }, `Down since ${longWhen(g.dead_since)}`),
+        h("span", { class: "small muted" }, n ? `Using ${n} borrowed server${n > 1 ? "s" : ""} until its own work again`
+          : "Nothing to borrow; the probe looks for new servers"));
+    };
+    const save = async () => {
+      healSaving = true; draw();
+      try {
+        await api("PUT", `/api/routers/${id}/heal`, { off: [...healDraft] });
+        healDraft = null; toast("Self-heal settings saved"); await load();
+      } catch (err) { toast(err.message, true); }
+      finally { healSaving = false; if (!left) draw(); }
+    };
+    return h("section", { class: "card pad stack", "aria-label": "Self-heal" },
+      h("div", { class: "col" }, h("h2", {}, "Self-heal"),
+        h("p", { class: "small muted" }, "When none of a rule's own servers has answered for two test rounds (at least 6 minutes) and the router's line works, the router lends it up to 3 working servers of other rules at once, in memory only. The manager adds servers from earlier versions if there are none to lend, and runs the probe; its servers are applied when it finishes. Borrowed servers go away when the rule's own servers answer again or its settings change. Rules switched off here are never changed and never lend their servers.")),
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff, disabled: healSaving,
+        onchange: e => toggle("*", e.target.checked) }), "Self-heal on this router"),
+      heal.sections.length ? table(["Rule", "Self-heal", "Now"], heal.sections.map(name => [h("b", {}, name),
+        h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff && !off.has(name), disabled: allOff || healSaving,
+          onchange: e => toggle(name, e.target.checked) }), allOff || off.has(name) ? "Off" : "On"),
+        allOff || off.has(name) ? h("span", { class: "muted small" }, "Left alone") : status(name)]))
+        : h("p", { class: "empty" }, "No URLTest rules on this router."),
+      healDraft ? h("div", { class: "row" },
+        h("button", { class: "btn primary", disabled: healSaving, onclick: save }, healSaving ? "Saving…" : "Save"),
+        h("button", { class: "btn", disabled: healSaving, onclick: () => { healDraft = null; draw(); } }, "Discard changes")) : null);
+  };
   const runCheck = async () => {
     checking = true; draw();
     try { await api("POST", `${endpoint}/check`, {}); await load(); }
@@ -1191,7 +1251,7 @@ async function viewReliability(main, id) {
               h("div", { class: "col" }, labels[o.data.kind] || o.data.kind, o.data.scope), h("span", { class: "health-message" }, o.data.message)]))
               : h("p", { class: "empty" }, "No observations in this window.")], String(data.observations.length))));
     drawActivity();
-    put(page, content,
+    put(page, content, healCard(),
       h("section", { class: "card pad stack" }, disclose("settings", "Monitoring and recovery settings", settingsForm)),
       h("section", { class: "card pad stack" }, disclose("kuma", "Uptime Kuma integration", [
         h("p", {}, "Use a Kuma Webhook notification with its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),
@@ -3292,7 +3352,7 @@ function connect() {
       v.onRouter && v.onRouter(m.router);
     } else if (m.type === "event") {
       v.onEvent && v.onEvent(m);
-      if (["reverted", "revert_failed", "apply_interrupted", "podkop_down", "recovery_failed"].includes(m.event)) {
+      if (["reverted", "revert_failed", "apply_interrupted", "podkop_down", "recovery_failed", "group_down"].includes(m.event)) {
         toast(`${(S.routers[m.router_id] || {}).name}: ${eventText(m.event, m.data)}`, true);
       }
     } else if (m.type === "log") v.onLog && v.onLog(m);

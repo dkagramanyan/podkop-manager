@@ -12,7 +12,7 @@
 #
 # https://github.com/dkagramanyan/podkop-manager
 
-VERSION="1.32.0"
+VERSION="1.33.0"
 REPO_URL="https://github.com/dkagramanyan/podkop-manager"
 RELEASE_URL="$REPO_URL/releases/latest/download/probe.sh"
 BIN=/usr/bin/podkop-probe            # installed copy, used by the nightly run
@@ -1731,7 +1731,17 @@ fi
 VIA_PX=""; [ -n "$VIA" ] && [ -n "$SB_PID" ] && VIA_PX="socks5h://127.0.0.1:$(cat "$WORK/via.port")"
 set -- $(exit_ip "$VIA_PX")
 DIRECT_IP=${1:-none}; DIRECT_CC=${2:--}
-[ -n "$VIA_PX" ] && [ "$DIRECT_IP" = none ] && die "no connection through $VIA (SSH): $(grep -v '^[[:space:]]*$' "$WORK/sb.log" 2>/dev/null | tail -n 1 | cut -c 1-300)"
+# The IP-check sites can be routed by the router's podkop into a group that is
+# down (the very group this run should fix): then only a dead tunnel stops the
+# run. 77.88.8.8 (Yandex DNS) is never sent to a proxy, so an answer from it
+# through the tunnel means the tunnel works.
+if [ -n "$VIA_PX" ] && [ "$DIRECT_IP" = none ]; then
+  _vc=$(_px=$VIA_PX; pcurl -sk -o /dev/null --max-time 8 -w '%{http_code}' https://77.88.8.8/ 2>/dev/null)
+  case "${_vc:-000}" in
+    000) die "no connection through $VIA (SSH): $(grep -v '^[[:space:]]*$' "$WORK/sb.log" 2>/dev/null | tail -n 1 | cut -c 1-300)" ;;
+  esac
+  warn "the router's own IP is unknown (ipinfo.io and api.ipify.org did not answer through $VIA; podkop may route them into a group that is down); testing anyway"
+fi
 : > "$WORK/lat.done"
 
 PROG=0; [ -t 1 ] && [ "$VERBOSE" != 1 ] && PROG=1

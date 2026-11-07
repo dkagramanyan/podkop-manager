@@ -358,6 +358,33 @@ def link_protocol(link: str) -> str:
     return {"hy2": "hysteria2", "shadowsocks": "ss", "socks5": "socks", "socks4": "socks"}.get(p, p)
 
 
+_HOST_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+
+
+def link_host(link: str) -> str:
+    """The server's host name or IP address in a link ("" when it can't be read)."""
+    rest = link.split("://", 1)[-1].split("#", 1)[0]
+    if "@" not in rest:
+        return ""
+    hostport = rest.rsplit("@", 1)[1].split("?", 1)[0].split("/", 1)[0]
+    if hostport.startswith("["):
+        return hostport[1:].split("]", 1)[0].lower()
+    host = hostport.rsplit(":", 1)[0] if ":" in hostport else hostport
+    return host.lower() if _HOST_RE.match(host) else ""
+
+
+NET_CAP = 2     # servers of one rule from the same /24 network, unless nothing else is as good
+
+
+def entry_net(ip: str | None) -> str | None:
+    """The /24 network of a server's IPv4 address (None: unknown)."""
+    try:
+        addr = ipaddress.ip_address(ip or "")
+    except ValueError:
+        return None
+    return str(ipaddress.ip_network(f"{addr}/24", strict=False)) if addr.version == 4 else None
+
+
 def _ip_in(ip: str, nets: list) -> bool:
     try:
         addr = ipaddress.ip_address(ip)
@@ -479,7 +506,7 @@ def auto_pick(rows: list, rule: dict) -> dict:
                 why = _youtube_why(r, rule["youtube"])
         item = {"name": name, "link": link, "protocol": link_protocol(link), "exit_ip": r.get("exit_ip"),
                 "country": r.get("country"), "median": r.get("median"), "mbit": r.get("mbit"), "verdict": r.get("verdict"),
-                "key": r.get("key")}
+                "key": r.get("key"), "entry_ip": r.get("entry_ip")}
         item.update(p90=r.get("p90"), health=r.get("health") or {})
         if item["health"].get("quarantined"):
             why = "temporarily excluded after confirmed connection failures"
@@ -493,11 +520,22 @@ def auto_pick(rows: list, rule: dict) -> dict:
     # Unknown provenance is one bucket, never a different provider per node.
     # Keep counts across the primary/fallback boundary to favour an unused key
     # for fallback. Never promote a flaky node over a healthy node for diversity.
-    ordered, counts, seen = [], {}, set()
+    # Networks: at most NET_CAP servers from one /24 while a healthy (GOOD or
+    # OK) server elsewhere is left, so one blocked range can't take the whole
+    # rule down; servers whose network is unknown are not limited.
+    rank_of = {"GOOD": 0, "OK": 1, "FLAKY": 2}
+    healthy = {"GOOD": 0, "OK": 0, "FLAKY": 1}
+    ordered, counts, nets, seen = [], {}, {}, set()
     while picked:
-        tier = picked[0]["verdict"]
-        candidates = [i for i, x in enumerate(picked) if x["verdict"] == tier]
-        i = min(candidates, key=lambda i: counts.get(picked[i]["key"], 0))
+        tier = healthy.get(picked[0]["verdict"], 2)
+        candidates = [i for i, x in enumerate(picked) if healthy.get(x["verdict"], 2) == tier]
+
+        def order(i):
+            x = picked[i]
+            net = entry_net(x.get("entry_ip"))
+            return (net is not None and nets.get(net, 0) >= NET_CAP, rank_of.get(x["verdict"], 3),
+                    counts.get(x["key"], 0), i)
+        i = min(candidates, key=order)
         item = picked.pop(i)
         identity = item["link"].split("#", 1)[0]
         if identity in seen:
@@ -505,9 +543,11 @@ def auto_pick(rows: list, rule: dict) -> dict:
         seen.add(identity)
         ordered.append(item)
         counts[item["key"]] = counts.get(item["key"], 0) + 1
+        if (net := entry_net(item.get("entry_ip"))) is not None:
+            nets[net] = nets.get(net, 0) + 1
     picked = ordered
     keep, fb = picked[:rule["top"]], picked[rule["top"]:rule["top"] + rule["fallback"]]
-    left += [dict(x, reason=f"outside the {rule['top'] + rule['fallback']} picks by reliability, key diversity and latency")
+    left += [dict(x, reason=f"outside the {rule['top'] + rule['fallback']} picks by reliability, key and network diversity and latency")
              for x in picked[rule["top"] + rule["fallback"]:]]
     return {"matched": keep, "fallback_rows": fb, "left_out": left, "youtube": bool(rule["youtube"]),
             "links": [x["link"] for x in keep], "fallback": [x["link"] for x in fb]}

@@ -381,6 +381,28 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             db.set_setting(f"server_health:{rid}", health)
         return opts
 
+    @app.get("/api/routers/{rid}/heal", dependencies=[api])
+    async def heal_state(rid: int):
+        """Self-heal of dead URLTest groups: the router's sections, which are
+        left alone, and the groups being healed now."""
+        rt = router_or_404(rid)
+        heal = (rt.status or {}).get("heal")
+        cfg = (rt.config or {}).get("config") or {"sections": []}
+        sections = [s["name"] for s in cfg["sections"]
+                    if s.get("type") == "section" and s.get("options", {}).get("proxy_config_type") == "urltest"]
+        return {"supported": heal is not None, "sections": sections,
+                "off": (heal or {}).get("off", []), "groups": (heal or {}).get("groups", {})}
+
+    @app.put("/api/routers/{rid}/heal", dependencies=[api])
+    async def heal_settings(rid: int, body: dict):
+        rt = router_or_404(rid)
+        off = body.get("off")
+        if not isinstance(off, list) or not all(isinstance(x, str) for x in off):
+            raise HTTPException(400, "off must be a list of section names")
+        out = await rt.agent.call("heal-off", payload={"sections": off}, timeout=30)
+        await hub.refresh(rt)
+        return out
+
     @app.post("/api/routers/{rid}/reliability/check", dependencies=[api])
     async def check_connections(rid: int):
         rt = router_or_404(rid)

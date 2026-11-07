@@ -43,10 +43,11 @@ Use agent 0.8.2 or newer on routers without a `timeout` command: DNS checks
 enforce their own six-second limit and do not require extra packages.
 Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
+Self-heal (below) needs agent 0.9.0 or newer.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.32.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.32.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.33.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.33.0
 ```
 
 ## Add a router
@@ -78,6 +79,19 @@ that already runs there are taken into **Keys and usage** and the rules.
 - **Nightly probe** (time, apply by itself, TLS fingerprint, where servers
   are tested): in every rule that takes links from the probe, under its
   parameters. It is one run for all those rules, so the settings are shared.
+- **Self-heal** (on by default, **Connection health → Self-heal**): when none
+  of a URLTest rule's own servers has answered for two test rounds (at least
+  6 minutes) while the router's line works, the router lends it up to 3
+  working servers of other rules at once, in memory only. If there is
+  nothing to lend, the manager adds servers the rule had in earlier applied
+  versions. The manager then runs the probe and applies its servers. Borrowed
+  servers go away when the rule's own servers answer again or its settings
+  change, and podkop's lists are downloaded again if they failed while the
+  rule was down. Rules switched off there (e.g. one that must keep its own
+  exit country) are never changed and never lend servers.
+- The probe spreads a rule's servers across networks: at most 2 from the
+  same /24 while a healthy server elsewhere is left, so one blocked address
+  range can't take a whole rule down.
 - **Test servers on this server, through the router** (a rule's Nightly
   probe): the router only reads the keys and builds the servers with
   podkop's own parser; the manager's container tests them, and every test

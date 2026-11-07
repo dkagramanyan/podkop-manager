@@ -3,6 +3,28 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.33.0 — 2026-11-07
+
+- Self-heal, on by default. Agent 0.9.0 reports a URLTest group whose own
+  servers have all failed for two test rounds (at least 6 minutes) while the
+  WAN answers, and lends it up to 3 working servers of other groups at once,
+  in sing-box's config in RAM only. Manager 0.21.0 then lends servers the
+  section had in earlier applied versions (when there was nothing to borrow),
+  runs the probe (at most once per 30 minutes) and applies its result.
+  Borrowed servers are removed when the group's own servers answer again or
+  podkop's settings change; podkop's lists are downloaded again if their last
+  update failed. Sections switched off in Connection health → Self-heal are
+  never changed and never lend servers.
+- The probe through the router no longer stops when ipinfo.io and
+  api.ipify.org don't answer (podkop may route them into the group that is
+  down); only a dead SSH tunnel stops it.
+- Probe picks spread across networks: at most 2 servers of a rule from one
+  /24 while a healthy server elsewhere is left. Server addresses are resolved
+  on the router (agent `resolve`).
+- Loading a saved config no longer puts in the servers of a probe run older
+  than a day; the file's servers are kept and an event says so.
+- The web interface has a browser tab icon.
+
 ## 1.32.0 — 2026-11-04
 
 - Manager 0.20.0 redesigns Connection health around current status, freshness
