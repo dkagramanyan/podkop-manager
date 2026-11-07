@@ -697,9 +697,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if not re.fullmatch(r"[A-Za-z0-9_]+", section):
             raise HTTPException(400, "rule names are letters, digits and _")
         ids = body.get("keys")
-        subs = {k["id"] for k in db.keys(rid) if k["kind"] == "sub"}
-        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i in subs for i in ids):
-            raise HTTPException(400, "keys are ids of this router's subscriptions")
+        known = {k["id"] for k in db.keys(rid)}       # a subscription, or a single link added as a key
+        if not isinstance(ids, list) or not all(isinstance(i, int) and not isinstance(i, bool) and i in known for i in ids):
+            raise HTTPException(400, "keys are ids of this router's keys")
         # own servers: links of the rule's own, besides its keys' servers; not given = as they are
         links = body.get("links", db.rule_links(rid).get(section, []))
         if not isinstance(links, list) or not all(isinstance(x, str) for x in links):
@@ -735,7 +735,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         ps = db.probe_settings(rid)
         return {"rule": rule, "finished": st.get("finished"), "has_links": any(r.get("link") for r in st.get("rows") or []),
                 "run": run, "schedule": ps.get("schedule") or "",
-                "keys": len(ps.get("keys") or []),
+                "keys": len(ps.get("keys") or []) + sum(1 for k in db.keys(rid) if k["kind"] == "link"),
                 "countries": sorted({r["country"] for r in st.get("rows") or [] if len(r.get("country") or "") == 2}),
                 "matched": pick["matched"], "fallback": pick["fallback_rows"],
                 "left_out": pick["left_out"]}

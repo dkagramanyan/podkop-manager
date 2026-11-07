@@ -584,7 +584,7 @@ export function autoRuleEditor(w, s, rule) {
     put(box,
       h("div", { class: "stack", style: "gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 10px" },
         h("div", { class: "part-head" }, h("span", { style: "font-size: 13.5px; font-weight: 600" }, "Probe parameters"),
-          h("a", { href: `#/r/${w.id}/usage`, class: "xs" }, p ? `Tests ${plural(p.keys, "subscription")} from Keys and usage` : "Keys and usage")),
+          h("a", { href: `#/r/${w.id}/usage`, class: "xs" }, p ? `Tests ${plural(p.keys, "key")} from Keys and usage` : "Keys and usage")),
         h("label", {}, "Selection priorities ", h("select", { onchange: (e) => update({ profile: e.target.value }, true) },
           [ ["balanced", "Browsing: reliability and latency"], ["interactive", "Interactive: reliability and response consistency"],
             ["streaming", "Streaming: reliability and download speed"] ].map(([value, label]) =>
