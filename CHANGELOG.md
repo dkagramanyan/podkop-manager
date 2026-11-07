@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.33.1 — 2026-11-07
+
+- Faster self-heal (agent 0.9.1): every 30 s the agent tests the server each
+  URLTest group uses now, and every server of a group whose server failed or
+  that has none working (all at once, 5 s). A group is down after two such
+  checks in a row: 30–75 s instead of two URLTest rounds (7 minutes).
+- A group reported down reports its recovery also after an apply in between
+  (the self-heal probe's), so its alert goes away; the manager also clears a
+  "servers stopped answering" alert when the router has no group down.
+- The manager keeps the router-resolved server addresses: Overview no longer
+  shows a probe whose servers were just applied as "has new servers".
+- Down groups of one router are healed one at a time, and lending servers is
+  retried while the router is busy (no more "apply is in progress").
+- install.sh --upgrade waits up to 90 s for a running connection check or
+  apply instead of stopping at once; a connection check's test sing-box no
+  longer inherits the check's lock.
+
 ## 1.33.0 — 2026-11-07
 
 - Self-heal, on by default. Agent 0.9.0 reports a URLTest group whose own

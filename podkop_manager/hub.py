@@ -40,6 +40,7 @@ PROBE_PATH = os.environ.get("PODKOP_MANAGER_PROBE_PATH") or os.environ.get("PATH
 PROBE_SECONDS = 3 * 3600
 HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in this time
 HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
+HEAL_RETRY_SECONDS = 10      # the router was busy reloading: try again after this
 STALE_PICKS = 86400          # a loaded config takes the last probe's servers only if it is this recent
 # podkop-engine-full's sing-box (static, with the SSH outbound) for probes run
 # here: downloaded once, when asked for, into the data folder (bin/)
@@ -124,6 +125,7 @@ class RouterRuntime:
         self.connection_lock = asyncio.Lock()
         self.check_cursor = 0
         self.last_payload = 0.0
+        self.heal_lock = asyncio.Lock()     # its down groups are healed one at a time
 
     def snapshot(self) -> dict:
         return {"id": self.id, "name": self.row["name"], "host": self.row["host"], "port": self.row["port"],
@@ -222,6 +224,7 @@ class Hub:
         try:
             old = (rt.status or {}).get("agent")
             rt.status = await rt.agent.call("status", timeout=30)
+            self._clear_heal_alert(rt)
             if rt.status.get("agent") != old:
                 rt.exit_ip = True                 # a new agent may have exit-ip
                 if (rt.connection_check.get("code") == "agent_upgrade"
@@ -244,6 +247,15 @@ class Hub:
             rt.down_since = rt.down_since or time.time()
         rt.checked = time.time()
         self.publish({"type": "router", "router": rt.snapshot()})
+
+    def _clear_heal_alert(self, rt: RouterRuntime) -> None:
+        """A "group down" alert goes once the router has no group down (its
+        recovery event may have been missed, e.g. while the manager was away)."""
+        heal = (rt.status or {}).get("heal")
+        if ((rt.alert or {}).get("type") == "group_down" and isinstance(heal, dict)
+                and time.time() - rt.alert["t"] > 60
+                and not any(g.get("reported") or g.get("alerted") for g in (heal.get("groups") or {}).values())):
+            rt.alert = None
 
     # --- where each section's traffic leaves to the internet ------------------------
     def _check_exits(self, rt: RouterRuntime) -> None:
@@ -756,7 +768,10 @@ class Hub:
         # so a rule whose keys are all gone takes every key's servers again
         keys, rk = self.db.keys(rid), self.db.rule_keys(rid)
         subs, index = {k["id"] for k in keys if k["kind"] == "sub"}, usage.link_index(keys)
-        rows = [dict(r, key=index.get(usage.norm(r.get("link") or ""))) for r in status.get("rows") or []]
+        ips = self.db.get_setting(f"entry_ips:{rid}", {}) or {}
+        rows = [dict(r, key=index.get(usage.norm(r.get("link") or "")),
+                     entry_ip=r.get("entry_ip") or ips.get(podkop.link_host(r.get("link") or "")))
+                for r in status.get("rows") or []]
         opts = self.db.get_setting(f"reliability:{rid}", reliability.DEFAULTS)
         health = self.db.get_setting(f"server_health:{rid}", {}) if opts["enabled"] and opts["auto_recover"] else {}
         health = {key: value for key, value in health.items() if time.time() - value.get("checked", 0) < 86400}
@@ -1039,6 +1054,8 @@ class Hub:
         for r in rows:
             if not r.get("entry_ip") and (ip := ips.get(podkop.link_host(r.get("link") or ""))):
                 r["entry_ip"] = ip
+        # kept for every later look at this run (Overview, preview, rules), which reads it again without them
+        self.db.set_setting(f"entry_ips:{rt.id}", {h: ip for h, ip in ips.items() if podkop.entry_net(ip)})
 
     def heal_links(self, rid: int, section: str, current: dict | None) -> list:
         """Servers the section had in earlier applied versions and has not now,
@@ -1071,13 +1088,20 @@ class Hub:
         if not section:
             return
         if not data.get("borrowed"):
-            try:
-                cfg = await self.config(rt.id)
-                if links := self.heal_links(rt.id, section, cfg["config"]):
-                    await rt.agent.call("heal-links", payload={
-                        "section": section, "fingerprint": cfg["fingerprint"], "links": links}, timeout=120)
-            except AgentError as e:
-                self._event(rt, "heal_links_failed", {"section": section, "message": e.message})
+            async with rt.heal_lock:            # one reload at a time on the router
+                for attempt in range(4):
+                    try:
+                        cfg = await self.config(rt.id)
+                        if links := self.heal_links(rt.id, section, cfg["config"]):
+                            await rt.agent.call("heal-links", payload={
+                                "section": section, "fingerprint": cfg["fingerprint"], "links": links}, timeout=120)
+                        break
+                    except AgentError as e:
+                        if e.code in ("busy", "conflict") and attempt < 3:
+                            await asyncio.sleep(HEAL_RETRY_SECONDS)     # an apply or another group's reload
+                            continue
+                        self._event(rt, "heal_links_failed", {"section": section, "message": e.message})
+                        break
         if not self.db.auto_rule(rt.id, section):
             self._event(rt, "heal_no_probe", {"section": section, "message": "no rule takes this section's servers from the probe"})
             return

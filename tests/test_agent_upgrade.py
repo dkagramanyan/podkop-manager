@@ -212,6 +212,7 @@ def test_failed_upgrade_preserves_previous_install(router_files, failure):
         (root / "tmp/podkop-agent").mkdir()
         lock = (root / "tmp/podkop-agent/apply.lock").open("w")
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        env["PODKOP_INSTALL_WAIT"] = "2"       # it waits for the lock, then gives up
     try:
         result = run(*args)
     finally:
@@ -227,3 +228,16 @@ def test_failed_upgrade_preserves_previous_install(router_files, failure):
     if failure in ("restart", "helper"):
         assert "restoring the previous agent" in result.stderr
         assert "old:restart" in Path(env["TEST_INIT_LOG"]).read_text()
+
+
+def test_upgrade_waits_for_a_running_connection_check(router_files):
+    import fcntl
+    import threading
+    root, src, env, run = router_files
+    (root / "tmp/podkop-agent").mkdir(exist_ok=True)
+    lock = (root / "tmp/podkop-agent/diagnostics.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    threading.Timer(2, lock.close).start()      # the check ends after 2 s
+    result = run()
+    assert result.returncode == 0, result.stderr
+    assert "waiting for a connection check to finish" in result.stdout and "upgraded" in result.stdout

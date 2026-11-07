@@ -26,6 +26,7 @@ hot_apply() { echo "$1" >> "$D/applies"; heal_filter "$RUN/base.json" "$RUN/live
 heal_wan() { [ -f "$D/wan" ]; }
 logread() { cat "$D/log" 2>/dev/null; }
 logger() { :; }
+clash_get() { echo "$*" >> "$D/tests"; }
 setsid() { echo "$*" >> "$D/spawned"; }
 reply() { printf '%s\\n' "$1"; exit 0; }
 fail() { echo "$*" >&2; exit 1; }
@@ -78,20 +79,20 @@ def test_dead_group_borrows_working_servers_then_gives_them_back(tmp_path):
     (tmp_path / "run/../etc").mkdir(exist_ok=True)
     (tmp_path / "etc/heal-off").write_text("anthropic_am\n")
     r.alive(["youtube-2-out", "youtube-1-out", "anthropic_am-1-out"])
-    r.check()                                   # first sight: the timer starts
-    assert r.events() == [] and r.state()["groups"]["main"]["dead_since"] == 1000
-    r.now(1300); r.check()                      # under 2 intervals + 60 s
-    assert r.events() == []
-    r.now(1420); r.check()
+    r.check()                                   # first check without an answer: one strike
+    assert r.events() == [] and r.state()["groups"]["main"]["strikes"] == 1
+    tests = (tmp_path / "tests").read_text()
+    assert "/proxies/main-fallback-1-out/delay" in tests and "/proxies/anthropic_am-1-out/delay" not in tests
+    r.now(1030); r.check()                      # the second, 30 s later: down
     (typ, data), = r.events()
     assert typ == "group_down" and data["section"] == "main"
     assert set(data["borrowed"]) == {"youtube-1-out", "youtube-2-out"}     # never the section marked off
     assert data["servers"] == ["main-1-out", "main-2-out", "main-fallback-1-out"]
     assert r.members()[:2] == ["main-1-out", "main-2-out"] and set(r.members()[2:]) == {"youtube-1-out", "youtube-2-out"}
-    r.now(1480); r.check()                      # still down: no second report, no reload
+    r.now(1060); r.check()                      # still down: no second report, no reload
     assert len(r.events()) == 1 and len((tmp_path / "applies").read_text().splitlines()) == 1
     r.alive(["youtube-1-out", "main-2-out"])    # one of its own servers works again
-    r.now(1540); r.check()
+    r.now(1090); r.check()
     assert r.events()[-1][0] == "group_recovered"
     assert r.members() == ["main-1-out", "main-2-out"] and r.state()["groups"] == {}
 
@@ -99,7 +100,7 @@ def test_dead_group_borrows_working_servers_then_gives_them_back(tmp_path):
 def test_wan_outage_is_not_reported(tmp_path):
     r = Router(tmp_path)
     (tmp_path / "wan").unlink()
-    r.check(); r.now(2000); r.check()
+    r.check(); r.now(1030); r.check(); r.now(1060); r.check()
     assert r.events() == [] and not (tmp_path / "applies").exists()
     (tmp_path / "wan").write_text("")
     r.now(2060); r.check()
@@ -281,3 +282,59 @@ def test_loaded_config_keeps_its_servers_when_the_probe_is_old(tmp_path):
     db.x("UPDATE probe_runs SET finished = ? WHERE id = ?", time.time(), run)
     out = hub.load_config(rid, saved)
     assert podkop.sections_by_name(out)["main"]["options"]["urltest_proxy_links"] == ["vless://u@stale:443#s"]
+
+
+def test_a_reported_group_reports_its_recovery_after_an_apply(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/heal-off").write_text("youtube\nanthropic_am\n")
+    r.check(); r.now(1030); r.check()
+    assert [t for t, _ in r.events()] == ["group_down"]
+    (tmp_path / "fp").write_text("fp2")         # the probe's servers applied
+    r.now(1060); r.check()                      # still down: a new count, no second report yet
+    assert [t for t, _ in r.events()] == ["group_down"] and r.state()["groups"]["main"]["alerted"]
+    r.alive(["main-1-out"])
+    r.now(1090); r.check()
+    assert [t for t, _ in r.events()] == ["group_down", "group_recovered"] and r.state()["groups"] == {}
+
+
+def test_alert_clears_when_the_router_has_no_group_down(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    rt.alert = {"type": "group_down", "t": time.time() - 120}
+    rt.status = {"heal": {"off": [], "groups": {"main": {"dead_since": 1, "reported": True}}}}
+    hub._clear_heal_alert(rt)
+    assert rt.alert
+    rt.status = {"heal": {"off": [], "groups": {}}}
+    hub._clear_heal_alert(rt)
+    assert rt.alert is None
+
+
+def test_resolved_addresses_are_kept_for_later_picks(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2}))
+    rows = [{"link": f"vless://u@h{i}:443#s{i}", "verdict": "GOOD", "median": "0.1", "mbit": "50", "country": "DE"}
+            for i in range(3)]
+    asyncio.run(hub._entry_ips(rt, {"rows": [dict(r) for r in rows]}))
+    pick = hub.auto_picks(rid, {"rows": rows})["main"]      # rows read again, without addresses
+    assert all(x["entry_ip"] == "62.144.49.1" for x in pick["matched"])
+
+
+def test_lending_waits_while_the_router_is_busy(tmp_path, monkeypatch):
+    import podkop_manager.hub as hubmod
+    from podkop_manager.agent import AgentError
+    monkeypatch.setattr(hubmod, "HEAL_RETRY_SECONDS", 0)
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@dead:443#a"]))
+    vid = db.add_version(rid, _cfg(["vless://u@old:443#x"]), [], "", "fp")
+    db.update_version(vid, state="applied")
+    tries = []
+    call = rt.agent.call
+
+    async def busy_once(name, *args, **kwargs):
+        if name == "heal-links":
+            tries.append(1)
+            if len(tries) == 1:
+                raise AgentError("busy", "an apply is in progress")
+        return await call(name, *args, **kwargs)
+    rt.agent.call = busy_once
+    asyncio.run(hub.heal(rt, {"section": "main", "borrowed": []}))
+    assert len(tries) == 2 and not [e for e in db.events(rid) if e["type"] == "heal_links_failed"]

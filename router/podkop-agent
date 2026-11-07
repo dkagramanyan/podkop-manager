@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.9.0"
+AGENT_VERSION="0.9.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -749,8 +749,8 @@ daemon() {
     _pid=$(singbox_pid)
     if [ -n "$_pid" ]; then
       if command -v reliability_expire >/dev/null 2>&1; then reliability_expire; fi
-      # dead groups, once a minute
-      _heal=$(( (_heal + 1) % 4 ))
+      # dead groups, every 30 s
+      _heal=$(( (_heal + 1) % 2 ))
       if [ "$_heal" = 0 ] && command -v heal_check >/dev/null 2>&1; then heal_check; fi
       [ "$_down" -ge 2 ] && event podkop_up
       _down=0

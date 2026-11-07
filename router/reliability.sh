@@ -182,7 +182,8 @@ cmd_diagnostics() (
     | if any(.outbounds[]; .type == "urltest" or .type == "selector") then error("test concrete servers only") else . end' \
     "$_cp" > "$_dir/config.json" || fail unsupported "could not build isolated connection checks"
   sing-box check -c "$_dir/config.json" >/dev/null 2>&1 || fail unsupported "engine cannot run these diagnostics"
-  sing-box run -c "$_dir/config.json" > "$_dir/engine.log" 2>&1 & _pid=$!
+  # 7>&-: a sing-box left behind (the check killed outright) must not keep the lock
+  sing-box run -c "$_dir/config.json" > "$_dir/engine.log" 2>&1 7>&- & _pid=$!
   sleep 1
   kill -0 "$_pid" 2>/dev/null || fail collector "diagnostic engine did not start"
   # Test DNS separately. Provider DNS comes from the WAN, never a guessed IP.
@@ -239,8 +240,10 @@ cmd_diagnostics() (
 
 # --- dead groups: self-heal -----------------------------------------------------------
 #
-# A URLTest group whose own servers all fail (no successful test for two test
-# intervals, at least 6 minutes) while the WAN answers is "down": the agent
+# Every 30 s the agent tests the server each URLTest group uses now (one
+# request per group); when it fails, or the group has no working server, every
+# server of the group is tested at once. A group whose own servers all fail in
+# two checks in a row (30-75 s) while the WAN answers is "down": the agent
 # reports group_down and, at once, borrows up to 3 working servers of other
 # groups into it, in RAM only (sing-box's config, reloaded in place). The
 # manager may add servers of its own (heal-links, a 2-hour lease) and runs the
@@ -255,6 +258,8 @@ cmd_diagnostics() (
 
 HEAL_LEASE=7200      # the manager's links, unless it sends them again
 HEAL_HOLD=600        # after a failed reload, no new try for this long
+HEAL_STRIKES=2       # checks in a row with no answering server before a group is down
+HEAL_TIMEOUT=5000    # ms for a test request through a server
 
 heal_off_json() {
   if [ -s "$ETC/heal-off" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/heal-off"; else echo '[]'; fi
@@ -263,45 +268,47 @@ heal_off_json() {
 HEAL_PLAN_JQ='
 def alive($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) > 0;
 def delay($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) as $d | if $d > 0 then $d else 1000000 end;
-def secs: (.[-1:]) as $u | (.[:-1] | tonumber? // null) as $n
-  | if $n == null then 180 elif $u == "s" then $n elif $u == "m" then $n * 60 elif $u == "h" then $n * 3600 else 180 end;
 def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 ($st[0] // {}) as $s
-| (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end) as $old
+# a settings change (an apply) starts every group anew, but a group reported
+# down stays "alerted" until its servers answer, so its recovery is reported
+| (if ($s.fingerprint // "") == $fp then ($s.groups // {})
+   else (($s.groups // {}) | with_entries(select(.value.reported or .value.alerted) | .value = {alerted: true})) end) as $old
 | ($off | index("*") != null) as $alloff
 | [($cfg[0].outbounds // [])[] | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
    | (.tag[:-12]) as $sec | ($old[$sec] // {}) as $o
    | (($o.added // []) + ($o.extra // [])) as $ours
    | {sec: $sec, off: ($alloff or ($off | index($sec) != null)),
-      after: ([360, ((.interval // "3m") | secs) * 2 + 60] | max),
+      strikes: ($o.strikes // 0),
       added: ($o.added // []), extra: ($o.extra // []), lease: ($o.lease // 0), hold: ($o.hold // 0),
-      dead_since: $o.dead_since, reported: ($o.reported // false),
+      dead_since: $o.dead_since, reported: ($o.reported // false), alerted: ($o.alerted // false),
       orig: [((.outbounds // []) + (.fallbacks // []))[] | select(. as $t | $ours | index($t) | not)]}] as $G
 | [$G[] | select(.off | not) | .sec as $sec | .orig[] | select(alive(.)) | {sec: $sec, tag: ., d: delay(.)}] as $live
 | reduce $G[] as $g ({groups: {}, events: [], apply: false, lists: false, due: false};
     if $g.off then
       if (($g.added + $g.extra) | length) > 0 then .apply = true else . end
     elif ([$g.orig[] | select(alive(.))] | length) > 0 then
-      if (($g.added + $g.extra) | length) > 0 or $g.reported then
+      if (($g.added + $g.extra) | length) > 0 or $g.reported or $g.alerted then
         .apply = (.apply or (($g.added + $g.extra) | length) > 0) | .lists = true
         | .events += [{type: "group_recovered", data: {section: $g.sec, servers: ($g.added + $g.extra)}}]
       else . end
     else
       ($g.dead_since // $now) as $since
+      | ($g.strikes + 1) as $k
       | (($g.extra | length) > 0 and $g.lease < $now) as $expired
       | (if $expired then [] else $g.extra end) as $extra
-      | if $now - $since < $g.after then .groups[$g.sec] = {dead_since: $since}
+      | if $k < $need and ($g.reported | not) then .groups[$g.sec] = {dead_since: $since, strikes: $k, alerted: $g.alerted}
         elif $wan != true then
           .due = true
-          | .groups[$g.sec] = {dead_since: $since, reported: $g.reported, added: $g.added, extra: $extra,
-                               lease: $g.lease, hold: $g.hold}
+          | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: $g.reported, added: $g.added, extra: $extra,
+                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted}
           | if $expired then .apply = true else . end
         else
           (if ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
            else [$live | sort_by(.d)[] | select(.sec != $g.sec) | .tag | select(. as $t | $g.orig | index($t) | not)]
                 | dedupe | .[:3] end) as $donors
-          | .groups[$g.sec] = {dead_since: $since, reported: true, added: $donors, extra: $extra,
-                               lease: (if $expired then 0 else $g.lease end), hold: $g.hold}
+          | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: true, added: $donors, extra: $extra,
+                               lease: (if $expired then 0 else $g.lease end), hold: $g.hold, alerted: $g.alerted}
           | if $donors != $g.added or $expired then .apply = true else . end
           | if ($donors | length) > 0 and $donors != $g.added then .lists = true else . end
           | if ($g.reported | not) or $expired then
@@ -315,7 +322,7 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 # heal_plan <sing-box config> <proxies file> <fingerprint> <wan: true|false|null>
 heal_plan() {
   jq -nc --slurpfile cfg "$1" --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" --arg fp "$3" \
-    --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" "$HEAL_PLAN_JQ"
+    --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" --argjson need "$HEAL_STRIKES" "$HEAL_PLAN_JQ"
 }
 
 # heal_filter <in> <out>: sing-box's config with the borrowed servers and the
@@ -339,6 +346,58 @@ heal_filter() {
                 | $cur + [$want[] | select(. as $t | ($all | index($t)) and ($cur | index($t) | not))])
           end)
       end' "$1" > "$2"
+}
+
+# clash_get <path> [curl -G args]: sing-box's Clash API
+clash_get() {
+  _cg=$(uci -q get podkop.settings.config_path); [ -n "$_cg" ] || _cg=/etc/sing-box/config.json
+  _ca=$(jq -r '.experimental.clash_api.external_controller // empty' "$_cg" 2>/dev/null)
+  _cs=$(jq -r '.experimental.clash_api.secret // empty' "$_cg" 2>/dev/null)
+  [ -n "$_ca" ] || return 1
+  _cp=$1; shift
+  if [ -n "$_cs" ]; then curl -s --max-time 12 -G -H "Authorization: Bearer $_cs" "$@" "http://$_ca$_cp"
+  else curl -s --max-time 12 -G "$@" "http://$_ca$_cp"; fi
+}
+
+# heal_test <sing-box config> <proxies file>: fresh results in sing-box's
+# history (its URLTest picks by them too). First the server each group uses
+# now; then every server of the groups whose server failed, that have no
+# working server, or that are being healed. The proxies file is read again.
+heal_test() {
+  _ht="$RUN/heal/test"; rm -rf "$_ht"; mkdir -p "$_ht"
+  jq -r --slurpfile p "$2" --argjson off "$(heal_off_json)" '
+    if ($off | index("*")) then empty else
+    .outbounds[]? | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
+    | select(.tag[:-12] as $s | $off | index($s) | not)
+    | [.tag, ($p[0].proxies[.tag].now // ""), (.url // "https://www.gstatic.com/generate_204")] | @tsv end' "$1" > "$_ht/groups"
+  while IFS="$TAB" read -r _hg _hn _hu; do
+    case "$_hn" in ""|*[!A-Za-z0-9_-]*) echo "$_hg" > "$_ht/$_hg.failed"; continue ;; esac
+    ( clash_get "/proxies/$_hn/delay" --data-urlencode "url=$_hu" --data "timeout=$HEAL_TIMEOUT" > "$_ht/$_hg.now"
+      jq -e '(.delay // 0) > 0' "$_ht/$_hg.now" >/dev/null 2>&1 || echo "$_hg" > "$_ht/$_hg.failed" ) &
+  done < "$_ht/groups"
+  wait
+  proxies > "$2.t" 2>/dev/null && jq -e .proxies "$2.t" >/dev/null 2>&1 && mv "$2.t" "$2"
+  jq -r --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" '
+    def alive($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) > 0;
+    .outbounds[]? | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
+    | select((((.outbounds // []) + (.fallbacks // [])) | map(select(alive(.))) | length) == 0
+             or ((($st[0].groups // {})[.tag[:-12]] // {}) | ((.added // []) + (.extra // [])) | length) > 0)
+    | .tag' "$1" > "$_ht/suspects" 2>/dev/null
+  cat "$_ht"/*.failed 2>/dev/null >> "$_ht/suspects"
+  # each server on its own: sing-box's group test skips servers tested within
+  # the last interval, so their result could be minutes old
+  sort -u "$_ht/suspects" | while IFS= read -r _hg; do
+    grep -q "^$_hg$TAB" "$_ht/groups" || continue
+    _hu=$(awk -F "$TAB" -v g="$_hg" '$1 == g { print $3; exit }' "$_ht/groups")
+    jq -r --arg g "$_hg" '.outbounds[]? | select(.tag == $g) | ((.outbounds // []) + (.fallbacks // []))[:12][]' "$1" | {
+      while IFS= read -r _hm; do
+        case "$_hm" in ""|*[!A-Za-z0-9_-]*) continue ;; esac
+        clash_get "/proxies/$_hm/delay" --data-urlencode "url=$_hu" --data "timeout=$HEAL_TIMEOUT" >/dev/null &
+      done
+      wait; }
+  done
+  proxies > "$2.t" 2>/dev/null && jq -e .proxies "$2.t" >/dev/null 2>&1 && mv "$2.t" "$2"
+  rm -rf "$_ht"
 }
 
 # heal_wan: the provider's line answers (a lookup straight to an outside DNS
@@ -390,7 +449,7 @@ heal_commit() {
   return 0
 }
 
-# heal_check: one round (the daemon runs it every minute)
+# heal_check: one round (the daemon runs it every 30 s)
 heal_check() {
   mkdir -p "$RUN/heal"
   _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
@@ -399,6 +458,7 @@ heal_check() {
   jq -e '.proxies' "$RUN/heal/proxies.json" >/dev/null 2>&1 || return 0
   _hf=$(config_fp) || return 0
   [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
+  heal_test "$_hc" "$RUN/heal/proxies.json"
   _hplan=$(heal_plan "$_hc" "$RUN/heal/proxies.json" "$_hf" null) || return 0
   if [ "$(printf '%s' "$_hplan" | jq -r .due)" = true ]; then
     if heal_wan; then _hw=true; else _hw=false; fi

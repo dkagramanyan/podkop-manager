@@ -47,7 +47,7 @@ Self-heal (below) needs agent 0.9.0 or newer.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.33.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.33.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.33.1/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.33.1
 ```
 
 ## Add a router
@@ -79,9 +79,10 @@ that already runs there are taken into **Keys and usage** and the rules.
 - **Nightly probe** (time, apply by itself, TLS fingerprint, where servers
   are tested): in every rule that takes links from the probe, under its
   parameters. It is one run for all those rules, so the settings are shared.
-- **Self-heal** (on by default, **Connection health → Self-heal**): when none
-  of a URLTest rule's own servers has answered for two test rounds (at least
-  6 minutes) while the router's line works, the router lends it up to 3
+- **Self-heal** (on by default, **Connection health → Self-heal**): the
+  router tests the server each URLTest rule uses every 30 s; when none of the
+  rule's own servers answers in two checks in a row (30–75 s) while the
+  router's line works, the router lends it up to 3
   working servers of other rules at once, in memory only. If there is
   nothing to lend, the manager adds servers the rule had in earlier applied
   versions. The manager then runs the probe and applies its servers. Borrowed
