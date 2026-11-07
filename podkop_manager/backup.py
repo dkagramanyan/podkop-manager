@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import tarfile
 import tempfile
 import time
@@ -19,6 +20,8 @@ from .db import DB
 MAX_SIZE = 256 * 1024 ** 2
 NAMES = {"backup.json", "manager.db", "id_ed25519"}
 OPTIONAL = {"id_forward"}     # the forwarding key (1.22.0 on)
+KEEP = 14                     # daily copies kept in the data folder
+SAVED_RE = re.compile(r"podkop-manager-\d{8}-\d{4}\.tar\.gz")
 
 
 def make(db: DB, key: Path) -> bytes:
@@ -77,3 +80,29 @@ def restore(db: DB, key: Path, data: bytes) -> str:
         for src, dest in tmp_keys.items():
             os.replace(src, dest)
     return new_key.export_public_key().decode().strip()
+
+
+def saved_dir(key: Path) -> Path:
+    return key.parent / "backups"
+
+
+def saved(key: Path) -> list[dict]:
+    """The copies kept here, newest first: {name, size, t}."""
+    d = saved_dir(key)
+    rows = [{"name": f.name, "size": f.stat().st_size, "t": f.stat().st_mtime}
+            for f in d.iterdir() if SAVED_RE.fullmatch(f.name)] if d.is_dir() else []
+    return sorted(rows, key=lambda r: r["name"], reverse=True)
+
+
+def save(db: DB, key: Path, keep: int = KEEP) -> Path:
+    """Writes a backup into the data folder and drops the oldest beyond keep."""
+    d = saved_dir(key)
+    d.mkdir(mode=0o700, exist_ok=True)
+    path = d / f"podkop-manager-{time.strftime('%Y%m%d-%H%M')}.tar.gz"
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(make(db, key))
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    for old in saved(key)[keep:]:
+        (d / old["name"]).unlink(missing_ok=True)
+    return path

@@ -252,7 +252,7 @@ def diagnostic_environment(tmp_path):
         assert target, f"test prerequisite: {name}"
         (bindir / name).symlink_to(target)
     assert shutil.which("timeout", path=str(bindir)) is None
-    return bindir, {**os.environ, "PATH": str(bindir)}
+    return bindir, {**os.environ, "PATH": str(bindir), "PODKOP_DIAG_TICK": "0.1"}
 
 
 @pytest.mark.parametrize("dns_exit", [0, 1])

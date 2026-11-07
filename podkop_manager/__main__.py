@@ -6,6 +6,7 @@
 Credentials come from the environment (.env with Docker Compose):
   PODKOP_MANAGER_USER             the web login's name (default admin)
   PODKOP_MANAGER_PASSWORD         its password, at least 8 characters
+  PODKOP_MANAGER_HTTPS=1          the login cookie goes over HTTPS only (behind a TLS proxy)
 """
 
 from __future__ import annotations
@@ -85,7 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     hub = Hub(db, key_path, src)
     hub.auto_engine = True       # podkop-engine for testing servers here, fetched in the background
     app = create_app(db, hub, public_key, password,
-                     os.environ.get("PODKOP_MANAGER_USER", "").strip() or "admin")
+                     os.environ.get("PODKOP_MANAGER_USER", "").strip() or "admin",
+                     secure_cookies=os.environ.get("PODKOP_MANAGER_HTTPS", "") == "1")
     uvicorn.run(app, host=host or "0.0.0.0", port=int(port), log_level="warning", proxy_headers=False)
     return 0
 

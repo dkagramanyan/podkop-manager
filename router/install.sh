@@ -156,6 +156,18 @@ if [ "$UPGRADE" = 1 ]; then
   }
   exec 9> /tmp/podkop-agent/apply.lock
   wait_lock 9 "an apply or recovery" || die "an apply or recovery is running for more than $WAIT s; try again in a minute"
+  # a connection check cut off before agent 0.9.1 could leave its test
+  # sing-box holding the check's lock for good: end it (never podkop's own)
+  for _p in /proc/[0-9]*; do
+    _held=0
+    for _fd in "$_p"/fd/*; do
+      case "$(readlink "$_fd" 2>/dev/null)" in *podkop-agent/diagnostics.lock) _held=1 ;; esac
+    done
+    [ "$_held" = 1 ] || continue
+    case "$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null)" in
+      *"sing-box run -c /tmp/podkop-agent/check."*) kill "${_p#/proc/}" 2>/dev/null && echo "ended a leftover connection check" ;;
+    esac
+  done
   exec 7> /tmp/podkop-agent/diagnostics.lock
   wait_lock 7 "a connection check" || die "a connection check is running for more than $WAIT s; see who holds /tmp/podkop-agent/diagnostics.lock"
   /etc/init.d/podkop-agent running >/dev/null 2>&1 && WAS_RUNNING=1

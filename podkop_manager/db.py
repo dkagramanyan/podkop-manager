@@ -358,15 +358,16 @@ class DB:
         return json.loads(r["result"]) if r and r["result"] else None
 
     def last_probe_result(self, rid: int) -> dict | None:
-        """probe-status of the newest finished run."""
+        """probe-status of the newest finished full run (a self-heal probe
+        tests only its rules' countries, so it is not one)."""
         r = self.one("SELECT result FROM probe_runs WHERE router_id = ? AND state = 'done' AND result IS NOT NULL "
-                     "ORDER BY id DESC LIMIT 1", rid)
+                     "AND trigger != 'heal' ORDER BY id DESC LIMIT 1", rid)
         return json.loads(r["result"]) if r else None
 
     def last_probe_finished(self, rid: int) -> float:
-        """When the newest successful run ended (0: never)."""
+        """When the newest successful full run ended (0: never)."""
         r = self.one("SELECT finished FROM probe_runs WHERE router_id = ? AND state = 'done' AND result IS NOT NULL "
-                     "ORDER BY id DESC LIMIT 1", rid)
+                     "AND trigger != 'heal' ORDER BY id DESC LIMIT 1", rid)
         return (r or {}).get("finished") or 0
 
     def applied_configs(self, rid: int, limit: int = 50) -> list[dict]:

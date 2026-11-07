@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.9.1"
+AGENT_VERSION="0.10.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve"]'
-    else printf '["diagnostics","eligibility","resolve"]'; fi
-  else printf '["resolve"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve","upgrade"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade"]'; fi
+  else printf '["resolve","upgrade"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -238,6 +238,39 @@ singbox_pid() {
     jq -r '[.["sing-box"].instances[]? | select(.running) | .pid] | first // empty'
 }
 proxies() { podkop clash_api get_proxies 2>/dev/null; }
+
+# proxies_json: the groups and servers of the Clash API, as "proxies" answers
+# them; nothing on stdout when the API does not answer
+proxies_json() {
+  _p=$(proxies); [ -n "$_p" ] || return 1
+  printf '%s' "$_p" | jq -c '.proxies | {
+      groups: [to_entries[] | select(.value.all != null and .key != "GLOBAL")
+               | {name: .key, type: .value.type, now: .value.now, all: .value.all}],
+      servers: [to_entries[] | select(.value.all == null)
+                | {name: .key, type: .value.type, delay: ((.value.history // []) | last | .delay // null)}]}'
+}
+
+# static_json: what "status" tells about the router and the installed programs;
+# read once and kept in RAM until one of the programs (or the agent) changes,
+# so a status call does not start sing-box and podkop every 30 s
+static_json() {
+  _sj="$RUN/static.json"; _sb=$(command -v sing-box)
+  if [ -s "$_sj" ] && [ "$_sj" -nt /usr/bin/podkop ] && [ "$_sj" -nt "$0" ] &&
+     { [ -z "$_sb" ] || [ "$_sj" -nt "$_sb" ]; } && { [ ! -x "$PROBE" ] || [ "$_sj" -nt "$PROBE" ]; }; then
+    cat "$_sj"; return
+  fi
+  _sv=$(sing-box version 2>/dev/null)
+  jq -nc --arg model "$(cat /tmp/sysinfo/model 2>/dev/null)" \
+    --arg os "$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)" \
+    --arg pk "$(podkop show_version 2>/dev/null)" \
+    --arg sb "$(printf '%s\n' "$_sv" | awk 'NR == 1 { print $3 }')" \
+    --arg feat "$(printf '%s\n' "$_sv" | sed -n 's/^Features:[[:space:]]*//p')" \
+    --arg eng "$(printf '%s\n' "$_sv" | grep -q 'tools.decode-link' && echo 1)" \
+    --arg pb "$([ -x "$PROBE" ] && sed -n 's/^VERSION="\(.*\)"/\1/p' "$PROBE")" \
+    '{model: $model, os: $os, podkop: $pk, singbox: $sb, features: ($feat | split(",") | map(select(. != ""))),
+      engine: ($eng == "1"), probe: $pb}' > "$_sj.t" && mv "$_sj.t" "$_sj"
+  cat "$_sj"
+}
 
 # fatal_since <marker>: podkop's first fatal message after our marker log line
 fatal_since() {
@@ -772,39 +805,72 @@ daemon() {
   done
 }
 
+# upgrade: the manager sends its own router files (stdin {"files": {name:
+# text}}); install.sh --upgrade --src runs them in as a job, so the answer
+# comes before the agent restarts -> {job}; "job <id>" follows it
+UPGRADE_FILES="podkop-agent podkop-agent.init probe.sh reliability.sh install.sh"
+cmd_upgrade() {
+  mkdir -p "$RUN/jobs"
+  _d=$(mktemp -d "$RUN/upgrade.XXXXXX") || fail error "cannot create upgrade directory"
+  head -c 2097152 > "$_d/in"
+  for _f in $UPGRADE_FILES; do
+    jq -je --arg f "$_f" '.files[$f] | select(type == "string" and length > 0)' "$_d/in" > "$_d/$_f" 2>/dev/null ||
+      { rm -rf "$_d"; fail bad_request "expected {\"files\": {\"$_f\": \"...\", ...}}"; }
+  done
+  rm -f "$_d/in"
+  flock -n "$RUN/install.lock" true || { rm -rf "$_d"; fail busy "an agent upgrade is already running"; }
+  _id=$(job_new upgrade)
+  echo "$_d" > "$RUN/jobs/$_id.dir"
+  spawn _run-upgrade "$_id"
+  reply "$(jq -nc --arg id "$_id" '{job: $id}')"
+}
+
+run_upgrade() {
+  _id=$1; _d=$(cat "$RUN/jobs/$_id.dir" 2>/dev/null)
+  [ -n "$_d" ] && [ -f "$_d/install.sh" ] || { job_end "$_id" failed "the upgrade files are gone"; return; }
+  job_set "$_id" '.state = "running"'
+  if PODKOP_INSTALL_WAIT=120 sh "$_d/install.sh" --upgrade --src "$_d" > "$_d/log" 2>&1; then
+    job_end "$_id" "done" "$(tail -n 1 "$_d/log")" \
+      "$(jq -nc --arg v "$(sed -n 's/^AGENT_VERSION="\(.*\)"/\1/p' /usr/bin/podkop-agent)" '{version: $v}')"
+  else
+    _m=$(grep '^error: ' "$_d/log" | tail -n 1 | cut -c 8-); [ -n "$_m" ] || _m=$(tail -n 1 "$_d/log")
+    job_end "$_id" failed "${_m:-the upgrade failed}"
+  fi
+  rm -rf "$_d" "$RUN/jobs/$_id.dir"
+}
+
 # --- commands ---------------------------------------------------------------------
 
 cmd_status() {
   _fp=$(config_fp)
   _st=$(podkop_start_state)
-  _feat=$(sing-box version 2>/dev/null | sed -n 's/^Features:[[:space:]]*//p')
   _probe=$(cat "$RUN/probe/state" 2>/dev/null || echo none)
   _pins='[]'
   [ -s "$ETC/pins" ] && _pins=$(while IFS="$TAB" read -r _s _h; do
             jq -nc --arg s "$_s" --arg t "$(link_tag "$_s" "$_h")" '{section: $s, server: $t}'
           done < "$ETC/pins" | jq -sc '.')
+  _pid=$(singbox_pid)
+  # the groups and servers come along, so the manager needs one call per look
+  _px=null; [ -z "$_pid" ] || _px=$(proxies_json) || _px=null
   reply "$(jq -nc --arg av "$AGENT_VERSION" --argjson pv "$PROTO" --argjson caps "$(capabilities)" --arg boot "$BOOT" \
     --arg up "$(cut -d ' ' -f 1 /proc/uptime | cut -d . -f 1)" \
-    --arg model "$(cat /tmp/sysinfo/model 2>/dev/null)" \
-    --arg os "$(sed -n "s/^DISTRIB_DESCRIPTION='\(.*\)'/\1/p" /etc/openwrt_release 2>/dev/null)" \
-    --arg pk "$(podkop show_version 2>/dev/null)" \
+    --argjson fixed "$(static_json)" \
     --arg en "$(podkop_enabled && echo 1 || echo 0)" --arg pa "$([ -f "$ETC/paused" ] && echo 1 || echo 0)" \
-    --arg st "$_st" --arg pid "$(singbox_pid)" \
-    --arg sb "$(sing-box version 2>/dev/null | awk 'NR == 1 { print $3 }')" --arg feat "$_feat" \
+    --arg st "$_st" --arg pid "$_pid" \
     --arg fp "$_fp" --arg lg "$(cat "$ETC/last-good.fp" 2>/dev/null)" \
     --arg busy "$(flock -n "$RUN/apply.lock" true 2>/dev/null && echo 0 || echo 1)" \
     --arg probe "$_probe" --argjson pins "${_pins:-[]}" \
     --arg fs "$(tail -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" --arg fst "$(head -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" \
-    --arg pb "$([ -x "$PROBE" ] && sed -n 's/^VERSION="\(.*\)"/\1/p' "$PROBE")" \
-    --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" --arg eng "$(sing-box version 2>/dev/null | grep -q 'tools.decode-link' && echo 1)" \
+    --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
+    --argjson px "${_px:-null}" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
-      router: {model: $model, openwrt: $os, utc_offset: $tz},
-      podkop: {version: $pk, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
+      router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz},
+      podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
-      singbox: {version: $sb, features: ($feat | split(",") | map(select(. != "")))},
-      fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $pb, cron: $pcron},
-      engine: ($eng == "1"), heal: $heal,
+      singbox: {version: $fixed.singbox, features: $fixed.features},
+      fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
+      engine: $fixed.engine, heal: $heal, proxies: $px,
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')"
 }
 
@@ -879,12 +945,30 @@ cmd_pin() {
 
 # proxies: groups with their choice and members, and the last delay of every server
 cmd_proxies() {
-  _p=$(proxies); [ -n "$_p" ] || fail podkop_down "the Clash API does not answer (is podkop running?)"
-  reply "$(printf '%s' "$_p" | jq -c '.proxies | {
-      groups: [to_entries[] | select(.value.all != null and .key != "GLOBAL")
-               | {name: .key, type: .value.type, now: .value.now, all: .value.all}],
-      servers: [to_entries[] | select(.value.all == null)
-                | {name: .key, type: .value.type, delay: ((.value.history // []) | last | .delay // null)}]}')"
+  _p=$(proxies_json) || fail podkop_down "the Clash API does not answer (is podkop running?)"
+  reply "$_p"
+}
+
+# exit-ips: "exit-ip" for several sections at once (stdin {"sections": [...]}),
+# four lookups at a time -> {section: its exit-ip answer, or {section, error}}
+cmd_exit_ips() {
+  _d=$(mktemp -d "$RUN/exits.XXXXXX") || fail error "cannot create exits directory"
+  head -c 65536 > "$_d/in"
+  jq -e '.sections | type == "array" and length <= 64 and all(type == "string")' \
+    "$_d/in" >/dev/null 2>&1 || { rm -rf "$_d"; fail bad_request "expected {\"sections\": [...]}"; }
+  _n=0
+  for _s in $(jq -r '.sections[]' "$_d/in"); do
+    case "$_s" in *[!A-Za-z0-9_]*) continue ;; esac
+    ( cmd_exit_ip "$_s" ) > "$_d/$_s.json" 2>/dev/null &
+    _n=$((_n + 1)); [ $((_n % 4)) = 0 ] && wait
+  done
+  wait
+  reply "$(for _f in "$_d"/*.json; do [ -f "$_f" ] || continue
+    _s=$(basename "$_f" .json)
+    jq -c --arg s "$_s" 'if .ok == true then .data else {section: $s, error: (.error.message // "no answer")} end' "$_f" 2>/dev/null ||
+      jq -nc --arg s "$_s" '{section: $s, error: "no answer"}'
+  done | jq -sc 'map({key: .section, value: .}) | from_entries')"
+  rm -rf "$_d"
 }
 
 # exit-ip <section>: where the section's traffic leaves to the internet now:
@@ -1036,6 +1120,7 @@ probe_leftovers() {
 
 # key_ok <url>: a subscription key is an http(s) address and nothing else
 key_ok() { printf '%s' "$1" | grep -qE '^https?://[^[:space:]]+$'; }
+link_ok() { printf '%s' "$1" | grep -qE '^(vless|vmess|trojan|ss|hysteria2|hy2|socks4|socks4a|socks5)://[^[:space:]]+$'; }
 
 # probe-start: stdin {"keys": [subscription urls], "options": ["--countries", "europe", ...]}
 cmd_probe_start() {
@@ -1047,12 +1132,14 @@ cmd_probe_start() {
   # checked before it replaces the last run's request
   _rq="$RUN/probe/req.$$.json"
   cat > "$_rq"
-  jq -e '(.keys | type == "array" and length > 0 and all(type == "string"))
+  jq -e '(.keys | type == "array" and all(type == "string")) and ((.links // []) | type == "array" and all(type == "string"))
+         and ((.keys | length) + ((.links // []) | length) > 0)
          and ((.options // []) | type == "array" and all(type == "string"))' \
-    "$_rq" >/dev/null 2>&1 || { rm -f "$_rq"; fail bad_request "expected {\"keys\": [...], \"options\": [...]}"; }
+    "$_rq" >/dev/null 2>&1 || { rm -f "$_rq"; fail bad_request "expected {\"keys\": [...], \"links\": [...], \"options\": [...]}"; }
   _left=0
   set -f
   for _k in $(jq -r '.keys[]' "$_rq"); do key_ok "$_k" || { rm -f "$_rq"; fail bad_request "a key is not an http(s) address"; }; done
+  for _k in $(jq -r '.links[]?' "$_rq"); do link_ok "$_k" || { rm -f "$_rq"; fail bad_request "a link is not a server link"; }; done
   for _a in $(jq -r '.options // [] | .[]' "$_rq"); do
     if [ "$_left" -gt 0 ]; then _left=$((_left - 1)); continue; fi
     _k=""
@@ -1062,6 +1149,8 @@ cmd_probe_start() {
   done
   set +f
   mv "$_rq" "$RUN/probe/req.json"
+  # single links (keys of their own) go to the probe as a file of links
+  jq -r '.links[]?' "$RUN/probe/req.json" > "$RUN/probe/links.txt"
   echo running > "$RUN/probe/state"
   rm -f "$RUN/probe/result.csv" "$RUN/probe/result.csv.links" "$RUN/probe/exit" "$RUN/probe/pid"
   now > "$RUN/probe/started"
@@ -1080,6 +1169,7 @@ run_probe() {
   set --
   for _o in $(jq -r '.options // [] | .[]' "$RUN/probe/req.json"); do set -- "$@" "$_o"; done
   for _k in $(jq -r '.keys[]' "$RUN/probe/req.json"); do set -- "$@" -s "$_k"; done
+  [ -s "$RUN/probe/links.txt" ] && set -- "$@" -f "$RUN/probe/links.txt"
   rm -f /tmp/podkop-probe-best.txt /tmp/podkop-probe-fallback.txt /tmp/podkop-probe-youtube.txt \
     /tmp/podkop-probe-youtube-fallback.txt
   # at most 3 hours (the manager waits that long); TERM lets it clean up
@@ -1126,16 +1216,23 @@ cmd_sub_info() {
 cmd_probe_nodes() {
   [ -x "$PROBE" ] || fail no_probe "podkop-probe is not installed"
   _req=$(cat)
-  printf '%s' "$_req" | jq -e '.keys | type == "array" and length > 0' >/dev/null 2>&1 || fail bad_request 'expected {"keys": [...]}'
+  printf '%s' "$_req" | jq -e '(.keys | type == "array") and ((.links // []) | type == "array")
+    and ((.keys | length) + ((.links // []) | length) > 0)' >/dev/null 2>&1 || fail bad_request 'expected {"keys": [...], "links": [...]}'
   set -f; set --
   printf '%s' "$_req" | jq -e '.fix_fingerprint == true' >/dev/null 2>&1 && set -- --fix-fingerprint
   for _k in $(printf '%s' "$_req" | jq -r '.keys[] | strings'); do
     key_ok "$_k" || fail bad_request "a key is not an http(s) address"
     set -- "$@" -s "$_k"
   done
-  set +f
   _o="$RUN/nodes.$$"
+  for _k in $(printf '%s' "$_req" | jq -r '.links[]? | strings'); do
+    link_ok "$_k" || { rm -f "$_o.links"; fail bad_request "a link is not a server link"; }
+    printf '%s\n' "$_k" >> "$_o.links"
+  done
+  [ -s "$_o.links" ] && set -- "$@" -f "$_o.links"
+  set +f
   "$PROBE" --build-nodes --no-color "$@" > "$_o" 2> "$_o.err"; _rc=$?
+  rm -f "$_o.links"
   if [ "$_rc" != 0 ]; then
     _why=$(grep -v '^[[:space:]]*$' "$_o.err" | tail -n 2 | tr '\n' ' '); rm -f "$_o" "$_o.err"
     case "$_why" in *"unknown option: --build-nodes"*) fail old_probe "podkop-probe can't build nodes: reinstall the agent" ;; esac
@@ -1259,6 +1356,7 @@ case "$_cmd" in
   heal-off)      command -v cmd_heal_off >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_off ;;
   heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
   resolve)       cmd_resolve ;;
+  upgrade)       cmd_upgrade ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
   validate)      cmd_validate ;;
@@ -1268,6 +1366,7 @@ case "$_cmd" in
   proxies)       cmd_proxies ;;
   delays)        cmd_delays "$@" ;;
   exit-ip)       cmd_exit_ip "$@" ;;
+  exit-ips)      cmd_exit_ips ;;
   logs)          cmd_logs "$@" ;;
   watch)         cmd_watch "$@" ;;
   service)       cmd_service "$@" ;;
@@ -1285,15 +1384,16 @@ case "$_cmd" in
     reply '{"uninstalling":true}' ;;
   version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" --argjson caps "$(capabilities)" \
                    '{version: $v, protocol: $p, capabilities: $caps}')" ;;
-  daemon|_run-apply|_run-probe)
+  daemon|_run-apply|_run-probe|_run-upgrade)
     [ "$REMOTE" = 0 ] || fail forbidden "$_cmd can't be run over SSH"
     case "$_cmd" in
       daemon) daemon ;;
       _run-apply) run_apply "$1" ;;
       _run-probe) run_probe ;;
+      _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

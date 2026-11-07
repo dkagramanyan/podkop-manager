@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import __version__, backup, configs, podkop, reliability
@@ -51,8 +52,14 @@ def check_password(password: str, stored: str) -> bool:
     return hmac.compare_digest(hash_password(password, salt), stored)
 
 
-def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str = "admin") -> FastAPI:
-    """username and password: the web login, from the environment, not stored."""
+LOGIN_FAILURES = 10      # wrong logins from one address in LOGIN_WINDOW seconds ...
+LOGIN_WINDOW = 600       # ... and it waits that long before another try
+
+
+def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str = "admin",
+               secure_cookies: bool = False) -> FastAPI:
+    """username and password: the web login, from the environment, not stored.
+    secure_cookies: the session cookie goes over HTTPS only (behind a TLS proxy)."""
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI):
         await hub.start()
@@ -70,7 +77,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     # a new password logs everyone out
     secret += hashlib.sha256(f"{username}\n{password}".encode()).hexdigest()
     app.add_middleware(SessionMiddleware, secret_key=secret, session_cookie="podkop_manager",
-                       max_age=14 * 86400, same_site="strict", https_only=False)
+                       max_age=14 * 86400, same_site="strict", https_only=secure_cookies)
+    app.add_middleware(GZipMiddleware, minimum_size=1000)     # the event stream is left alone
 
     @app.exception_handler(AgentError)
     async def _agent_error(_: Request, e: AgentError):
@@ -113,16 +121,35 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def login_page():
         return FileResponse(STATIC / "login.html", headers=NO_CACHE)
 
+    failures: dict[str, list[float]] = {}     # client address -> times of its wrong logins
+
     @app.post("/login")
     async def login(request: Request):
+        addr = request.client.host if request.client else ""
+        now = time.time()
+        recent = failures[addr] = [t for t in failures.get(addr, []) if now - t < LOGIN_WINDOW]
+        if len(recent) >= LOGIN_FAILURES:
+            return RedirectResponse("/login?bad=locked", status_code=303)
         form = await request.form()
         name_ok = hmac.compare_digest(str(form.get("user", "")).strip().encode(), username.encode())
         # the slow hash runs off the event loop, so guessing can't stall the live updates
         if await asyncio.to_thread(check_password, str(form.get("password", "")), password_hash) and name_ok:
+            failures.pop(addr, None)
             request.session["auth"] = True
             return RedirectResponse("/", status_code=303)
+        recent.append(now)
         await asyncio.sleep(1)
         return RedirectResponse("/login?bad=1", status_code=303)
+
+    @app.get("/health")
+    async def health():
+        """For Docker's health check and uptime monitors: no login, no names."""
+        try:
+            db.one("SELECT 1")
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"ok": False, "error": f"database: {e}"}, status_code=503)
+        return {"ok": True, "version": __version__, "routers": len(hub.routers),
+                "online": sum(1 for rt in hub.routers.values() if rt.online)}
 
     @app.post("/logout")
     async def logout(request: Request):
@@ -342,6 +369,12 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def agent_upgrade(rid: int):
         router_or_404(rid)
         return {"command": upgrade_command(release_tag(hub.src))}
+
+    @app.post("/api/routers/{rid}/agent-upgrade", dependencies=[api])
+    async def agent_upgrade_now(rid: int):
+        """The agent installs this manager's router files; progress comes on the stream (type upgrade)."""
+        router_or_404(rid)
+        return {"job": await hub.upgrade_agent(rid)}
 
     @app.get("/api/routers/{rid}/reliability", dependencies=[api])
     async def connection_health(rid: int, hours: int = 24):
@@ -654,7 +687,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     # --- the keys whose servers a URLTest rule takes ---------------------------------------
     @app.get("/api/routers/{rid}/rule-keys", dependencies=[api])
     async def rule_keys(rid: int):
-        """The subscriptions with the servers podkop can build, each rule's keys and own servers."""
+        """The keys with the servers podkop can build, each rule's keys and own servers."""
         router_or_404(rid)
         return {"subs": hub.sub_links(rid), "rules": db.rule_keys(rid), "links": db.rule_links(rid)}
 
@@ -693,9 +726,11 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         run = {k: (st or {}).get(k) for k in ("state", "started", "finished")}
         if run["state"] == "failed":
             run["log"] = (st.get("log") or [])[-30:]
-        if not st or not st.get("rows"):
-            last = next((r for r in db.probe_runs(rid) if r["state"] == "done"), None)
-            st = (db.probe_result(last["id"]) if last else None) or {}
+        runs = db.probe_runs(rid)
+        if not st or not st.get("rows") or (runs and runs[0]["trigger"] == "heal"):
+            # a self-heal probe tested only its rules' countries: the picks come from the last full run
+            last = next((r for r in runs if r["state"] == "done" and r["trigger"] != "heal"), None)
+            st = dict(st or {}, rows=((db.probe_result(last["id"]) if last else None) or {}).get("rows") or [])
         pick = hub.auto_picks(rid, st).get(section) or {"matched": [], "fallback_rows": [], "left_out": []}
         ps = db.probe_settings(rid)
         return {"rule": rule, "finished": st.get("finished"), "has_links": any(r.get("link") for r in st.get("rows") or []),
@@ -795,6 +830,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         data = await asyncio.to_thread(backup.make, db, hub.key)
         return Response(data, media_type="application/gzip", headers={
             "Content-Disposition": f'attachment; filename="podkop-manager-{time.strftime("%Y%m%d-%H%M")}.tar.gz"'})
+
+    @app.get("/api/backups", dependencies=[api])
+    async def saved_backups():
+        """The daily copies kept on this server, newest first."""
+        return {"backups": backup.saved(hub.key), "keep": backup.KEEP}
+
+    @app.get("/api/backups/{name}", dependencies=[api])
+    async def saved_backup(name: str):
+        if not backup.SAVED_RE.fullmatch(name) or not (backup.saved_dir(hub.key) / name).is_file():
+            raise HTTPException(404, "no such backup")
+        return FileResponse(backup.saved_dir(hub.key) / name, media_type="application/gzip", filename=name)
 
     @app.post("/api/backup", dependencies=[api])
     async def restore_backup(request: Request):

@@ -22,9 +22,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[test]"
+      - run: pip install -r requirements.txt && pip install -e ".[test]"
       - run: python -m pytest -q tests
-      - run: node --check podkop_manager/static/app.js
+      - name: Lint the web interface's modules (a name used without its import fails here)
+        run: npx --yes eslint@9.39.0 -c eslint.config.mjs podkop_manager/static/*.js
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt && pip install -e ".[test,browser]"
+      - run: playwright install --with-deps chromium
+      - name: Every page opens in Chromium without a script error
+        run: python -m pytest -q tests/test_browser.py
 
   docker:
     runs-on: ubuntu-latest

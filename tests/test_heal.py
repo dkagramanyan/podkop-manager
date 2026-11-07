@@ -257,7 +257,7 @@ def test_heal_probe_result_is_applied_with_entry_networks(tmp_path):
     db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@dead1:443#a"]))
     applied = []
 
-    async def apply_probe(r, st, note):
+    async def apply_probe(r, st, note, sections=None):
         applied.append((note, st))
         return 7
     hub.apply_probe = apply_probe
@@ -268,6 +268,41 @@ def test_heal_probe_result_is_applied_with_entry_networks(tmp_path):
     run = db.add_probe_run(rid, "heal")
     asyncio.run(hub._finish_probe(rt, run, "heal", {"state": "failed", "log": ["error: no connection"]}))
     assert db.events(rid)[0]["type"] == "heal_probe_failed"
+
+
+def test_heal_probe_is_quick_and_only_for_the_dead_rules(tmp_path):
+    cfg = _cfg(["vless://u@dead1:443#a"])
+    cfg["sections"].append({"name": "youtube", "type": "section", "anonymous": False, "options": {
+        "connection_type": "proxy", "proxy_config_type": "urltest", "urltest_proxy_links": ["vless://u@yt1:443#y"]}})
+    db, hub, rt, rid = _hub(tmp_path, cfg)
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 5, "countries": ["DE"]}))
+    db.set_auto_rule(rid, "youtube", podkop.check_auto_rule({"top": 5, "countries": ["NL"], "youtube": "plays"}))
+    db.set_probe_settings(rid, keys=["https://sub.example/k"])
+    asyncio.run(hub.heal(rt, {"section": "main", "borrowed": ["youtube-1-out"]}))
+    opts = next(payload["options"] for name, payload in rt.agent.calls if name == "probe-start")
+    assert "-q" in opts and "--no-speed" in opts and "--no-youtube" in opts
+    assert opts[opts.index("--countries") + 1] == "DE"                   # not youtube's NL
+    assert rt.heal_sections == {"main"}
+    # the result changes main only; youtube keeps its servers
+    st = {"state": "done", "rows": [{"link": "vless://u@new1:443#n", "verdict": "GOOD", "country": "DE", "median": 0.1}], "log": []}
+    new = hub.probe_config(rid, {"config": cfg, "fingerprint": "fp"}, st, sections={"main"})
+    by = {s["name"]: s for s in new["sections"]}
+    assert by["main"]["options"]["urltest_proxy_links"] == ["vless://u@new1:443#n"]
+    assert by["youtube"]["options"]["urltest_proxy_links"] == ["vless://u@yt1:443#y"]
+    applied = []
+
+    async def apply_probe(r, st, note, sections=None):
+        applied.append(sections)
+        return 7
+    hub.apply_probe = apply_probe
+    asyncio.run(hub._finish_probe(rt, db.add_probe_run(rid, "heal"), "heal", st))
+    assert applied == [{"main"}] and rt.heal_sections == set()
+    # a self-heal run is never the "last probe" other rules take their servers from
+    full = db.add_probe_run(rid, "manual")
+    db.finish_probe_run(full, "done", {"state": "done", "rows": [{"link": "vless://u@full:443#f"}]})
+    heal = db.add_probe_run(rid, "heal")
+    db.finish_probe_run(heal, "done", st)
+    assert db.last_probe_result(rid)["rows"][0]["link"] == "vless://u@full:443#f"
 
 
 def test_loaded_config_keeps_its_servers_when_the_probe_is_old(tmp_path):

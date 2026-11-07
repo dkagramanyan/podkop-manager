@@ -20,8 +20,12 @@
     <input class="input" id="pw" type="password" name="password" required autocomplete="current-password">
   </div>
   <p class="bad-text small" id="bad" hidden>Wrong login or password</p>
+  <p class="bad-text small" id="locked" hidden>Too many wrong logins from your address: wait 10 minutes</p>
   <button type="submit" class="btn primary lg">Log in</button>
 </form>
-<script>if (location.search.includes("bad=1")) document.getElementById("bad").hidden = false;</script>
+<script>
+if (location.search.includes("bad=locked")) document.getElementById("locked").hidden = false;
+else if (location.search.includes("bad=1")) document.getElementById("bad").hidden = false;
+</script>
 </body>
 </html>

@@ -3,6 +3,45 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.34.0 — 2026-11-07
+
+- **Update agent from the manager** (agent 0.10.0): Settings → Update agent
+  (also in Connection health) sends this manager's own router files to the
+  agent, which installs them with the same installer and rollback as before;
+  progress shows in the dialog. An agent older than 0.10 still needs the
+  command pasted once; the dialog keeps it under "Or run a command".
+- install.sh --upgrade ends a leftover test sing-box of a connection check
+  (agents before 0.9.1 could leave one holding the check's lock for good)
+  instead of waiting 90 s and stopping.
+- Reliability on the server: `GET /health` (no login) and a Docker
+  `HEALTHCHECK` that uses it; a copy of everything (database and SSH keys) is
+  saved in the data volume daily, the last 14 kept, listed under Settings →
+  Backup; the image is built from exact dependency versions
+  (requirements.txt); 10 wrong logins from one address lock it out for 10
+  minutes; `PODKOP_MANAGER_HTTPS=1` sends the login cookie over HTTPS only.
+- Speed: the agent's `status` carries the groups and servers and keeps the
+  router's constant facts (model, versions) in RAM, so a poll is one SSH
+  command instead of two and ~10 processes fewer on the router every 30 s;
+  exit IPs of all rules are looked up in one call, four at a time (`exit-ips`);
+  API answers and the interface's files are gzip-compressed.
+- Self-heal probe is quick: only the down rules' countries, pings only, no
+  speed test (`-q --no-speed`), and only those rules get its servers; the
+  other rules keep theirs until the nightly probe, whose result stays the
+  "last probe" they take servers from.
+- **Keys and usage** is one list of equal rows: name and kind, status,
+  today's usage with the limit, period, what the last probe found of the
+  key's servers, the rules that use it, Edit; a row opens to its chart, the
+  split by rule, the limit's source and what happens at the mark. "Add key"
+  is a dialog in the page header.
+- **Single links are keys like subscriptions** (agent 0.10.0): a link added
+  under Keys is tested by the probe at every run (`probe-start` and
+  `probe-nodes` take `links`), rules that take servers from the probe can be
+  limited to it under "Servers from keys", and its usage counts as before.
+- The web interface is ES modules (17 files instead of one 3400-line
+  app.js); CI lints them (a name used without its import fails) and opens
+  every page in Chromium with Playwright. The diagnostics tests run in 5 s
+  instead of 30 (PODKOP_DIAG_TICK).
+
 ## 1.33.1 — 2026-11-07
 
 - Faster self-heal (agent 0.9.1): every 30 s the agent tests the server each
