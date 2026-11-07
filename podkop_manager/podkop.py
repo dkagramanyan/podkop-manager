@@ -180,6 +180,56 @@ def diff(old: dict, new: dict) -> list[dict]:
     return out
 
 
+def rebase(base: dict, target: dict, cur: dict) -> tuple[dict, list[str]]:
+    """The change from base to target made on cur, the router's settings now
+    (moved on since base, e.g. by the nightly probe): only what the change
+    touches is taken from target, the rest stays as cur has it. A section or
+    option that cur changed too, differently, is a conflict -> (config, [why])."""
+    a, b, c = sections_by_name(base), sections_by_name(target), sections_by_name(cur)
+    out = {name: copy.deepcopy(sec) for name, sec in c.items()}
+    conflicts, order = [], None
+    for ch in diff(base, target):
+        name, kind = ch.get("section"), ch["change"]
+        if kind == "added":
+            if name in c and c[name] != b[name]:
+                conflicts.append(f"{name}: added here, and the router has another {name}")
+            else:
+                out[name] = copy.deepcopy(b[name])
+        elif kind == "removed":
+            if name in c and c[name] != a[name]:
+                conflicts.append(f"{name}: removed here, but changed on the router")
+            else:
+                out.pop(name, None)
+        elif kind == "changed":
+            if name not in c:
+                conflicts.append(f"{name}: changed here, but removed on the router")
+                continue
+            now = (c[name].get("options") or {}).get(ch["option"])
+            if now != ch["old"] and now != ch["new"]:
+                conflicts.append(f"{name} / {ch['option']}: changed on the router too")
+            elif ch["new"] is None:
+                out[name].setdefault("options", {}).pop(ch["option"], None)
+            else:
+                out[name].setdefault("options", {})[ch["option"]] = copy.deepcopy(ch["new"])
+        elif kind == "order":
+            if [n for n in a if n in c] != [n for n in c if n in a]:
+                conflicts.append("the order of rules: changed on the router too")
+            order = [n for n in b]
+    cur_order = [n for n in c if n in out]
+    if order is None:
+        # the router's order; a section added here goes after the one before it in target
+        names = list(cur_order)
+        for i, n in enumerate(b):
+            if n in out and n not in names:
+                prev = next((m for m in reversed(list(b)[:i]) if m in names), None)
+                names.insert(names.index(prev) + 1 if prev else 0, n)
+    else:
+        names = [n for n in order if n in out] + [n for n in cur_order if n not in order]
+    result = copy.deepcopy(cur)
+    result["sections"] = [out[n] for n in names]
+    return result, conflicts
+
+
 def _set_urltest(sec: dict, links: list, fallback: list) -> None:
     o = sec.setdefault("options", {})
     o["connection_type"] = "proxy"

@@ -3,6 +3,19 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.35.0 — 2026-11-07
+
+- **Scheduled changes**: Review and apply → When → Later applies the change
+  at a day and time you pick, with the same checks and automatic undo, even
+  with no browser open. It waits in History → Scheduled (Apply now, Back to
+  draft, Cancel); Rules and Global settings show "N changes scheduled".
+- At its time only the options the change touches are applied, on top of the
+  router's settings then: servers the nightly probe or self-heal put in
+  meanwhile are kept. An option changed on the router too, differently, is a
+  conflict: nothing is applied, the change is marked rejected and an alert
+  shows. A router that is away or busy is tried every 30 s for an hour.
+- Manager only: no agent update needed.
+
 ## 1.34.1 — 2026-11-07
 
 - A single link added as a key can be chosen under a rule's **Servers from

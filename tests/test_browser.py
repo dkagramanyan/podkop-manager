@@ -99,3 +99,91 @@ def test_every_page_opens_without_script_errors(server):
         page.wait_for_selector("text=Update from this manager")
         assert errors == [], errors
         browser.close()
+
+
+class OnlineAgent:
+    """A router that answers: podkop runs these settings and accepts any change."""
+    config = {"sections": [
+        {"name": "settings", "type": "settings", "anonymous": False, "options": {}},
+        {"name": "main", "type": "section", "anonymous": False, "options": {
+            "connection_type": "proxy", "proxy_config_type": "url", "proxy_string": "vless://a@h:1#A",
+            "user_domains": ["a.com"]}}]}
+
+    async def call(self, name, *args, payload=None, **kwargs):
+        if name == "status":
+            return {"agent": {"version": "0.10.0", "capabilities": ["diagnostics", "eligibility", "heal", "resolve", "upgrade"]},
+                    "podkop": {"running": False, "busy": False, "enabled": True, "paused": False, "version": "0.7.24"},
+                    "fingerprint": "fp1", "singbox": {"version": "1.13", "features": []}, "router": {}, "pins": [],
+                    "probe": {"state": "none"}, "heal": None}
+        if name == "config-get":
+            return {"config": self.config, "fingerprint": "fp1"}
+        if name == "validate":
+            return {"problems": []}
+        raise AgentError("unsupported", f"{name}: not in this test")
+
+
+def test_a_change_is_scheduled_from_the_apply_dialog(tmp_path):
+    import copy
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+
+    class OnlineHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = OnlineAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    draft = copy.deepcopy(OnlineAgent.config)
+    draft["sections"][1]["options"]["user_domains"] = ["a.com", "b.com"]
+    db.set_draft(1, draft, "fp1")
+    hub = OnlineHub(db, tmp_path / "id_ed25519", ROOT)
+    app = create_app(db, hub, "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/rules")
+            page.locator("text=Review and apply").first.dispatch_event("click")
+            page.wait_for_selector("text=podkop accepts these settings")
+            page.click("[aria-label='When'] >> text=Later")
+            page.wait_for_selector("#apply-due")
+            page.screenshot(path=str(tmp_path / "schedule-dialog.png"))
+            page.click(".dialog-foot >> text=Schedule")
+            page.wait_for_selector("text=Scheduled for")
+            v = db.scheduled(1)
+            assert len(v) == 1 and v[0]["changes"] == 1 and db.draft(1) is None
+            page.keyboard.press("Escape")
+            page.goto(f"{base}/#/r/1/history")
+            page.wait_for_selector("#h-sched")
+            page.wait_for_selector("text=Apply now")
+            page.screenshot(path=str(tmp_path / "schedule-history.png"), full_page=True)
+            page.locator("text=Cancel").first.dispatch_event("click")
+            page.wait_for_selector("text=cancelled")
+            assert db.scheduled(1) == [] and errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)

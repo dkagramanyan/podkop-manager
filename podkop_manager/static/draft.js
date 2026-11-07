@@ -5,7 +5,7 @@ import { problemText, shortValue } from "./history.js";
 import { bySection, configDiff, rulesOf, same, sectionsOf } from "./model.js";
 import { render, seg } from "./shell.js";
 import { S } from "./state.js";
-import { OLD_FP, api, asList, clone, fixFingerprint, h, icon, linkDetails, linkName, linkProto, oldFingerprint, plural, put, toast } from "./ui.js";
+import { OLD_FP, api, asList, clone, fixFingerprint, h, icon, linkDetails, linkName, linkProto, longWhen, oldFingerprint, plural, put, toast } from "./ui.js";
 
 // --- the routing draft ---------------------------------------------------------------------------------
 // One per router, shared by Rules and Global settings, kept on the manager
@@ -114,9 +114,15 @@ export function draftBar(w) {
     // while the router applies, its fingerprint moves; that is not someone else's change
     const busy = !!(rt && rt.status && rt.status.podkop.busy);
     const stale = w.base !== w.fp && !busy;
-    if (!n && !stale) { put(box); return; }
+    const sched = (rt && rt.scheduled) || [];
+    const schedLine = sched.length ? h("div", { class: "banner", role: "region", "aria-label": "Scheduled changes", style: "margin-bottom: 8px" },
+      h("span", { class: "dot accent" }),
+      h("span", { class: "grow small" }, h("b", {}, `${plural(sched.length, "change")} scheduled`),
+        `, next ${longWhen(sched[0].due)}${sched[0].note ? `: ${sched[0].note}` : ""}`),
+      h("a", { class: "alink", href: `#/r/${w.id}/history` }, "History")) : null;
+    if (!n && !stale) { put(box, schedLine); return; }
     const probs = w.problems || [];
-    put(box, h("div", { class: `banner${stale ? " bad" : ""}`, role: "region", "aria-label": "Unapplied changes" },
+    put(box, schedLine, h("div", { class: `banner${stale ? " bad" : ""}`, role: "region", "aria-label": "Unapplied changes" },
       h("span", { class: `dot ${stale ? "bad" : "accent"}` }),
       h("div", { class: "row grow", style: "flex: 1 1 300px; align-items: baseline; gap: 4px 12px" },
         h("span", { style: "font-size: 14px; font-weight: 600" }, n ? `${plural(n, "change")} not applied` : "Draft"),

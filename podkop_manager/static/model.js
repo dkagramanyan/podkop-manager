@@ -1,7 +1,7 @@
 // model.js: part of podkop-manager's web interface (see app.js)
 
 import { S } from "./state.js";
-import { asList, h, isLink, plural } from "./ui.js";
+import { asList, h, isLink, longWhen, plural } from "./ui.js";
 import { countryName } from "./usage.js";
 
 // --- podkop's settings: rules, diffs, labels -----------------------------------------------
@@ -178,6 +178,9 @@ export const EVENT_TEXT = {
   heal_no_probe: (d) => `${d.section}: ${d.message}, so self-heal can't find new servers`,
   heal_off: (d) => ((d.sections || []).includes("*") ? "Self-heal switched off" : (d.sections || []).length ? `Self-heal off for ${d.sections.join(", ")}` : "Self-heal on for every rule"),
   stale_probe_not_used: (d) => d.message,
+  scheduled: (d) => `Change #${d.version} scheduled for ${longWhen(d.due)}${d.note ? `: ${d.note}` : ""}`,
+  schedule_cancelled: (d) => (d.to_draft ? `Scheduled change #${d.version} put back into the draft` : `Scheduled change #${d.version} cancelled`),
+  schedule_failed: (d) => `Scheduled change #${d.version} not applied: ${d.message}`,
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
@@ -185,7 +188,7 @@ export const EVENT_DOT = {
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
-  agent_upgraded: "ok", agent_upgrade_failed: "bad",
+  agent_upgraded: "ok", agent_upgrade_failed: "bad", scheduled: "accent", schedule_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
 };
 

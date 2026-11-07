@@ -38,7 +38,7 @@ export function connect() {
       v.onRouter && v.onRouter(m.router);
     } else if (m.type === "event") {
       v.onEvent && v.onEvent(m);
-      if (["reverted", "revert_failed", "apply_interrupted", "podkop_down", "recovery_failed", "group_down"].includes(m.event)) {
+      if (["reverted", "revert_failed", "apply_interrupted", "podkop_down", "recovery_failed", "group_down", "schedule_failed"].includes(m.event)) {
         toast(`${(S.routers[m.router_id] || {}).name}: ${eventText(m.event, m.data)}`, true);
       }
     } else if (m.type === "log") v.onLog && v.onLog(m);

@@ -275,6 +275,35 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, "trigger must be web, restore or probe")
         return await hub.apply(rid, str(body.get("base", "")), config_of(body), str(body.get("note", "")), trigger)
 
+    @app.post("/api/routers/{rid}/schedule", dependencies=[api])
+    async def schedule(rid: int, body: dict):
+        """The change is applied at due (Unix time), on top of the router's settings then."""
+        router_or_404(rid)
+        trigger = str(body.get("trigger") or "web")
+        if trigger not in ("web", "restore", "probe"):
+            raise HTTPException(400, "trigger must be web, restore or probe")
+        try:
+            due = float(body.get("due"))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "due is a time (seconds since 1970)") from None
+        if not time.time() + 30 <= due <= time.time() + 366 * 86400:
+            raise HTTPException(400, "pick a time from a minute from now to a year ahead")
+        vid = await hub.schedule(rid, str(body.get("base", "")), config_of(body), str(body.get("note", "")), due, trigger)
+        return {"version": vid, "due": due}
+
+    @app.post("/api/versions/{vid}/run", dependencies=[api])
+    async def run_scheduled(vid: int):
+        if not db.version(vid):
+            raise HTTPException(404, "no such version")
+        return await hub.run_scheduled(vid)
+
+    @app.post("/api/versions/{vid}/cancel", dependencies=[api])
+    async def cancel_scheduled(vid: int, body: dict | None = None):
+        if not db.version(vid):
+            raise HTTPException(404, "no such version")
+        await hub.cancel_scheduled(vid, bool((body or {}).get("to_draft")))
+        return {"ok": True}
+
     @app.get("/api/routers/{rid}/versions", dependencies=[api])
     async def versions(rid: int, limit: int = 30, before: int | None = None):
         router_or_404(rid)

@@ -128,8 +128,10 @@ export function longWhen(t) {
   if (!t) return "";
   const d = new Date(t * 1000), now = new Date();
   const y = new Date(now); y.setDate(now.getDate() - 1);
+  const tm = new Date(now); tm.setDate(now.getDate() + 1);
   if (sameDay(d, now)) return `Today ${hhmm(d)}`;
   if (sameDay(d, y)) return `Yesterday ${hhmm(d)}`;
+  if (sameDay(d, tm)) return `Tomorrow ${hhmm(d)}`;       // a scheduled change
   return `${d.toLocaleDateString([], { month: "short", day: "numeric" })}, ${hhmm(d)}`;
 }
 
