@@ -58,7 +58,7 @@ agent 0.13.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.38.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.38.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.39.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.39.0
 ```
 
 ## Add a router
@@ -78,6 +78,9 @@ that already runs there are taken into **Keys and usage** and the rules.
 
 ## Good to know
 
+- A change that touches only servers, a rule's own domains or its URLTest
+  settings is applied in about a second (sing-box reloads in place); other
+  changes restart podkop, 20–30 s without proxy (agent 0.14).
 - Changes collect in a draft until **Review and apply**. There, **When →
   Later** applies them at a day and time you pick (your browser's clock),
   even with no browser open: the change waits in **History → Scheduled**

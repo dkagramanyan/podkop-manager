@@ -109,3 +109,50 @@ assert.equal(verdict(d).tone, 'warn');
 assert.equal(healthPath(paths().slice(0, 1)), 'unknown');
 '''
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)
+
+
+# --- which changes sing-box takes without a podkop restart (podkop-agent) ------------------------
+
+import json  # noqa: E402
+import subprocess  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+AGENT = Path(__file__).resolve().parents[1] / "router/podkop-agent"
+
+
+def _agent_fn(tmp, fn, *files):
+    # the option comparison functions of podkop-agent, sourced on their own
+    code = subprocess.run(["sed", "-n", "/^# the options that only say which servers/,/^rulesets_dir()/p", str(AGENT)],
+                          capture_output=True, text=True, check=True).stdout
+    paths = []
+    for i, cfg in enumerate(files):
+        f = tmp / f"c{i}.json"; f.write_text(json.dumps(cfg)); paths.append(str(f))
+    p = subprocess.run(["sh", "-c", code + f"\n{fn} \"$@\"", "sh", *paths], capture_output=True, text=True)
+    return p.returncode, p.stdout.split()
+
+
+def _c(**sections):
+    return {"sections": [{"name": "settings", "type": "settings", "options": {"shutdown_correctly": "1"}}]
+            + [{"name": n, "type": "section", "options": o} for n, o in sections.items()]}
+
+
+def test_domain_list_edits_take_the_hot_path_but_subnets_do_not(tmp_path):
+    base = _c(main={"connection_type": "proxy", "proxy_config_type": "urltest", "urltest_proxy_links": ["vless://a"],
+                    "user_domain_list_type": "text", "user_domains_text": "a.com"},
+              meta={"connection_type": "proxy", "proxy_config_type": "outbound", "user_subnet_list_type": "text", "user_subnets_text": "1.2.3.0/24"})
+    servers = json.loads(json.dumps(base)); servers["sections"][1]["options"]["urltest_proxy_links"] = ["vless://b"]
+    domains = json.loads(json.dumps(servers)); domains["sections"][1]["options"]["user_domains_text"] = "a.com\nb.com"
+    domains["sections"][1]["options"]["urltest_tolerance"] = "50"
+    subnets = json.loads(json.dumps(domains)); subnets["sections"][2]["options"]["user_subnets_text"] = "1.2.3.0/24 4.4.4.0/24"
+    lists = json.loads(json.dumps(domains)); lists["sections"][1]["options"]["community_lists"] = ["youtube"]
+    assert _agent_fn(tmp_path, "servers_only", base, servers)[0] == 0
+    assert _agent_fn(tmp_path, "servers_only", base, domains)[0] == 1
+    assert _agent_fn(tmp_path, "singbox_only", base, domains)[0] == 0
+    assert _agent_fn(tmp_path, "singbox_only", base, subnets)[0] == 1
+    assert _agent_fn(tmp_path, "singbox_only", base, lists)[0] == 1
+    assert _agent_fn(tmp_path, "domain_sections", base, domains)[1] == ["main"]
+    assert _agent_fn(tmp_path, "domain_sections", base, servers)[1] == []
+    added = json.loads(json.dumps(domains))
+    added["sections"].append({"name": "news", "type": "section", "options": {"connection_type": "proxy", "proxy_config_type": "outbound",
+                                                                               "user_domain_list_type": "text", "user_domains_text": "n.com"}})
+    assert _agent_fn(tmp_path, "domain_sections", base, added)[1] == ["main", "news"]

@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.13.0"
+AGENT_VERSION="0.14.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -348,14 +348,34 @@ restart_podkop() {
 
 # the options that only say which servers a rule uses
 SERVER_OPTS='["urltest_proxy_links","urltest_fallback_links","selector_proxy_links","proxy_string"]'
+# ... and the ones that change nothing but sing-box's config either: a rule's
+# own domains (its local rule-set file, in RAM) and its URLTest settings.
+# Subnets, community and local or remote list files feed podkop's nft sets,
+# so they still need podkop's start.
+SINGBOX_OPTS='["urltest_proxy_links","urltest_fallback_links","selector_proxy_links","proxy_string",
+  "user_domain_list_type","user_domains","user_domains_text",
+  "urltest_testing_url","urltest_check_interval","urltest_tolerance","outbound_json"]'
 
-# servers_only <old config> <new config> (JSON files): they differ only in those
-servers_only() {
-  jq -n --slurpfile a "$1" --slurpfile b "$2" --argjson o "$SERVER_OPTS" '
+# options_only <options json> <old config> <new config> (JSON files): they differ only in those
+options_only() {
+  jq -n --slurpfile a "$2" --slurpfile b "$3" --argjson o "$1" '
     def strip: ((.sections[] | select(.name == "settings") | .options) |= del(.shutdown_correctly))
       | .sections |= map(.options |= with_entries(select(.key | IN($o[]) | not)));
     ($a[0] | strip) == ($b[0] | strip)' 2>/dev/null | grep -qx true
 }
+servers_only() { options_only "$SERVER_OPTS" "$1" "$2"; }
+singbox_only() { options_only "$SINGBOX_OPTS" "$1" "$2"; }
+
+# domain_sections <old config> <new config>: the sections whose own domain
+# list changed (or that are new); podkop fills a rule-set file only when it
+# is missing, so theirs are removed before the build and made anew
+domain_sections() {
+  jq -nr --slurpfile a "$1" --slurpfile b "$2" '
+    def d: [.sections[] | select(.type == "section")
+            | {key: .name, value: [.options.user_domain_list_type, .options.user_domains, .options.user_domains_text]}] | from_entries;
+    ($a[0] | d) as $x | ($b[0] | d) as $y | $y | to_entries[] | select($x[.key] != .value) | .key' 2>/dev/null
+}
+rulesets_dir() ( set +u; . "$PODKOP_LIB/constants.sh" 2>/dev/null; printf '%s' "${TMP_RULESET_FOLDER:-/tmp/sing-box/rulesets}" )
 
 # podkop_build <file>: the sing-box config podkop makes from its settings now,
 # by its own functions (its start runs the same sing_box_init_config, which
@@ -623,15 +643,27 @@ run_apply() {
     event applied "$(jq -nc --arg j "$_id" '{job: $j, restarted: false}')"
     return
   fi
-  # only servers changed: sing-box takes them without a podkop restart
-  if servers_only "$RUN/jobs/$_id.old" "$_new"; then
+  # only servers, or only servers and domain lists, changed: sing-box takes
+  # them without a podkop restart
+  _hk=""
+  if servers_only "$RUN/jobs/$_id.old" "$_new"; then _hk="only servers changed"
+  elif singbox_only "$RUN/jobs/$_id.old" "$_new"; then _hk="only servers and domain lists changed"; fi
+  if [ -n "$_hk" ]; then
     job_set "$_id" '.state = "reloading"'
-    if _hw=$(hot_apply "apply $_id (servers only)"); then
+    _rd=$(rulesets_dir); rm -rf "$RUN/rulesets.bak"; mkdir -p "$RUN/rulesets.bak"
+    for _ds in $(domain_sections "$RUN/jobs/$_id.old" "$_new"); do
+      [ -f "$_rd/$_ds-user-domains-ruleset.json" ] && mv "$_rd/$_ds-user-domains-ruleset.json" "$RUN/rulesets.bak/"
+    done
+    if _hw=$(hot_apply "apply $_id ($_hk)"); then
+      rm -rf "$RUN/rulesets.bak"
       save_last_good; rm -f "$ETC/apply-pending"; reapply_pins
-      job_end "$_id" applied "applied without restarting podkop (only servers changed)" "$(printf '%s' "$_x" | jq -c '. + {hot: true}')"
+      job_end "$_id" applied "applied without restarting podkop ($_hk)" "$(printf '%s' "$_x" | jq -c '. + {hot: true}')"
       event applied "$(jq -nc --arg j "$_id" '{job: $j, restarted: true, hot: true}')"
       return
     fi
+    # sing-box still runs the old config: its rule-set files go back
+    for _f in "$RUN/rulesets.bak"/*; do [ -f "$_f" ] && mv "$_f" "$_rd/"; done
+    rm -rf "$RUN/rulesets.bak"
     logger -t podkop-agent "apply $_id: no reload in place ($_hw), restarting podkop"
   fi
   job_set "$_id" '.state = "restarting"'
@@ -768,15 +800,26 @@ traffic_poll() {
     mv "$_d/state.new" "$_d/state.json"
 }
 
-# guard_watch: a service event of sing-box or podkop (start, stop, crash)
-# wakes the daemon at once, for the strict guard; ubusd restarts are followed
+# guard_watch <daemon pid>: a service event of sing-box or podkop (start,
+# stop, crash) wakes the daemon at once, for the strict guard; ubusd restarts
+# are followed; it ends with the daemon
 guard_watch() {
-  while :; do
+  while kill -0 "$1" 2>/dev/null; do
     ubus -S subscribe service 2>/dev/null | while IFS= read -r _l; do
       case "$_l" in *'"service":"sing-box"'*|*'"service":"podkop"'*) touch "$RUN/guard/poke" ;; esac
+      kill -0 "$1" 2>/dev/null || exit 0
     done
     sleep 5
   done
+}
+
+# kill_children <pid>: its children (the watcher's ubus and read loop), then it
+kill_children() {
+  for _p in /proc/[0-9]*; do
+    read -r _ _ _ _pp _ < "$_p/stat" 2>/dev/null || continue
+    [ "$_pp" = "$1" ] && kill "${_p#/proc/}" 2>/dev/null
+  done
+  kill "$1" 2>/dev/null
 }
 
 daemon() {
@@ -784,8 +827,8 @@ daemon() {
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
   undo_interrupted
   _last=""; _down=0; _heal=0
-  guard_watch & _gw=$!
-  trap 'kill "$_gw" 2>/dev/null; exit 0' TERM INT
+  guard_watch $$ & _gw=$!
+  trap 'kill_children "$_gw"; exit 0' TERM INT
   while :; do
     _w=0
     while [ "$_w" -lt 15 ] && [ ! -f "$RUN/guard/poke" ]; do sleep 1; _w=$((_w + 1)); done
@@ -965,7 +1008,7 @@ cmd_job() {
   _w=0; _max=${2:-0}
   case "$_max" in *[!0-9]*) _max=0 ;; esac
   while [ "$_w" -lt "$_max" ]; do
-    case "$(jq -r .state "$_jf")" in queued|checking|restarting|reverting|running) ;; *) break ;; esac
+    case "$(jq -r .state "$_jf")" in queued|checking|reloading|restarting|reverting|running) ;; *) break ;; esac
     sleep 1; _w=$((_w + 1))
   done
   reply "$(cat "$_jf")"
@@ -1025,12 +1068,14 @@ cmd_exit_ips() {
     _n=$((_n + 1)); [ $((_n % 4)) = 0 ] && wait
   done
   wait
-  reply "$(for _f in "$_d"/*.json; do [ -f "$_f" ] || continue
+  # (reply exits: the folder goes first)
+  _r=$(for _f in "$_d"/*.json; do [ -f "$_f" ] || continue
     _s=$(basename "$_f" .json)
     jq -c --arg s "$_s" 'if .ok == true then .data else {section: $s, error: (.error.message // "no answer")} end' "$_f" 2>/dev/null ||
       jq -nc --arg s "$_s" '{section: $s, error: "no answer"}'
-  done | jq -sc 'map({key: .section, value: .}) | from_entries')"
+  done | jq -sc 'map({key: .section, value: .}) | from_entries')
   rm -rf "$_d"
+  reply "$_r"
 }
 
 # exit-ip <section>: where the section's traffic leaves to the internet now:
