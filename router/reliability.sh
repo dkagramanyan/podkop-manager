@@ -438,14 +438,14 @@ guard_nft_sync() {
   fi
 }
 
-# guard_dns_on [norestart]: the NXDOMAIN file in; podkop's own dnsmasq restart
-# follows when this is called before a podkop restart
+# guard_dns_on restart|norestart: the NXDOMAIN file in; "norestart" before a
+# podkop restart, whose own dnsmasq restart then reads the file
 guard_dns_on() {
   [ -s "$RUN/guard/dnsmasq.conf" ] || return 0
   _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
   cmp -s "$RUN/guard/dnsmasq.conf" "$_gf" 2>/dev/null && return 0
   mkdir -p "${_gf%/*}" && cp "$RUN/guard/dnsmasq.conf" "$_gf.t" && mv "$_gf.t" "$_gf" || return 1
-  [ "${1:-}" = norestart ] || guard_dnsmasq_restart
+  [ "$1" = norestart ] || guard_dnsmasq_restart
   event strict_guard '{"dns":true}'
 }
 guard_dns_off() {
@@ -463,7 +463,7 @@ guard_sync() {
   fi
   guard_build || return 0
   guard_nft_sync
-  if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then guard_dns_on; else guard_dns_off; fi
+  if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then guard_dns_on restart; else guard_dns_off; fi
 }
 
 guard_status() {
