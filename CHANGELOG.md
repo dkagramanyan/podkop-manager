@@ -3,6 +3,22 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.40.0 — 2026-11-09
+
+- **Self-heal fallback countries** (a rule's probe parameters → "If none
+  works"): when nothing in the rule's countries answers, the self-heal probe
+  may take a server in Europe or in any country; the nightly probe keeps to
+  the rule's countries. Until now a rule like netflix (BG/LT/LV/PL/SK) stayed
+  on borrowed servers of other rules for days.
+- **Probe placement by memory**: a router with less than 60 MB free tests
+  its servers on the manager through the router instead of starting a
+  sing-box with every server on the router (out of memory there means a
+  crash and the failsafe). Overview shows the router's free memory (agent
+  0.15 reports it).
+- **List downloads** that fail ("fetch rule-set … 504") show on Connection
+  health as "List download failed", by list; a failed list stays stale and
+  new domains of that service go direct until it loads.
+
 ## 1.39.0 — 2026-11-09
 
 - **Rule edits without a podkop restart** (agent 0.14): a change that touches

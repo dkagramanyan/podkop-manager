@@ -37,6 +37,8 @@ def settings(value: dict) -> dict:
 
 def classify(message: str, code: int = 0) -> str | None:
     s = message.lower()
+    if "fetch rule-set" in s:        # sing-box could not download a community or remote list: it stays stale
+        return "lists"
     if code in (401, 403, 429) or re.search(r"(?:status code|http[/\d.]*|http status)\s*[:=]?\s*(401|403|429)\b", s):
         return "access"
     if "dns:" in s or "could not resolve" in s or "enotfound" in s:
@@ -59,6 +61,8 @@ def log_observation(line: str) -> dict | None:
     tags = re.findall(r"outbound/[^\s\[]+\[([^]]+)\]", line)
     context = re.search(r"\boutbound=([^\s]+)", line)
     dest = re.search(r"\bdestination=([^\s]+)", line)
+    if kind == "lists" and (rs := re.search(r"fetch rule-set (\S+?):", line)):
+        return {"kind": kind, "scope": rs[1], "destination": "", "message": line[-1000:]}
     return {"kind": kind, "scope": tags[-1] if tags else context[1] if context else "unattributed",
             "destination": dest[1] if dest else "", "message": line[-1000:]}
 
