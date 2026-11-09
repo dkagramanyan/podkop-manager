@@ -16,6 +16,7 @@ RELIABILITY_TAG_JQ='def valid_tag:
 # the waits below are counted in ticks of one second; tests set a shorter
 # tick (PODKOP_DIAG_TICK=0.1) and run the same code in a tenth of the time
 DIAG_TICK=${PODKOP_DIAG_TICK:-1}
+TAB=${TAB:-$(printf '\t')}
 
 diagnostic_lookup() (
   _dl_limit=$1; shift
@@ -271,6 +272,56 @@ heal_off_json() {
   if [ -s "$ETC/heal-off" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/heal-off"; else echo '[]'; fi
 }
 
+# --- strict rules -----------------------------------------------------------------
+#
+# A strict rule's traffic goes through the rule's own servers or nowhere:
+# - self-heal never lends it other rules' servers (the manager's servers from
+#   the rule's own history, heal-links, are still taken);
+# - when none of its servers answers, connections are refused at once instead
+#   of hanging until a timeout: the rule's selector is switched to
+#   <rule>-strict-out, a member that always refuses (this sing-box build has
+#   no block outbound: a SOCKS outbound to a closed local port refuses every
+#   connection immediately), and back to the URLTest group as soon as one of
+#   the rule's servers answers again.
+# $ETC/strict: the strict sections, one per line (written only when it changes)
+
+strict_json() {
+  if [ -s "$ETC/strict" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/strict"; else echo '[]'; fi
+}
+
+# strict_filter <config>, in place: every strict section with a URLTest group
+# gets its refusing member in its selector (a reload only, no podkop restart)
+strict_filter() {
+  jq --argjson strict "$(strict_json)" '
+    reduce ($strict[] | select(type == "string")) as $s (.;
+      "\($s)-strict-out" as $b
+      | if (any(.outbounds[]?; .tag == "\($s)-urltest-out" and .type == "urltest")
+            and any(.outbounds[]?; .tag == "\($s)-out" and .type == "selector")) then
+          (if any(.outbounds[]?; .tag == $b) then . else
+             .outbounds += [{type: "socks", tag: $b, server: "127.0.0.1", server_port: 9}] end)
+          | (.outbounds[] | select(.tag == "\($s)-out") | .outbounds) |= (if index($b) then . else . + [$b] end)
+        else . end)' "$1" > "$1.strict" && mv "$1.strict" "$1"
+}
+
+# strict_enforce <proxies file>: each strict section's selector on its
+# refusing member while the group is down (state.json .block), on its URLTest
+# group otherwise; a pinned section is left to its pin
+strict_enforce() {
+  [ -s "$ETC/strict" ] || return 0
+  jq -nr --slurpfile st "$RUN/heal/state.json" --slurpfile pf "$1" --argjson strict "$(strict_json)" --arg fp "$(config_fp 2>/dev/null)" '
+    (($st[0] // {}) | if (.fingerprint // "") == $fp then (.groups // {}) else {} end) as $g
+    | ($pf[0] // {}) as $p
+    | $strict[] | select(type == "string") | . as $s
+    | select(($p.proxies["\($s)-out"].all // []) | index("\($s)-strict-out"))
+    | (if ($g[$s].block // false) then "\($s)-strict-out" else "\($s)-urltest-out" end) as $want
+    | select($p.proxies["\($s)-out"].now != $want) | "\($s)\t\($want)"' 2>/dev/null |
+  while IFS="$TAB" read -r _ss _sw; do
+    [ -n "$_ss" ] || continue
+    grep -q "^$_ss$TAB" "$ETC/pins" 2>/dev/null && continue
+    select_server "$_ss" "$_sw" || logger -t podkop-agent "strict: could not switch $_ss-out to $_sw"
+  done
+}
+
 HEAL_PLAN_JQ='
 def alive($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) > 0;
 def delay($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) as $d | if $d > 0 then $d else 1000000 end;
@@ -285,7 +336,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
    | (.tag[:-12]) as $sec | ($old[$sec] // {}) as $o
    | (($o.added // []) + ($o.extra // [])) as $ours
    | {sec: $sec, off: ($alloff or ($off | index($sec) != null)),
-      strikes: ($o.strikes // 0), good: ($o.good // 0), borrowed_at: ($o.borrowed_at // 0),
+      strikes: ($o.strikes // 0), good: ($o.good // 0), borrowed_at: ($o.borrowed_at // 0), block: ($o.block // false),
+      strict: ($strict | index($sec) != null),
       added: ($o.added // []), extra: ($o.extra // []), lease: ($o.lease // 0), hold: ($o.hold // 0),
       dead_since: $o.dead_since, reported: ($o.reported // false), alerted: ($o.alerted // false),
       orig: [((.outbounds // []) + (.fallbacks // []))[] | select(. as $t | $ours | index($t) | not)]}] as $G
@@ -306,6 +358,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
             .groups[$g.sec] = {dead_since: $g.dead_since, strikes: $g.strikes, reported: $g.reported, added: $g.added,
                                extra: $g.extra, lease: $g.lease, hold: $g.hold, alerted: $g.alerted,
                                borrowed_at: $g.borrowed_at, good: $good}
+            # a strict rule is open again the moment one of its servers answers
+            | if $g.block then .events += [{type: "strict_open", data: {section: $g.sec}}] else . end
           end
       else . end
     else
@@ -317,21 +371,26 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
         elif $wan != true then
           .due = true
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: $g.reported, added: $g.added, extra: $extra,
-                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted, borrowed_at: $g.borrowed_at}
+                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted, borrowed_at: $g.borrowed_at, block: $g.block}
           | if $expired then .apply = true else . end
         else
-          (if ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
+          (if $g.strict then []
+           elif ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
            else [$live | sort_by(.d)[] | select(.sec != $g.sec) | .tag | select(. as $t | $g.orig | index($t) | not)]
                 | dedupe | .[:3] end) as $donors
+          # strict and nothing of its own (not even the manager'"'"'s servers) answers: refuse connections
+          | ($g.strict and ([$extra[] | select(alive(.))] | length) == 0) as $block
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: true, added: $donors, extra: $extra,
                                lease: (if $expired then 0 else $g.lease end), hold: $g.hold, alerted: $g.alerted,
-                               borrowed_at: (if $donors != $g.added then $now else $g.borrowed_at end)}
+                               borrowed_at: (if $donors != $g.added then $now else $g.borrowed_at end), block: $block}
           | if $donors != $g.added or $expired then .apply = true else . end
           | if ($donors | length) > 0 and $donors != $g.added then .lists = true else . end
           | if ($g.reported | not) or $expired then
               .events += [{type: "group_down", data: {section: $g.sec, servers: $g.orig, borrowed: $donors,
                                                       down_seconds: ($now - $since)}}]
             else . end
+          | if $block and ($g.block | not) then .events += [{type: "strict_closed", data: {section: $g.sec, servers: $g.orig}}]
+            elif ($block | not) and $g.block then .events += [{type: "strict_open", data: {section: $g.sec}}] else . end
         end
     end)
 | {state: {fingerprint: $fp, groups: .groups}, events, apply, lists, due}'
@@ -340,13 +399,13 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 heal_plan() {
   jq -nc --slurpfile cfg "$1" --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" --arg fp "$3" \
     --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" --argjson need "$HEAL_STRIKES" \
-    --argjson recover "$HEAL_RECOVER" --argjson minhold "$HEAL_MIN_HOLD" "$HEAL_PLAN_JQ"
+    --argjson recover "$HEAL_RECOVER" --argjson minhold "$HEAL_MIN_HOLD" --argjson strict "$(strict_json)" "$HEAL_PLAN_JQ"
 }
 
 # heal_filter <in> <out>: sing-box's config with the borrowed servers and the
 # manager's in their groups; a state for other podkop settings changes nothing
 heal_filter() {
-  if [ ! -s "$RUN/heal/state.json" ]; then cp "$1" "$2"; return; fi
+  if [ ! -s "$RUN/heal/state.json" ]; then cp "$1" "$2" && strict_filter "$2"; return; fi
   [ -s "$RUN/heal/extra.json" ] || echo '{}' > "$RUN/heal/extra.json"
   jq --slurpfile st "$RUN/heal/state.json" --slurpfile ex "$RUN/heal/extra.json" --arg fp "$(config_fp)" '
     ($st[0] // {}) as $s | ($ex[0] // {}) as $x
@@ -363,7 +422,7 @@ heal_filter() {
             | (.outbounds[] | select(.tag == $ut) | .outbounds) |= (. as $cur
                 | $cur + [$want[] | select(. as $t | ($all | index($t)) and ($cur | index($t) | not))])
           end)
-      end' "$1" > "$2"
+      end' "$1" > "$2" && strict_filter "$2"
 }
 
 # clash_get <path> [curl -G args]: sing-box's Clash API
@@ -491,6 +550,7 @@ heal_check() {
     printf '%s\n' "$_hnew" > "$RUN/heal/state.json"
   fi
   heal_events "$_hplan"
+  strict_enforce "$RUN/heal/proxies.json"
   [ "$(printf '%s' "$_hplan" | jq -r .lists)" = true ] && heal_lists
   return 0
 }
@@ -500,8 +560,9 @@ heal_status() {
   _hf=$(config_fp 2>/dev/null)
   jq -nc --argjson off "$(heal_off_json)" --slurpfile st "$RUN/heal/state.json" --arg fp "$_hf" '
     ($st[0] // {}) as $s
-    | {off: $off, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' 2>/dev/null ||
-    jq -nc --argjson off "$(heal_off_json)" '{off: $off, groups: {}}'
+    | {off: $off, strict: $strict, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' \
+    --argjson strict "$(strict_json)" 2>/dev/null ||
+    jq -nc --argjson off "$(heal_off_json)" --argjson strict "$(strict_json)" '{off: $off, strict: $strict, groups: {}}'
 }
 
 cmd_heal() { reply "$(heal_status)"; }
@@ -522,6 +583,36 @@ cmd_heal_off() {
   fi
   rm -f "$RUN/heal-off.t"
   event heal_off "$(jq -nc --argjson s "$(heal_off_json)" '{sections: $s}')"
+  reply "$(heal_status)"
+}
+
+# strict: stdin {"sections": [names]}: the strict rules; sing-box reloads in
+# place when the set changes (their refusing members go into the selectors)
+cmd_strict() {
+  _sr=$(head -c 65536)
+  printf '%s' "$_sr" | jq -e '(.sections | type == "array" and length <= 100)
+    and all(.sections[]; type == "string" and length > 0 and (explode | all(. == 95
+      or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"sections": [section names]}'
+  printf '%s' "$_sr" | jq -r '.sections | unique | .[]' > "$RUN/strict.t"
+  _changed=1
+  if [ -s "$RUN/strict.t" ]; then
+    if cmp -s "$RUN/strict.t" "$ETC/strict" 2>/dev/null; then _changed=0
+    else { cp "$RUN/strict.t" "$ETC/strict.t" && mv "$ETC/strict.t" "$ETC/strict"; } || { rm -f "$RUN/strict.t"; fail error "could not write $ETC/strict"; }; fi
+  else
+    [ -f "$ETC/strict" ] || _changed=0
+    rm -f "$ETC/strict"
+  fi
+  rm -f "$RUN/strict.t"
+  if [ "$_changed" = 1 ]; then
+    event strict "$(jq -nc --argjson s "$(strict_json)" '{sections: $s}')"
+    if [ -n "$(singbox_pid)" ]; then
+      exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+      _sw=$(hot_apply "strict rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_sw"; }
+      exec 9>&-
+      proxies > "$RUN/heal/proxies.json" 2>/dev/null && strict_enforce "$RUN/heal/proxies.json"
+    fi
+  fi
   reply "$(heal_status)"
 }
 

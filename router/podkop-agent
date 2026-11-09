@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.11.0"
+AGENT_VERSION="0.12.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,7 +36,7 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve","upgrade","ipv6"]'
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6"]'
     else printf '["diagnostics","eligibility","resolve","upgrade","ipv6"]'; fi
   else printf '["resolve","upgrade","ipv6"]'; fi
 }
@@ -1394,6 +1394,7 @@ case "$_cmd" in
   heal)          command -v cmd_heal >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal ;;
   heal-off)      command -v cmd_heal_off >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_off ;;
   heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
+  strict)        command -v cmd_strict >/dev/null || fail unsupported "reinstall agent for strict rules"; cmd_strict ;;
   resolve)       cmd_resolve ;;
   ipv6)          cmd_ipv6 "$@" ;;
   upgrade)       cmd_upgrade ;;
@@ -1433,7 +1434,7 @@ case "$_cmd" in
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve ipv6 upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict resolve ipv6 upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

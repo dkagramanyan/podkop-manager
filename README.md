@@ -53,11 +53,12 @@ enforce their own six-second limit and do not require extra packages.
 Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
 Self-heal (below) needs agent 0.9.0 or newer; updating from the manager
-needs agent 0.10.0; the IPv6 switch needs agent 0.11.0.
+needs agent 0.10.0; the IPv6 switch needs agent 0.11.0; strict rules need
+agent 0.12.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.36.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.36.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.37.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.37.0
 ```
 
 ## Add a router
@@ -115,6 +116,11 @@ that already runs there are taken into **Keys and usage** and the rules.
   change, and podkop's lists are downloaded again if they failed while the
   rule was down. Rules switched off there (e.g. one that must keep its own
   exit country) are never changed and never lend servers.
+- **Strict** (a switch on a Fastest rule): the rule's traffic goes through
+  its own servers or nowhere. Self-heal never lends it other rules' servers;
+  while none of its servers answers, connections are refused at once instead
+  of hanging, and open again the moment one answers. Needs self-heal on for
+  the rule and agent 0.12.
 - **IPv6** (**Connection health → IPv6**): podkop routes IPv4 only. If the
   router gives the LAN IPv6, a device with its own DNS reaches any site over
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the

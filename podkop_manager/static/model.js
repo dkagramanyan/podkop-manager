@@ -102,6 +102,7 @@ export function ruleNow(rt, sec, devices) {
   const groups = rt.proxies.groups || [];
   const g = groups.find((x) => x.name === `${sec.name}-out`);
   if (!g) return { text: "–" };
+  if (g.now === `${sec.name}-strict-out`) return { text: "refusing connections: none of its servers answers", bad: true, mode: "strict" };
   const ut = groups.find((x) => x.name === `${sec.name}-urltest-out`);
   const tag = g.now === `${sec.name}-urltest-out` && ut ? ut.now : g.now;
   const server = (rt.proxies.servers || []).find((x) => x.name === tag);

@@ -12,6 +12,8 @@ CONFIG = {"outbounds": [
     {"type": "urltest", "tag": "anthropic_am-urltest-out", "outbounds": ["anthropic_am-1-out"], "interval": "3m"},
     *[{"type": "vless", "tag": t} for t in ("main-1-out", "main-2-out", "main-fallback-1-out", "youtube-1-out",
                                              "youtube-2-out", "anthropic_am-1-out")],
+    *[{"type": "selector", "tag": f"{g}-out", "outbounds": [f"{g}-1-out", f"{g}-urltest-out"], "default": f"{g}-urltest-out"}
+      for g in ("main", "youtube", "anthropic_am")],
     {"type": "direct", "tag": "direct-out"}]}
 
 STUBS = '''
@@ -27,6 +29,8 @@ heal_wan() { [ -f "$D/wan" ]; }
 logread() { cat "$D/log" 2>/dev/null; }
 logger() { :; }
 clash_get() { echo "$*" >> "$D/tests"; }
+select_server() { echo "$1 $2" >> "$D/selected"; }
+singbox_pid() { echo 123; }
 setsid() { echo "$*" >> "$D/spawned"; }
 reply() { printf '%s\\n' "$1"; exit 0; }
 fail() { echo "$*" >&2; exit 1; }
@@ -47,10 +51,15 @@ class Router:
     def now(self, t):
         (self.d / "now").write_text(str(t))
 
-    def alive(self, tags, delay=100):
-        (self.d / "proxies.json").write_text(json.dumps({"proxies": {
-            t: {"history": [{"delay": delay if t in tags else 0}] if t in tags else []}
-            for t in [o["tag"] for o in CONFIG["outbounds"]] + ["main-heal-1-out"]}}))
+    def alive(self, tags, delay=100, now=None):
+        """now: {group: selected tag} of the sections' selectors (main-out etc.), with the live members"""
+        live = json.loads((self.d / "run/live.json").read_text()) if (self.d / "run/live.json").exists() else CONFIG
+        proxies = {t: {"history": [{"delay": delay if t in tags else 0}] if t in tags else []}
+                   for t in [o["tag"] for o in CONFIG["outbounds"]] + ["main-heal-1-out"]}
+        for o in live["outbounds"]:
+            if o["type"] == "selector":
+                proxies[o["tag"]] = {"all": o["outbounds"], "now": (now or {}).get(o["tag"], o["default"])}
+        (self.d / "proxies.json").write_text(json.dumps({"proxies": proxies}))
 
     def sh(self, command, stdin=""):
         p = subprocess.run(["sh", "-c", STUBS + command, "sh", str(HELPER), str(self.d)], input=stdin,
@@ -162,6 +171,57 @@ def test_failed_lists_are_updated_once_a_group_works(tmp_path):
     r.alive(["youtube-1-out"])
     r.check(); r.now(1500); r.check()
     assert "podkop list_update" in (tmp_path / "spawned").read_text()
+
+
+def test_strict_rule_refuses_instead_of_borrowing(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/heal-off").write_text("anthropic_am\n")
+    out = json.loads(r.sh("cmd_strict", json.dumps({"sections": ["main"]})))
+    assert out["strict"] == ["main"] and (tmp_path / "etc/strict").read_text() == "main\n"
+    assert (tmp_path / "applies").read_text().splitlines() == ["strict rules changed"]
+    live = json.loads((tmp_path / "run/live.json").read_text())
+    assert {"type": "socks", "tag": "main-strict-out", "server": "127.0.0.1", "server_port": 9} in live["outbounds"]
+    sel = next(o for o in live["outbounds"] if o["tag"] == "main-out")
+    assert sel["outbounds"][-1] == "main-strict-out" and sel["default"] == "main-urltest-out"
+    assert not any(o["tag"] == "youtube-strict-out" for o in live["outbounds"])
+    json.loads(r.sh("cmd_strict", json.dumps({"sections": ["main"]})))      # the same: nothing written, no reload
+    assert len((tmp_path / "applies").read_text().splitlines()) == 1
+    # its servers die while others work: nothing is borrowed, the selector refuses
+    r.alive(["youtube-1-out", "youtube-2-out"])
+    r.check(); r.now(1030); r.check()
+    assert [t for t, _ in r.events()] == ["strict", "group_down", "strict_closed"]
+    down = dict(r.events())["group_down"]
+    assert down["borrowed"] == [] and r.state()["groups"]["main"]["block"] is True
+    assert r.members() == ["main-1-out", "main-2-out"]
+    assert (tmp_path / "selected").read_text().splitlines() == ["main main-strict-out"]
+    r.alive(["youtube-1-out", "youtube-2-out"], now={"main-out": "main-strict-out"})
+    r.now(1060); r.check()                      # still down: selected already, nothing to do
+    assert (tmp_path / "selected").read_text().splitlines() == ["main main-strict-out"]
+    # the manager's own servers for it (its history) are taken, and open it
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib/sing_box_config_facade.sh").write_text(
+        'sing_box_cf_add_proxy_outbound() { printf \'{"outbounds":[{"type":"vless","tag":"%s-out","server":"x"}]}\' "$2"; }\n')
+    r.sh(f'PODKOP_LIB="{tmp_path}/lib"; cmd_heal_links', json.dumps({"section": "main", "fingerprint": "fp1", "links": ["vless://a@b:1#x"]}))
+    assert "main-heal-1-out" in r.members()
+    r.alive(["youtube-1-out", "youtube-2-out", "main-heal-1-out"], now={"main-out": "main-strict-out"})
+    r.now(1090); r.check()
+    assert r.events()[-1][0] == "strict_open" and r.state()["groups"]["main"]["block"] is False
+    assert (tmp_path / "selected").read_text().splitlines()[-1] == "main main-urltest-out"
+    # one of its own answers: open at once, up after the usual good checks
+    r.alive(["youtube-1-out", "main-2-out"], now={"main-out": "main-urltest-out"})
+    for t in (1120, 1150, 1180, 1210, 1400, 1430):
+        r.now(t); r.check()
+    assert r.events()[-1][0] == "group_recovered" and r.state()["groups"] == {}
+    # a pinned section is left to its pin
+    (tmp_path / "etc/pins").write_text("main\tabc\n")
+    r.alive(["youtube-1-out"], now={"main-out": "main-1-out"})
+    r.now(1460); r.check(); r.now(1490); r.check()
+    assert r.state()["groups"]["main"]["block"] is True
+    assert (tmp_path / "selected").read_text().splitlines()[-1] == "main main-urltest-out"
+    json.loads(r.sh("cmd_strict", json.dumps({"sections": []})))
+    assert not (tmp_path / "etc/strict").exists()
+    assert not any(o["tag"] == "main-strict-out" for o in json.loads((tmp_path / "run/live.json").read_text())["outbounds"])
 
 
 def test_heal_off_command_validates_and_writes_only_on_change(tmp_path):
