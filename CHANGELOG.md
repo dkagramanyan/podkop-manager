@@ -3,6 +3,19 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.39.0 — 2026-11-09
+
+- **Rule edits without a podkop restart** (agent 0.14): a change that touches
+  only servers, a rule's own domains or its URLTest settings (test URL,
+  interval, tolerance) or an outbound JSON is applied like a server change:
+  sing-box reloads in place in about a second instead of podkop restarting
+  (20–30 s without proxy or firewall rules). The rule's domain list file is
+  made anew in RAM. Subnets, community lists and list files still restart
+  podkop (they feed its firewall sets). The result says what changed.
+- Fixed: `exit-ips` left a temp folder in RAM at every call (2727 on reserv
+  after two days); `job <id> <wait>` now waits through a reload too; the
+  daemon's event watcher ends with the daemon.
+
 ## 1.38.0 — 2026-11-09
 
 - **Strict guard** (agent 0.13): while podkop is down or restarting, the
