@@ -92,6 +92,12 @@ export async function viewOverview(main, id) {
           h("span", {}, "The probe can't test servers on this router. Reading and applying settings work.")),
         h("a", { class: "alink", href: "https://github.com/FiyeroT/podkop-engine", target: "_blank", rel: "noopener" }, "podkop-engine")));
     }
+    if (st && st.ipv6 && st.ipv6.lan && !st.ipv6.blocked) {
+      notes.push(h("div", { class: "note" }, h("span", { class: "dot warn" }),
+        h("div", { class: "col" }, h("span", {}, "IPv6 goes around podkop"),
+          h("span", {}, "The LAN gets IPv6 from this router and podkop routes IPv4 only: a device with its own DNS reaches any site over IPv6 directly. A firewall rule can keep IPv6 off the internet.")),
+        h("a", { class: "alink", href: `#/r/${id}/reliability` }, "Connection health")));
+    }
     if (st && st.probe && st.probe.cron) {
       const [mm, hh] = st.probe.cron.split(/\s+/);
       const at = /^\d+$/.test(mm) && /^\d+$/.test(hh) ? ` at ${hh.padStart(2, "0")}:${mm.padStart(2, "0")}` : "";

@@ -86,6 +86,9 @@ if [ "$UNINSTALL" = 1 ]; then
   rm -rf /usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent /tmp/podkop-agent /usr/share/podkop-agent
   [ -f "$KEYS" ] && sed -i "/ $MARK\$/d; / $FWD_MARK\$/d" "$KEYS"
   firewall_rules "" off
+  if uci -q get firewall.podkop_agent_ipv6_block >/dev/null; then
+    uci -q delete firewall.podkop_agent_ipv6_block; uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1
+  fi
   for _f in $KEEP; do
     [ "$_f" = /usr/bin/podkop-probe ] && continue      # podkop-probe stays
     sed -i "\\|^$_f\$|d" /etc/sysupgrade.conf 2>/dev/null

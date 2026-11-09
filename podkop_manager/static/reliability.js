@@ -69,7 +69,7 @@ export async function viewReliability(main, id) {
   let dirty = false, checking = false, saving = false, settingsForm;
   let enabled, automatic, interval, cooldown, save, reset, settingsNote;
   let query = "", source = "all", kind = "all";
-  let heal = null, healDraft = null, healSaving = false;
+  let heal = null, healDraft = null, healSaving = false, ipv6Saving = false;
   const opened = new Set();
   const endpoint = `/api/routers/${id}/reliability`;
   const table = (headers, rows) => h("div", { class: "scroll-x" }, h("table", {},
@@ -171,6 +171,27 @@ export async function viewReliability(main, id) {
     badge(r.exit === 0 && r.code >= 200 && r.code < 400 ? "up" : r.exit === 0 ? "degraded" : "down",
       r.exit === 0 ? `HTTP ${r.code}` : `Request failed (curl ${r.exit})`),
     Number.isFinite(r.seconds) ? `${Math.round(r.seconds * 1000)} ms` : "–", r.bytes == null ? "–" : `${(r.bytes / 1024).toFixed(1)} KiB / 64 KiB`]));
+  // IPv6: podkop routes IPv4 only; a LAN with IPv6 lets devices that resolve
+  // names themselves reach sites over IPv6, past podkop
+  const ipv6Card = () => {
+    const v6 = (getRouter(id).status || {}).ipv6;
+    const body = v6 === undefined
+      ? [h("p", { class: "small muted" }, "Needs podkop-agent 0.11.0 or newer on the router."),
+        h("div", { class: "row" }, h("button", { class: "btn", onclick: () => updateAgent(id, load) }, "Update agent"))]
+      : [h("label", { class: "check" }, h("input", { type: "checkbox", checked: v6.blocked, disabled: ipv6Saving, onchange: async e => {
+        const on = e.target.checked;
+        ipv6Saving = true; draw();
+        try { await api("PUT", `/api/routers/${id}/ipv6`, { blocked: on }); toast(on ? "IPv6 from the LAN is blocked" : "IPv6 from the LAN is allowed again"); }
+        catch (err) { toast(err.message, true); }
+        finally { ipv6Saving = false; if (!left) draw(); }
+      } }), "Block IPv6 from the LAN to the internet (a firewall rule, REJECT: devices fall back to IPv4 at once)"),
+      v6.lan && !v6.blocked ? h("p", { class: "small bad-text" }, "This router gives the LAN IPv6 and has an IPv6 route to the provider: a device that resolves names itself (a browser with its own DNS, a phone's private DNS) reaches any site over IPv6 without podkop.")
+        : h("p", { class: "small muted" }, v6.lan ? "The LAN gets IPv6 from this router; the rule keeps it off the internet." : "This router gives the LAN no IPv6 route to the internet right now; the rule is a safeguard for when it does.")];
+    return h("section", { class: "card pad stack", "aria-label": "IPv6" },
+      h("div", { class: "col" }, h("h2", {}, "IPv6"),
+        h("p", { class: "small muted" }, "podkop routes IPv4 only. Rules by domain hold because the router's DNS answers no IPv6 addresses, but a device with its own DNS, or an address list, goes around them over IPv6.")),
+      body);
+  };
   // Self-heal: a URLTest group whose own servers all fail borrows working
   // servers on the router and the probe runs; sections switched off are left alone.
   const healCard = () => {
@@ -324,7 +345,7 @@ export async function viewReliability(main, id) {
               h("div", { class: "col" }, labels[o.data.kind] || o.data.kind, o.data.scope), h("span", { class: "health-message" }, o.data.message)]))
               : h("p", { class: "empty" }, "No observations in this window.")], String(data.observations.length))));
     drawActivity();
-    put(page, content, healCard(),
+    put(page, content, healCard(), ipv6Card(),
       h("section", { class: "card pad stack" }, disclose("settings", "Monitoring and recovery settings", settingsForm)),
       h("section", { class: "card pad stack" }, disclose("kuma", "Uptime Kuma integration", [
         h("p", {}, "Use a Kuma Webhook notification with its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),

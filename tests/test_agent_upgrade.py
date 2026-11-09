@@ -186,7 +186,7 @@ def test_upgrade_preserves_pairing_settings_and_service_state(router_files, stop
     assert all(p.read_bytes() == data for p, data in before.items())
     assert (root / "usr/share/podkop-agent/reliability.sh").read_bytes() == (src / "reliability.sh").read_bytes()
     version = subprocess.check_output([str(root / "usr/bin/podkop-agent"), "version"], env=env, text=True)
-    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "resolve", "upgrade"]
+    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "resolve", "upgrade", "ipv6"]
     log = Path(env["TEST_INIT_LOG"]).read_text()
     assert ("new:restart" in log) is not stopped
     assert "enable" not in log and "stop\n" not in log

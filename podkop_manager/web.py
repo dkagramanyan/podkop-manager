@@ -465,6 +465,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         await hub.refresh(rt)
         return out
 
+    @app.put("/api/routers/{rid}/ipv6", dependencies=[api])
+    async def ipv6_block(rid: int, body: dict):
+        """podkop routes IPv4 only: a firewall rule keeps IPv6 from the LAN off
+        the internet, so no device goes past podkop over IPv6 (agent 0.11)."""
+        rt = router_or_404(rid)
+        if not isinstance(body.get("blocked"), bool):
+            raise HTTPException(400, "blocked must be true or false")
+        out = await rt.agent.call("ipv6", "on" if body["blocked"] else "off", timeout=60)
+        await hub.refresh(rt)
+        return out
+
     @app.post("/api/routers/{rid}/reliability/check", dependencies=[api])
     async def check_connections(rid: int):
         rt = router_or_404(rid)

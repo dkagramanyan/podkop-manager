@@ -92,9 +92,19 @@ def test_dead_group_borrows_working_servers_then_gives_them_back(tmp_path):
     r.now(1060); r.check()                      # still down: no second report, no reload
     assert len(r.events()) == 1 and len((tmp_path / "applies").read_text().splitlines()) == 1
     r.alive(["youtube-1-out", "main-2-out"])    # one of its own servers works again
-    r.now(1090); r.check()
+    for t in (1090, 1120, 1150, 1180, 1300):    # 4 good checks in a row, and 5 min since the borrow: not yet
+        r.now(t); r.check()
+    assert [t for t, _ in r.events()] == ["group_down"] and r.state()["groups"]["main"]["good"] == 5
+    assert len((tmp_path / "applies").read_text().splitlines()) == 1
+    r.now(1340); r.check()
     assert r.events()[-1][0] == "group_recovered"
     assert r.members() == ["main-1-out", "main-2-out"] and r.state()["groups"] == {}
+    r.alive(["youtube-1-out"])                  # dead again: a flapping server starts the count anew
+    r.now(1370); r.check(); r.now(1400); r.check()
+    assert r.events()[-1][0] == "group_down" and r.state()["groups"]["main"].get("good", 0) == 0
+    r.alive(["youtube-1-out", "main-2-out"])
+    r.now(1430); r.check()
+    assert r.events()[-1][0] == "group_down" and r.state()["groups"]["main"]["good"] == 1
 
 
 def test_wan_outage_is_not_reported(tmp_path):
@@ -329,7 +339,10 @@ def test_a_reported_group_reports_its_recovery_after_an_apply(tmp_path):
     r.now(1060); r.check()                      # still down: a new count, no second report yet
     assert [t for t, _ in r.events()] == ["group_down"] and r.state()["groups"]["main"]["alerted"]
     r.alive(["main-1-out"])
-    r.now(1090); r.check()
+    for t in (1090, 1120, 1150):                # nothing borrowed: up after 4 good checks
+        r.now(t); r.check()
+    assert [t for t, _ in r.events()] == ["group_down"]
+    r.now(1180); r.check()
     assert [t for t, _ in r.events()] == ["group_down", "group_recovered"] and r.state()["groups"] == {}
 
 
