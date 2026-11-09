@@ -257,6 +257,8 @@ cmd_diagnostics() (
 #
 # $ETC/heal-off: sections that are never healed and never lend their servers,
 #   one per line ("*" = self-heal off). Written only when it changes (flash).
+#   Kill-switch rules, and the rules they send through, are still watched
+#   (see heal_watch_json): their kill switch works without self-heal.
 # $RUN/heal/state.json: {fingerprint, groups: {<section>: {dead_since, reported,
 #   added: [borrowed tags], extra: [manager tags], lease, hold}}}
 # $RUN/heal/extra.json: {<section>: [outbounds built from the manager's links]}
@@ -287,6 +289,18 @@ heal_off_json() {
 
 strict_json() {
   if [ -s "$ETC/strict" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/strict"; else echo '[]'; fi
+}
+
+# heal_watch_json <sing-box config>: the sections watched even where self-heal
+# is off: the kill-switch rules and the rules they send through (their servers
+# decide whether the kill switch closes). Watched but off = tested and tracked,
+# never lends and never borrows.
+heal_watch_json() {
+  jq -c --argjson strict "$(strict_json)" '
+    ($strict | map(select(type == "string"))) as $s
+    | $s + [.outbounds[]? | select(.type == "selector" and (.tag | endswith("-out"))) | (.tag[:-4]) as $t
+            | select($s | index($t)) | (.outbounds // [])[] | select(. != "\($t)-strict-out")
+            | if endswith("-out") then .[:-4] else . end] | unique' "$1" 2>/dev/null || echo '[]'
 }
 
 # strict_filter <config>, in place: every strict section whose outbound is a
@@ -552,13 +566,14 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 | [($cfg[0].outbounds // [])[] | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
    | (.tag[:-12]) as $sec | ($old[$sec] // {}) as $o
    | (($o.added // []) + ($o.extra // [])) as $ours
-   | {sec: $sec, off: ($alloff or ($off | index($sec) != null)),
+   | ($alloff or ($off | index($sec) != null)) as $nh
+   | {sec: $sec, off: ($nh and (($watch | index($sec)) | not)), heal: ($nh | not),
       strikes: ($o.strikes // 0), good: ($o.good // 0), borrowed_at: ($o.borrowed_at // 0), block: ($o.block // false),
       strict: ($strict | index($sec) != null),
       added: ($o.added // []), extra: ($o.extra // []), lease: ($o.lease // 0), hold: ($o.hold // 0),
       dead_since: $o.dead_since, reported: ($o.reported // false), alerted: ($o.alerted // false),
       orig: [((.outbounds // []) + (.fallbacks // []))[] | select(. as $t | $ours | index($t) | not)]}] as $G
-| [$G[] | select(.off | not) | .sec as $sec | .orig[] | select(alive(.)) | {sec: $sec, tag: ., d: delay(.)}] as $live
+| [$G[] | select(.heal) | .sec as $sec | .orig[] | select(alive(.)) | {sec: $sec, tag: ., d: delay(.)}] as $live
 | reduce $G[] as $g ({groups: {}, events: [], apply: false, lists: false, due: false};
     if $g.off then
       if (($g.added + $g.extra) | length) > 0 then .apply = true else . end
@@ -592,7 +607,7 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
                                own: (([$extra[] | select(alive(.))] | length) > 0)}
           | if $expired then .apply = true else . end
         else
-          (if $g.strict then []
+          (if $g.strict or ($g.heal | not) then []
            elif ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
            else [$live | sort_by(.d)[] | select(.sec != $g.sec) | .tag | select(. as $t | $g.orig | index($t) | not)]
                 | dedupe | .[:3] end) as $donors
@@ -618,7 +633,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 heal_plan() {
   jq -nc --slurpfile cfg "$1" --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" --arg fp "$3" \
     --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" --argjson need "$HEAL_STRIKES" \
-    --argjson recover "$HEAL_RECOVER" --argjson minhold "$HEAL_MIN_HOLD" --argjson strict "$(strict_json)" "$HEAL_PLAN_JQ"
+    --argjson recover "$HEAL_RECOVER" --argjson minhold "$HEAL_MIN_HOLD" --argjson strict "$(strict_json)" \
+    --argjson watch "$(heal_watch_json "$1")" "$HEAL_PLAN_JQ"
 }
 
 # heal_filter <in> <out>: sing-box's config with the borrowed servers and the
@@ -661,11 +677,10 @@ clash_get() {
 # working server, or that are being healed. The proxies file is read again.
 heal_test() {
   _ht="$RUN/heal/test"; rm -rf "$_ht"; mkdir -p "$_ht"
-  jq -r --slurpfile p "$2" --argjson off "$(heal_off_json)" '
-    if ($off | index("*")) then empty else
+  jq -r --slurpfile p "$2" --argjson off "$(heal_off_json)" --argjson watch "$(heal_watch_json "$1")" '
     .outbounds[]? | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
-    | select(.tag[:-12] as $s | $off | index($s) | not)
-    | [.tag, ($p[0].proxies[.tag].now // ""), (.url // "https://www.gstatic.com/generate_204")] | @tsv end' "$1" > "$_ht/groups"
+    | select(.tag[:-12] as $s | ($watch | index($s)) or (($off | index("*") or ($off | index($s))) | not))
+    | [.tag, ($p[0].proxies[.tag].now // ""), (.url // "https://www.gstatic.com/generate_204")] | @tsv' "$1" > "$_ht/groups"
   while IFS="$TAB" read -r _hg _hn _hu; do
     case "$_hn" in ""|*[!A-Za-z0-9_-]*) echo "$_hg" > "$_ht/$_hg.failed"; continue ;; esac
     ( clash_get "/proxies/$_hn/delay" --data-urlencode "url=$_hu" --data "timeout=$HEAL_TIMEOUT" > "$_ht/$_hg.now"

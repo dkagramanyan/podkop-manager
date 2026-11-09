@@ -452,8 +452,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         cfg = (rt.config or {}).get("config") or {"sections": []}
         sections = [s["name"] for s in cfg["sections"]
                     if s.get("type") == "section" and s.get("options", {}).get("proxy_config_type") == "urltest"]
+        agent = [int(x) for x in (((rt.status or {}).get("agent") or {}).get("version") or "0").split(".") if x.isdigit()]
         return {"supported": heal is not None, "sections": sections,
                 "off": (heal or {}).get("off", []), "strict": (heal or {}).get("strict"),
+                "needs_heal": agent < [0, 17, 0],      # before 0.17 the kill switch worked only with self-heal on
                 "groups": (heal or {}).get("groups", {})}
 
     @app.put("/api/routers/{rid}/heal", dependencies=[api])
