@@ -54,11 +54,11 @@ Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
 Self-heal (below) needs agent 0.9.0 or newer; updating from the manager
 needs agent 0.10.0; the IPv6 switch needs agent 0.11.0; strict rules need
-agent 0.12.0.
+agent 0.13.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.37.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.37.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.40.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.40.0
 ```
 
 ## Add a router
@@ -78,6 +78,9 @@ that already runs there are taken into **Keys and usage** and the rules.
 
 ## Good to know
 
+- A change that touches only servers, a rule's own domains or its URLTest
+  settings is applied in about a second (sing-box reloads in place); other
+  changes restart podkop, 20–30 s without proxy (agent 0.14).
 - Changes collect in a draft until **Review and apply**. There, **When →
   Later** applies them at a day and time you pick (your browser's clock),
   even with no browser open: the change waits in **History → Scheduled**
@@ -119,13 +122,20 @@ that already runs there are taken into **Keys and usage** and the rules.
 - **Strict** (a switch on a Fastest rule): the rule's traffic goes through
   its own servers or nowhere. Self-heal never lends it other rules' servers;
   while none of its servers answers, connections are refused at once instead
-  of hanging, and open again the moment one answers. Needs self-heal on for
-  the rule and agent 0.12.
+  of hanging, and open again the moment one answers. While podkop itself is
+  down or restarting, the rule's subnets and domains are blocked on the
+  router (nft + dnsmasq, built from podkop's lists in RAM) instead of going
+  direct; a device with its own DNS is caught only for addresses in a list.
+  Needs self-heal on for the rule and agent 0.13.
 - **IPv6** (**Connection health → IPv6**): podkop routes IPv4 only. If the
   router gives the LAN IPv6, a device with its own DNS reaches any site over
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the
   LAN off the internet (devices fall back to IPv4 at once). Overview warns
   while the LAN has IPv6 and the rule is off.
+- A rule's probe parameters have **If none works**: when nothing in its
+  countries answers, self-heal may take a server in Europe or anywhere;
+  the nightly probe keeps to the rule's countries. A router with less than
+  60 MB free tests servers on the manager through the router.
 - The probe spreads a rule's servers across networks: at most 2 from the
   same /24 while a healthy server elsewhere is left, so one blocked address
   range can't take a whole rule down.

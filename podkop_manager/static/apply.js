@@ -211,7 +211,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       finished = true; marks.end = t; clearInterval(timer); S.jobWatch.delete(vid);
       const ok = ["applied", "saved", "unchanged"].includes(job.state);
       if (job.problems && job.problems.length) { problems = job.problems; showChecks(); }
-      put(result, h("div", { class: `result ${ok ? "ok" : "bad"}` }, ok ? (job.state === "applied" ? (job.hot ? "Applied without restarting podkop: only servers changed." : "Applied, podkop is running.") : job.message)
+      put(result, h("div", { class: `result ${ok ? "ok" : "bad"}` }, ok ? (job.state === "applied" ? (job.hot ? `Applied without restarting podkop: ${(job.message.match(/\((.*)\)/) || [])[1] || "only sing-box's config changed"}.` : "Applied, podkop is running.") : job.message)
         : job.state === "reverted" ? `podkop did not start with these settings, so the router put the old ones back: ${job.reason || job.message}` : job.message));
       go.textContent = ok ? "Done" : "Applying failed";
       close.textContent = "Close";

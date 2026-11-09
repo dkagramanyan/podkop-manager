@@ -76,7 +76,7 @@ export async function viewReliability(main, id) {
     h("thead", {}, h("tr", {}, headers.map(x => h("th", { scope: "col" }, x)))),
     h("tbody", {}, rows.map(row => h("tr", {}, row.map(x => h("td", {}, x)))))));
   const labels = { transport: "Connection failure", dns: "DNS failure", access: "Access rejected", application: "Application failure",
-    switch: "Server switch", recovery: "Recovery reported", pending: "Retry pending", test: "Test notification" };
+    lists: "List download failed", switch: "Server switch", recovery: "Recovery reported", pending: "Retry pending", test: "Test notification" };
   const badge = (value, text) => h("span", { class: `pill ${value === true || value === "up" ? "ok"
     : value === false || value === "down" ? "bad" : value === "degraded" ? "warn" : ""}` },
     text || (value === true || value === "up" ? "Responding" : value === false || value === "down" ? "Failed"
@@ -231,6 +231,8 @@ export async function viewReliability(main, id) {
         h("p", { class: "small muted" }, "The router tests the server each rule uses every 30 seconds. When none of a rule's own servers answers in two checks in a row (30–75 seconds) and the router's line works, the router lends it up to 3 working servers of other rules at once, in memory only. The manager adds servers from earlier versions if there are none to lend, and runs the probe; its servers are applied when it finishes. Borrowed servers go away when the rule's own servers answer again or its settings change. Rules switched off here are never changed and never lend their servers.")),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff, disabled: healSaving,
         onchange: e => toggle("*", e.target.checked) }), "Self-heal on this router"),
+      heal.guard && (heal.strict || []).length ? h("p", { class: "small muted" }, `Strict guard: ${heal.guard.domains} domains and ${heal.guard.subnets} subnets of the strict rules are blocked on the router while podkop is down or restarting${
+        heal.guard.dns ? " — active now (podkop is not running)" : heal.guard.nft ? "; the subnet part is always in place" : "; not in place (podkop is stopped on purpose)"}.`) : null,
       heal.sections.length ? table(["Rule", "Self-heal", "Now"], heal.sections.map(name => [h("b", {}, name),
         h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff && !off.has(name), disabled: allOff || healSaving,
           onchange: e => toggle(name, e.target.checked) }), allOff || off.has(name) ? "Off" : "On"),

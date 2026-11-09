@@ -224,6 +224,76 @@ def test_strict_rule_refuses_instead_of_borrowing(tmp_path):
     assert not any(o["tag"] == "main-strict-out" for o in json.loads((tmp_path / "run/live.json").read_text())["outbounds"])
 
 
+GUARD_STUBS = '''
+PODKOP_LIB="$D/nolib"
+config_json() { cat "$D/podkop.json"; }
+podkop_enabled() { [ ! -f "$D/disabled" ]; }
+podkop_start_state() { cat "$D/start" 2>/dev/null || echo 0; }
+singbox_pid() { cat "$D/pid" 2>/dev/null; }
+guard_dnsmasq_dir() { printf '%s' "$D/dnsmasq.d"; }
+guard_dnsmasq_restart() { echo restart >> "$D/dnsmasq-restarts"; }
+guard_fetch() { echo "$1" >> "$D/fetched"; echo srs > "$2"; }
+guard_decompile() { printf '{"version":3,"rules":[{"domain_suffix":["youtube.com","ytimg.com"],"domain":["www.youtube.com"]},{"ip_cidr":["5.6.7.0/24"]}]}' > "$2"; }
+guard_nft() { echo "$*" >> "$D/nft"; case "$1" in -f) touch "$D/nft-table" ;; delete) rm -f "$D/nft-table" ;; list) [ -f "$D/nft-table" ] ;; esac; }
+'''
+
+PODKOP = {"sections": [
+    {"name": "settings", "type": "settings", "anonymous": False, "options": {"source_network_interfaces": ["br-lan", "br-guest"]}},
+    {"name": "main", "type": "section", "anonymous": False, "options": {
+        "connection_type": "proxy", "proxy_config_type": "urltest", "community_lists": ["youtube"],
+        "user_domain_list_type": "text", "user_domains_text": "netflix.com fast.com\n.nflxvideo.net\nbad domain\n",
+        "user_subnet_list_type": "dynamic", "user_subnets": ["1.2.3.0/24", "not-a-subnet", "9.9.9.9"]}},
+    {"name": "youtube", "type": "section", "anonymous": False, "options": {
+        "connection_type": "proxy", "proxy_config_type": "urltest", "user_domain_list_type": "text", "user_domains_text": "other.example"}}]}
+
+
+def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/strict").write_text("main\n")
+    (tmp_path / "podkop.json").write_text(json.dumps(PODKOP))
+    (tmp_path / "pid").write_text("123")
+    sh = lambda c, i="": r.sh(GUARD_STUBS + c, i)       # noqa: E731
+    sh("guard_sync")
+    g = tmp_path / "run/guard"
+    assert (g / "domains").read_text().splitlines() == sorted(["netflix.com", "fast.com", "nflxvideo.net", "youtube.com", "ytimg.com", "www.youtube.com", "bad", "domain"])
+    assert (g / "subnets").read_text().splitlines() == ["1.2.3.0/24", "5.6.7.0/24", "9.9.9.9"]
+    assert (tmp_path / "fetched").read_text().strip().endswith("/youtube.srs")
+    nft = (g / "nft.conf").read_text()
+    assert 'elements = { 1.2.3.0/24, 5.6.7.0/24, 9.9.9.9 }' in nft and 'iifname { "br-lan", "br-guest" } ip daddr @strict4' in nft
+    assert "198.18.0.0/15" in nft and "delete table inet podkop_agent_guard" in nft
+    assert (tmp_path / "nft").read_text().splitlines()[-1] == f"-f {g}/nft.conf"     # the table is in while podkop runs
+    assert not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()               # the DNS part is not
+    assert json.loads(sh("guard_status")) == {"domains": 8, "subnets": 3, "nft": True, "dns": False}
+    sh("guard_sync")                                   # nothing changed: nothing fetched or applied again
+    assert (tmp_path / "fetched").read_text().count("\n") == 1 and (tmp_path / "nft").read_text().splitlines()[-1].startswith("list ")
+    # sing-box goes away: the domains answer NXDOMAIN after one dnsmasq restart
+    (tmp_path / "pid").write_text("")
+    sh("guard_sync")
+    conf = (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").read_text().splitlines()
+    assert "address=/netflix.com/" in conf and "address=/youtube.com/" in conf and len(conf) == 8
+    assert (tmp_path / "dnsmasq-restarts").read_text().count("restart") == 1
+    sh("guard_sync")                                   # still down: no second restart
+    assert (tmp_path / "dnsmasq-restarts").read_text().count("restart") == 1
+    # podkop starting (not finished) keeps it; podkop up takes it out
+    (tmp_path / "pid").write_text("124"); (tmp_path / "start").write_text("running")
+    sh("guard_sync")
+    assert (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()
+    (tmp_path / "start").write_text("0")
+    sh("guard_sync")
+    assert not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()
+    assert (tmp_path / "dnsmasq-restarts").read_text().count("restart") == 2
+    assert [t for t, _ in r.events()] == ["strict_guard", "strict_guard"]
+    # before a podkop restart the file goes in without a dnsmasq restart of ours (podkop's follows)
+    sh("guard_dns_on norestart")
+    assert (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists() and (tmp_path / "dnsmasq-restarts").read_text().count("restart") == 2
+    # no strict sections any more: table and file go
+    (tmp_path / "etc/strict").unlink()
+    sh("guard_sync")
+    assert not (tmp_path / "nft-table").exists() and not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()
+    assert json.loads(sh("guard_status"))["nft"] is False
+
+
 def test_heal_off_command_validates_and_writes_only_on_change(tmp_path):
     r = Router(tmp_path)
     out = json.loads(r.sh("cmd_heal_off", json.dumps({"sections": ["anthropic_am"]})))
@@ -446,3 +516,50 @@ def test_lending_waits_while_the_router_is_busy(tmp_path, monkeypatch):
     rt.agent.call = busy_once
     asyncio.run(hub.heal(rt, {"section": "main", "borrowed": []}))
     assert len(tries) == 2 and not [e for e in db.events(rid) if e["type"] == "heal_links_failed"]
+
+
+def test_heal_probe_widens_to_fallback_countries_only_when_nothing_in_its_own_works(tmp_path):
+    cfg = _cfg(["vless://u@dead1:443#a"])
+    db, hub, rt, rid = _hub(tmp_path, cfg)
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "countries": ["BG", "LT"], "heal_fallback": "europe"}))
+    assert hub.probe_options(rid)[1] == "BG,LT"                                  # the nightly run keeps to the rule
+    heal = hub.probe_options(rid, {"main"}, heal=True)[1].split(",")
+    assert "BG" in heal and "DE" in heal and "NL" in heal                       # self-heal tests Europe too
+    rows = [{"link": "vless://u@de1:443#d", "verdict": "GOOD", "country": "DE", "median": 0.1, "mbit": 50},
+            {"link": "vless://u@lt1:443#l", "verdict": "GOOD", "country": "LT", "median": 0.2, "mbit": 50}]
+    st = {"state": "done", "rows": rows}
+    picks = hub.auto_picks(rid, st, widen={"main"})
+    assert [x["country"] for x in picks["main"]["matched"]] == ["LT"] and not picks["main"].get("widened")   # its own first
+    picks = hub.auto_picks(rid, {"state": "done", "rows": rows[:1]}, widen={"main"})
+    assert [x["country"] for x in picks["main"]["matched"]] == ["DE"] and picks["main"]["widened"]
+    assert hub.auto_picks(rid, {"state": "done", "rows": rows[:1]})["main"]["links"] == []    # not for the nightly picks
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "countries": ["BG"], "heal_fallback": "any"}))
+    assert hub.probe_options(rid, {"main"}, heal=True)[1] == "all"
+    assert podkop.widened(podkop.check_auto_rule({"countries": []})) is None
+
+
+def test_low_memory_router_tests_servers_on_the_manager(tmp_path, monkeypatch):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    db.set_probe_settings(rid, keys=["https://sub.example/k"])
+    rt.status = {"agent": {"version": "0.15.0"}, "router": {"mem_free": 40}}
+    hub.local_probe_missing = lambda: ""
+    ran = []
+
+    async def local(rt_, run_id, trigger, options):
+        ran.append(("local", trigger))
+    hub._run_local_probe = local
+    asyncio.run(hub.start_probe(rid, "manual"))
+    assert ran == [("local", "manual")] and not [c for c in rt.agent.calls if c[0] == "probe-start"]
+    assert db.events(rid)[0]["type"] == "probe_on_manager"
+    hub.probes.clear()
+    rt.status["router"]["mem_free"] = 120
+    asyncio.run(hub.start_probe(rid, "manual"))
+    assert [c[0] for c in rt.agent.calls if c[0] == "probe-start"] == ["probe-start"]    # enough memory: on the router
+
+
+def test_failed_list_downloads_are_observed():
+    from podkop_manager import reliability as r
+    line = "Sun Nov  9 10:00:00 2026 daemon.err sing-box[1]: ERROR[72000] router: fetch rule-set main-hetzner-community-ruleset: unexpected status: 504 Gateway Timeout"
+    o = r.log_observation(line)
+    assert o["kind"] == "lists" and o["scope"] == "main-hetzner-community-ruleset"
+    assert r.classify("dial tcp: i/o timeout") == "transport"

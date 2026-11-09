@@ -3,6 +3,51 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.40.0 — 2026-11-09
+
+- **Self-heal fallback countries** (a rule's probe parameters → "If none
+  works"): when nothing in the rule's countries answers, the self-heal probe
+  may take a server in Europe or in any country; the nightly probe keeps to
+  the rule's countries. Until now a rule like netflix (BG/LT/LV/PL/SK) stayed
+  on borrowed servers of other rules for days.
+- **Probe placement by memory**: a router with less than 60 MB free tests
+  its servers on the manager through the router instead of starting a
+  sing-box with every server on the router (out of memory there means a
+  crash and the failsafe). Overview shows the router's free memory (agent
+  0.15 reports it).
+- **List downloads** that fail ("fetch rule-set … 504") show on Connection
+  health as "List download failed", by list; a failed list stays stale and
+  new domains of that service go direct until it loads.
+
+## 1.39.0 — 2026-11-09
+
+- **Rule edits without a podkop restart** (agent 0.14): a change that touches
+  only servers, a rule's own domains or its URLTest settings (test URL,
+  interval, tolerance) or an outbound JSON is applied like a server change:
+  sing-box reloads in place in about a second instead of podkop restarting
+  (20–30 s without proxy or firewall rules). The rule's domain list file is
+  made anew in RAM. Subnets, community lists and list files still restart
+  podkop (they feed its firewall sets). The result says what changed.
+- Fixed: `exit-ips` left a temp folder in RAM at every call (2727 on reserv
+  after two days); `job <id> <wait>` now waits through a reload too; the
+  daemon's event watcher ends with the daemon.
+
+## 1.38.0 — 2026-11-09
+
+- **Strict guard** (agent 0.13): while podkop is down or restarting, the
+  destinations of strict rules are blocked on the router instead of going
+  direct: their IPv4 subnets (user, local, remote and community lists) in an
+  nft table of ours that rejects forwarded traffic from the LAN, in place
+  whenever strict rules exist (with podkop up these packets never reach it),
+  and their domains (user, local, remote and community lists, decompiled
+  like podkop reads them) as NXDOMAIN answers in a dnsmasq file that is in
+  only while podkop is away: put in before every podkop restart and within a
+  second of sing-box going away (the daemon follows ubus service events),
+  taken out once podkop runs. Lists are built in RAM and fetched again daily.
+  Connection health shows the counts and whether the guard is active.
+- Agent 0.13.0: `heal` status carries `guard`; events `strict_guard`; the
+  uninstall removes the table and the file.
+
 ## 1.37.0 — 2026-11-09
 
 - **Strict rules** (a switch on each Fastest rule, agent 0.12): the rule's
