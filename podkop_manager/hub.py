@@ -44,6 +44,7 @@ HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in 
 HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
 HEAL_RETRY_SECONDS = 10      # the router was busy reloading: try again after this
 STALE_PICKS = 86400          # a loaded config takes the last probe's servers only if it is this recent
+LOW_MEM_MB = 60              # a router with less free memory tests its servers on the manager
 # podkop-engine-full's sing-box (static, with the SSH outbound) for probes run
 # here: downloaded once, when asked for, into the data folder (bin/)
 ENGINE_VERSION = "1.13.21-r14"
@@ -694,12 +695,20 @@ class Hub:
             raise AgentError("no_keys", "add your keys (subscription URLs or links) first")
         if rid in self.probes and not self.probes[rid].done():
             raise AgentError("busy", "a probe is already running")
-        options = self.probe_options(rid, rt.heal_sections if trigger == "heal" else None)
+        options = self.probe_options(rid, rt.heal_sections if trigger == "heal" else None, heal=trigger == "heal")
         if trigger == "heal":
             # quick: the dead rules' countries, pings only; speeds are checked at the next nightly run
             options += ["-q", "--no-speed"]
         agent = [int(x) for x in (((rt.status or {}).get("agent") or {}).get("version") or "0").split(".") if x.isdigit()]
-        if ps.get("test_from") == "manager":
+        # a router short of memory tests its servers here instead (the probe starts a sing-box with
+        # every server on the router; out of memory there means a sing-box crash and the failsafe)
+        mem = (((rt.status or {}).get("router") or {}).get("mem_free"))
+        where = ps.get("test_from")
+        if where != "manager" and isinstance(mem, (int, float)) and mem < LOW_MEM_MB and agent >= [0, 4, 0] \
+                and not self.local_probe_missing():
+            where = "manager"
+            self._event(rt, "probe_on_manager", {"mem_free": mem, "message": f"the router has {mem:g} MB free: servers are tested on this server through it"})
+        if where == "manager":
             if why := self.local_probe_missing():
                 raise AgentError("no_engine", f"this server can't test servers: {why}")
             if agent < [0, 4, 0]:
@@ -948,9 +957,11 @@ class Hub:
                 self.db.set_auto_rule(rid, section, podkop.check_auto_rule(
                     {"top": top, "fallback": 5, "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube}))
 
-    def auto_picks(self, rid: int, status: dict) -> dict:
+    def auto_picks(self, rid: int, status: dict, widen: set | None = None) -> dict:
         """The servers of the last probe for each rule that takes them from it;
-        with fix_fingerprint, REALITY links get a fingerprint new servers accept."""
+        with fix_fingerprint, REALITY links get a fingerprint new servers accept.
+        widen: sections being healed, which take their fallback countries when
+        nothing in their own works."""
         # never the servers of keys moved away from for their traffic limit
         if avoided := self._avoided_links(rid):
             status = dict(status, rows=[r for r in status.get("rows") or [] if usage.norm(r.get("link") or "") not in avoided])
@@ -966,8 +977,14 @@ class Hub:
         health = self.db.get_setting(f"server_health:{rid}", {}) if opts["enabled"] and opts["auto_recover"] else {}
         health = {key: value for key, value in health.items() if time.time() - value.get("checked", 0) < 86400}
         rows = [dict(r, health=health.get(reliability.identity(r.get("link") or ""), {})) for r in rows]
-        picks = {r["section"]: podkop.auto_pick(rows, dict(r, keys=[k for k in rk.get(r["section"], []) if k in subs]))
-                 for r in self.db.auto_rules(rid)}
+        picks = {}
+        for r in self.db.auto_rules(rid):
+            rule = dict(r, keys=[k for k in rk.get(r["section"], []) if k in subs])
+            pick = podkop.auto_pick(rows, rule)
+            if not pick["links"] and widen and r["section"] in widen and (wide := podkop.widened(rule)):
+                pick = podkop.auto_pick(rows, wide)
+                pick["widened"] = bool(pick["links"])
+            picks[r["section"]] = pick
         if self.db.probe_settings(rid).get("fix_fingerprint"):
             for p in picks.values():
                 p["links"], p["fallback"] = ([podkop.fix_fingerprint(x) for x in p[k]] for k in ("links", "fallback"))
@@ -989,13 +1006,15 @@ class Hub:
                 self.db.set_auto_rule(rid, r["section"], podkop.check_auto_rule(dict(r, countries=codes)))
         self.db.set_probe_settings(rid, options=[])
 
-    def probe_options(self, rid: int, sections: set | None = None) -> list:
+    def probe_options(self, rid: int, sections: set | None = None, heal: bool = False) -> list:
         """The probe's options for a run, from the rules (or only these
         sections' rules): their countries, the loosest limits, and the YouTube
         check if a rule needs it. Rules pick by exit country, so relays whose
         entry is elsewhere (e.g. whitelist bypasses entering in Russia) are
-        tested too."""
+        tested too. A self-heal run also tests a rule's fallback countries."""
         rules = [r for r in self.db.auto_rules(rid) if sections is None or r["section"] in sections]
+        if heal:
+            rules = [podkop.widened(r) or r for r in rules]
         countries = sorted({c for r in rules for c in r["countries"]})
         out = ["--countries", ",".join(countries) if rules and all(r["countries"] for r in rules) else "all",
                "--no-entry-check"]
@@ -1230,7 +1249,7 @@ class Hub:
         """The router's config with the probe's lists and the rules by country
         (or only these sections' rules) filled in, without the servers of keys
         moved away from; ValueError when nothing would change."""
-        picks = {k: v for k, v in self.auto_picks(rid, status).items() if sections is None or k in sections}
+        picks = {k: v for k, v in self.auto_picks(rid, status, widen=sections).items() if sections is None or k in sections}
         if not any(p["links"] for p in picks.values()):
             raise ValueError("the probe found no server for any rule")
         return podkop.merge_probe(cur["config"], picks)

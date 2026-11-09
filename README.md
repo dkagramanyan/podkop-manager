@@ -58,7 +58,7 @@ agent 0.13.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.39.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.39.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.40.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.40.0
 ```
 
 ## Add a router
@@ -132,6 +132,10 @@ that already runs there are taken into **Keys and usage** and the rules.
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the
   LAN off the internet (devices fall back to IPv4 at once). Overview warns
   while the LAN has IPv6 and the rule is off.
+- A rule's probe parameters have **If none works**: when nothing in its
+  countries answers, self-heal may take a server in Europe or anywhere;
+  the nightly probe keeps to the rule's countries. A router with less than
+  60 MB free tests servers on the manager through the router.
 - The probe spreads a rule's servers across networks: at most 2 from the
   same /24 while a healthy server elsewhere is left, so one blocked address
   range can't take a whole rule down.

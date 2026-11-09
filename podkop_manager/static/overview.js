@@ -131,7 +131,8 @@ export async function viewOverview(main, id) {
       h("div", {}, h("span", {}, "podkop-agent"),
         h("span", {}, `${st.agent.version}, ${pk.paused || !pk.enabled ? "watchdog paused" : "watchdog on"}`)),
       h("div", {}, h("span", {}, "Router"),
-        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), `up ${days ? days + " d" : hours + " h"}`].filter(Boolean).join(", "))),
+        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), `up ${days ? days + " d" : hours + " h"}`,
+          st.router.mem_free != null ? `${st.router.mem_free} MB free` : null].filter(Boolean).join(", "))),
       st.failsafe && !pk.running ? h("div", { style: "grid-column: 1 / -1" }, h("span", {}, `Failsafe, ${st.failsafe.time}`),
         h("span", { class: "bad-text" }, st.failsafe.message)) : null);
   };

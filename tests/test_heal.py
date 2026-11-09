@@ -516,3 +516,50 @@ def test_lending_waits_while_the_router_is_busy(tmp_path, monkeypatch):
     rt.agent.call = busy_once
     asyncio.run(hub.heal(rt, {"section": "main", "borrowed": []}))
     assert len(tries) == 2 and not [e for e in db.events(rid) if e["type"] == "heal_links_failed"]
+
+
+def test_heal_probe_widens_to_fallback_countries_only_when_nothing_in_its_own_works(tmp_path):
+    cfg = _cfg(["vless://u@dead1:443#a"])
+    db, hub, rt, rid = _hub(tmp_path, cfg)
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "countries": ["BG", "LT"], "heal_fallback": "europe"}))
+    assert hub.probe_options(rid)[1] == "BG,LT"                                  # the nightly run keeps to the rule
+    heal = hub.probe_options(rid, {"main"}, heal=True)[1].split(",")
+    assert "BG" in heal and "DE" in heal and "NL" in heal                       # self-heal tests Europe too
+    rows = [{"link": "vless://u@de1:443#d", "verdict": "GOOD", "country": "DE", "median": 0.1, "mbit": 50},
+            {"link": "vless://u@lt1:443#l", "verdict": "GOOD", "country": "LT", "median": 0.2, "mbit": 50}]
+    st = {"state": "done", "rows": rows}
+    picks = hub.auto_picks(rid, st, widen={"main"})
+    assert [x["country"] for x in picks["main"]["matched"]] == ["LT"] and not picks["main"].get("widened")   # its own first
+    picks = hub.auto_picks(rid, {"state": "done", "rows": rows[:1]}, widen={"main"})
+    assert [x["country"] for x in picks["main"]["matched"]] == ["DE"] and picks["main"]["widened"]
+    assert hub.auto_picks(rid, {"state": "done", "rows": rows[:1]})["main"]["links"] == []    # not for the nightly picks
+    db.set_auto_rule(rid, "main", podkop.check_auto_rule({"top": 2, "countries": ["BG"], "heal_fallback": "any"}))
+    assert hub.probe_options(rid, {"main"}, heal=True)[1] == "all"
+    assert podkop.widened(podkop.check_auto_rule({"countries": []})) is None
+
+
+def test_low_memory_router_tests_servers_on_the_manager(tmp_path, monkeypatch):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    db.set_probe_settings(rid, keys=["https://sub.example/k"])
+    rt.status = {"agent": {"version": "0.15.0"}, "router": {"mem_free": 40}}
+    hub.local_probe_missing = lambda: ""
+    ran = []
+
+    async def local(rt_, run_id, trigger, options):
+        ran.append(("local", trigger))
+    hub._run_local_probe = local
+    asyncio.run(hub.start_probe(rid, "manual"))
+    assert ran == [("local", "manual")] and not [c for c in rt.agent.calls if c[0] == "probe-start"]
+    assert db.events(rid)[0]["type"] == "probe_on_manager"
+    hub.probes.clear()
+    rt.status["router"]["mem_free"] = 120
+    asyncio.run(hub.start_probe(rid, "manual"))
+    assert [c[0] for c in rt.agent.calls if c[0] == "probe-start"] == ["probe-start"]    # enough memory: on the router
+
+
+def test_failed_list_downloads_are_observed():
+    from podkop_manager import reliability as r
+    line = "Sun Nov  9 10:00:00 2026 daemon.err sing-box[1]: ERROR[72000] router: fetch rule-set main-hetzner-community-ruleset: unexpected status: 504 Gateway Timeout"
+    o = r.log_observation(line)
+    assert o["kind"] == "lists" and o["scope"] == "main-hetzner-community-ruleset"
+    assert r.classify("dial tcp: i/o timeout") == "transport"

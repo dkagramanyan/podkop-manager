@@ -522,9 +522,25 @@ def check_auto_rule(rule: dict) -> dict:
     profile = rule.get("profile", "balanced")
     if profile not in ("balanced", "interactive", "streaming"):
         raise ValueError("profile is balanced, interactive or streaming")
+    # self-heal, when nothing in the rule's countries works: keep waiting (""), take Europe, or any country
+    heal_fallback = str(rule.get("heal_fallback") or "").strip().lower()
+    if heal_fallback not in ("", "europe", "any"):
+        raise ValueError("heal_fallback is '', 'europe' or 'any'")
     return {"profile": profile, "countries": countries, "protocols": protocols, "exit_ips": exit_ips,
             "name_contains": str(rule.get("name_contains") or "").strip(), "top": top, "fallback": fallback,
-            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube}
+            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube, "heal_fallback": heal_fallback}
+
+
+def widened(rule: dict) -> dict | None:
+    """The rule with its self-heal fallback countries, or None when it has none
+    (or they add nothing to its own)."""
+    fb = rule.get("heal_fallback") or ""
+    if fb == "any":
+        return dict(rule, countries=[]) if rule["countries"] else None
+    if fb == "europe":
+        more = sorted(set(rule["countries"]) | set(EUROPE))
+        return dict(rule, countries=more) if more != rule["countries"] else None
+    return None
 
 
 def auto_pick(rows: list, rule: dict) -> dict:

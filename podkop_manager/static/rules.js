@@ -639,6 +639,12 @@ export function autoRuleEditor(w, s, rule) {
             oninput: (e) => { ui.ip = e.target.value; update({ exit_ips: e.target.value.split(/[\s,]+/).filter(Boolean) }); },
             onblur: () => { ui.ip = null; } }),
           h("span", { class: "help" }, "Several, separated by spaces")),
+          h("label", { for: "heal-fb", class: "lbl", style: "font-weight: 500; padding-top: 8px" }, "If none works"),
+          h("div", { class: "ctl" }, h("select", { id: "heal-fb", class: "input mid", style: "max-width: 360px",
+            onchange: (e) => update({ heal_fallback: e.target.value }, true) },
+            [["", "Wait for one of these countries (self-heal keeps looking)"], ["europe", "Self-heal may take a server in Europe"], ["any", "Self-heal may take a server in any country"]]
+              .map(([value, label]) => h("option", { value, selected: (rule.heal_fallback || "") === value }, label))),
+          h("span", { class: "help" }, "Only while self-heal finds nothing in the chosen countries; the nightly probe keeps to them")),
           h("label", { for: "namef", class: "lbl", style: "font-weight: 500; padding-top: 8px" }, "Name contains"),
           h("div", { class: "ctl" }, h("input", { id: "namef", class: "input mid", style: "max-width: 360px", "data-k": "auto-name", placeholder: "Any, e.g. Warsaw",
             value: rule.name_contains, oninput: (e) => update({ name_contains: e.target.value }) })),

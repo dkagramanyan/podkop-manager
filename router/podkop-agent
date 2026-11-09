@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.14.0"
+AGENT_VERSION="0.15.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -967,10 +967,11 @@ cmd_status() {
     --arg probe "$_probe" --argjson pins "${_pins:-[]}" \
     --arg fs "$(tail -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" --arg fst "$(head -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" \
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" \
+    --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     --argjson px "${_px:-null}" --argjson v6 "$(ipv6_json)" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
-      router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz},
+      router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
       singbox: {version: $fixed.singbox, features: $fixed.features},
