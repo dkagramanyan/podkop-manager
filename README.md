@@ -53,12 +53,12 @@ enforce their own six-second limit and do not require extra packages.
 Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
 Self-heal (below) needs agent 0.9.0 or newer; updating from the manager
-needs agent 0.10.0; the IPv6 switch needs agent 0.11.0; strict rules need
-agent 0.13.0.
+needs agent 0.10.0; the IPv6 switch needs agent 0.11.0; the kill switch needs
+agent 0.16.0.
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.40.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.40.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.41.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.41.0
 ```
 
 ## Add a router
@@ -119,14 +119,15 @@ that already runs there are taken into **Keys and usage** and the rules.
   change, and podkop's lists are downloaded again if they failed while the
   rule was down. Rules switched off there (e.g. one that must keep its own
   exit country) are never changed and never lend servers.
-- **Strict** (a switch on a Fastest rule): the rule's traffic goes through
-  its own servers or nowhere. Self-heal never lends it other rules' servers;
-  while none of its servers answers, connections are refused at once instead
-  of hanging, and open again the moment one answers. While podkop itself is
-  down or restarting, the rule's subnets and domains are blocked on the
-  router (nft + dnsmasq, built from podkop's lists in RAM) instead of going
-  direct; a device with its own DNS is caught only for addresses in a list.
-  Needs self-heal on for the rule and agent 0.13.
+- **Kill switch** (a switch on a Fastest rule, or on a rule that sends
+  through one): the rule's traffic goes through its servers or nowhere.
+  Self-heal never lends a kill-switch rule other rules' servers; while none
+  of its servers answers, connections are refused at once instead of
+  hanging, and open again the moment one answers. While podkop itself is
+  down or restarting, the rule's domains answer NXDOMAIN on the router; its
+  subnets and the addresses its own domains resolve to (refreshed hourly)
+  are blocked at all times, which also catches a device with its own DNS.
+  Needs self-heal on for the rule and agent 0.16.
 - **IPv6** (**Connection health → IPv6**): podkop routes IPv4 only. If the
   router gives the LAN IPv6, a device with its own DNS reaches any site over
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the

@@ -14,6 +14,7 @@ CONFIG = {"outbounds": [
                                              "youtube-2-out", "anthropic_am-1-out")],
     *[{"type": "selector", "tag": f"{g}-out", "outbounds": [f"{g}-1-out", f"{g}-urltest-out"], "default": f"{g}-urltest-out"}
       for g in ("main", "youtube", "anthropic_am")],
+    {"type": "selector", "tag": "meta-out", "outbounds": ["main-out"]},       # an outbound rule that sends through main
     {"type": "direct", "tag": "direct-out"}]}
 
 STUBS = '''
@@ -58,7 +59,7 @@ class Router:
                    for t in [o["tag"] for o in CONFIG["outbounds"]] + ["main-heal-1-out"]}
         for o in live["outbounds"]:
             if o["type"] == "selector":
-                proxies[o["tag"]] = {"all": o["outbounds"], "now": (now or {}).get(o["tag"], o["default"])}
+                proxies[o["tag"]] = {"all": o["outbounds"], "now": (now or {}).get(o["tag"], o.get("default", o["outbounds"][0]))}
         (self.d / "proxies.json").write_text(json.dumps({"proxies": proxies}))
 
     def sh(self, command, stdin=""):
@@ -224,6 +225,32 @@ def test_strict_rule_refuses_instead_of_borrowing(tmp_path):
     assert not any(o["tag"] == "main-strict-out" for o in json.loads((tmp_path / "run/live.json").read_text())["outbounds"])
 
 
+def test_kill_switch_on_a_rule_that_sends_through_another_rule(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/heal-off").write_text("anthropic_am\n")
+    (tmp_path / "etc/pins").write_text("")
+    r.sh("cmd_strict", json.dumps({"sections": ["meta"]}))
+    live = json.loads((tmp_path / "run/live.json").read_text())
+    sel = next(o for o in live["outbounds"] if o["tag"] == "meta-out")
+    assert sel["outbounds"] == ["main-out", "meta-strict-out"] and not any(o["tag"] == "main-strict-out" for o in live["outbounds"])
+    # main's servers die; main (not strict) borrows youtube's, but meta refuses: main's own are all down
+    r.alive(["youtube-1-out", "youtube-2-out"])
+    r.check(); r.now(1030); r.check()
+    assert set(r.members()[2:]) == {"youtube-1-out", "youtube-2-out"} and r.state()["groups"]["main"]["own"] is False
+    assert (tmp_path / "selected").read_text().splitlines() == ["meta meta-strict-out"]
+    assert [t for t, _ in r.events()][-1] == "strict_closed" and dict(r.events())["strict_closed"]["via"] is True
+    r.alive(["youtube-1-out", "youtube-2-out"], now={"meta-out": "meta-strict-out"})
+    r.now(1060); r.check()
+    assert len((tmp_path / "selected").read_text().splitlines()) == 1
+    # one of main's own servers answers: meta opens at once (main is still "recovering")
+    r.alive(["youtube-1-out", "main-2-out"], now={"meta-out": "meta-strict-out"})
+    r.now(1090); r.check()
+    assert r.state()["groups"]["main"]["own"] is True and r.state()["groups"]["main"]["reported"] is True
+    assert (tmp_path / "selected").read_text().splitlines()[-1] == "meta main-out"
+    assert [t for t, _ in r.events()][-1] == "strict_open"
+
+
 GUARD_STUBS = '''
 PODKOP_LIB="$D/nolib"
 config_json() { cat "$D/podkop.json"; }
@@ -235,6 +262,10 @@ guard_dnsmasq_restart() { echo restart >> "$D/dnsmasq-restarts"; }
 guard_fetch() { echo "$1" >> "$D/fetched"; echo srs > "$2"; }
 guard_decompile() { printf '{"version":3,"rules":[{"domain_suffix":["youtube.com","ytimg.com"],"domain":["www.youtube.com"]},{"ip_cidr":["5.6.7.0/24"]}]}' > "$2"; }
 guard_nft() { echo "$*" >> "$D/nft"; case "$1" in -f) touch "$D/nft-table" ;; delete) rm -f "$D/nft-table" ;; list) [ -f "$D/nft-table" ] ;; esac; }
+resolve_host() { echo "$1" >> "$D/resolved-names"; case "$1" in netflix.com) echo 45.57.40.1 ;; fast.com) echo 45.57.40.2 ;; esac; }
+guard_resolve_start() {      # as the real one, but in the foreground
+  if [ -s "$RUN/guard/own-domains" ] && { [ ! -f "$RUN/guard/resolved" ] || [ -z "$(find "$RUN/guard/resolved" -mmin -60)" ]; }; then
+    touch "$RUN/guard/resolved"; guard_resolve_job; fi; }
 '''
 
 PODKOP = {"sections": [
@@ -255,18 +286,23 @@ def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_pat
     (tmp_path / "pid").write_text("123")
     sh = lambda c, i="": r.sh(GUARD_STUBS + c, i)       # noqa: E731
     sh("guard_sync")
+    sh("guard_sync")                                   # the resolved addresses came in after the first build: built once more
     g = tmp_path / "run/guard"
     assert (g / "domains").read_text().splitlines() == sorted(["netflix.com", "fast.com", "nflxvideo.net", "youtube.com", "ytimg.com", "www.youtube.com", "bad", "domain"])
     assert (g / "subnets").read_text().splitlines() == ["1.2.3.0/24", "5.6.7.0/24", "9.9.9.9"]
     assert (tmp_path / "fetched").read_text().strip().endswith("/youtube.srs")
     nft = (g / "nft.conf").read_text()
-    assert 'elements = { 1.2.3.0/24, 5.6.7.0/24, 9.9.9.9 }' in nft and 'iifname { "br-lan", "br-guest" } ip daddr @strict4' in nft
+    assert 'elements = { 1.2.3.0/24, 45.57.40.1, 45.57.40.2, 5.6.7.0/24, 9.9.9.9 }' in nft and 'iifname { "br-lan", "br-guest" } ip daddr @strict4' in nft
+    # only the rules' own domains are resolved (not the community lists), once an hour
+    assert (g / "own-domains").read_text().splitlines() == ["bad", "domain", "fast.com", "netflix.com", "nflxvideo.net"]
+    assert set((tmp_path / "resolved-names").read_text().split()) == {"bad", "domain", "fast.com", "netflix.com", "nflxvideo.net"}
     assert "198.18.0.0/15" in nft and "delete table inet podkop_agent_guard" in nft
     assert (tmp_path / "nft").read_text().splitlines()[-1] == f"-f {g}/nft.conf"     # the table is in while podkop runs
     assert not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()               # the DNS part is not
-    assert json.loads(sh("guard_status")) == {"domains": 8, "subnets": 3, "nft": True, "dns": False}
-    sh("guard_sync")                                   # nothing changed: nothing fetched or applied again
+    assert json.loads(sh("guard_status")) == {"domains": 8, "subnets": 3, "resolved": 2, "nft": True, "dns": False}
+    sh("guard_sync")                                   # nothing changed: nothing fetched, resolved or applied again
     assert (tmp_path / "fetched").read_text().count("\n") == 1 and (tmp_path / "nft").read_text().splitlines()[-1].startswith("list ")
+    assert (tmp_path / "resolved-names").read_text().count("\n") == 5
     # sing-box goes away: the domains answer NXDOMAIN after one dnsmasq restart
     (tmp_path / "pid").write_text("")
     sh("guard_sync")
