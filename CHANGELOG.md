@@ -3,6 +3,16 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.42.0 — 2026-11-10
+
+- **Kill switch works with self-heal off.** Until now the agent watched only
+  the rules self-heal was on for, so a kill switch on a rule (or on one that
+  sends through a rule) with self-heal off never closed. The kill-switch
+  rules and the rules they send through are now tested and tracked even
+  where self-heal is off: their switch closes and opens as before, nothing
+  is borrowed or lent for them, and their outages are reported. Needs agent
+  0.17.0; with an older agent the switch keeps asking for self-heal.
+
 ## 1.41.0 — 2026-11-10
 
 - **Kill switch** is the new name of "Strict" (same switch on the rule).

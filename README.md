@@ -54,11 +54,11 @@ Agent 0.8.3 also supports OpenWrt's standard jq package without regex support;
 `jq-full` is not required for diagnostics or automatic recovery.
 Self-heal (below) needs agent 0.9.0 or newer; updating from the manager
 needs agent 0.10.0; the IPv6 switch needs agent 0.11.0; the kill switch needs
-agent 0.16.0.
+agent 0.16.0 (0.17.0 with self-heal off).
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.41.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.41.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.42.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.42.0
 ```
 
 ## Add a router
@@ -127,7 +127,8 @@ that already runs there are taken into **Keys and usage** and the rules.
   down or restarting, the rule's domains answer NXDOMAIN on the router; its
   subnets and the addresses its own domains resolve to (refreshed hourly)
   are blocked at all times, which also catches a device with its own DNS.
-  Needs self-heal on for the rule and agent 0.16.
+  It works with self-heal off too: the rule's servers (or those of the rule
+  it sends through) are still watched, only nothing is borrowed.
 - **IPv6** (**Connection health → IPv6**): podkop routes IPv4 only. If the
   router gives the LAN IPv6, a device with its own DNS reaches any site over
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the

@@ -251,6 +251,33 @@ def test_kill_switch_on_a_rule_that_sends_through_another_rule(tmp_path):
     assert [t for t, _ in r.events()][-1] == "strict_open"
 
 
+def test_kill_switch_works_with_self_heal_off(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/heal-off").write_text("*\n")
+    (tmp_path / "etc/pins").write_text("")
+    r.sh("cmd_strict", json.dumps({"sections": ["main"]}))
+    r.alive(["youtube-1-out", "youtube-2-out"])
+    r.check(); r.now(1030); r.check()
+    tests = (tmp_path / "tests").read_text()                 # only main's servers are tested
+    assert "/proxies/main-1-out/delay" in tests and "/proxies/youtube-1-out/delay" not in tests
+    assert [t for t, _ in r.events()] == ["strict", "group_down", "strict_closed"]
+    assert dict(r.events())["group_down"]["borrowed"] == [] and r.members() == ["main-1-out", "main-2-out"]
+    assert (tmp_path / "selected").read_text().splitlines() == ["main main-strict-out"]
+    assert (tmp_path / "applies").read_text().splitlines() == ["strict rules changed"]     # no reload for borrowing
+    r.alive(["youtube-1-out", "main-2-out"], now={"main-out": "main-strict-out"})
+    r.now(1060); r.check()
+    assert r.events()[-1][0] == "strict_open" and (tmp_path / "selected").read_text().splitlines()[-1] == "main main-urltest-out"
+    # a rule that sends through main, with self-heal off for main only: main is watched, borrows nothing
+    (tmp_path / "etc/heal-off").write_text("main\n")
+    r.sh("cmd_strict", json.dumps({"sections": ["meta"]}))
+    r.alive(["youtube-1-out", "youtube-2-out"])
+    r.now(1090); r.check(); r.now(1120); r.check()
+    assert r.members() == ["main-1-out", "main-2-out"] and r.state()["groups"]["main"]["own"] is False
+    assert (tmp_path / "selected").read_text().splitlines()[-1] == "meta meta-strict-out"
+    assert r.events()[-1][0] == "strict_closed" and r.events()[-1][1]["via"] is True
+
+
 GUARD_STUBS = '''
 PODKOP_LIB="$D/nolib"
 config_json() { cat "$D/podkop.json"; }

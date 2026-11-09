@@ -452,15 +452,15 @@ export function viaRule(w, s) {
 
 // Kill switch: the rule's traffic goes through its servers or nowhere (saved on
 // the router at once, like "Take links from probe"; agent 0.12, through
-// another rule: agent 0.16)
+// another rule: agent 0.16, with self-heal off: agent 0.17)
 function strictField(w, s) {
   const heal = w.heal;
   if (!heal || !heal.supported || !Array.isArray(heal.strict)) return null;
   const via = (s.options || {}).proxy_config_type === "outbound" ? viaRule(w, s) : null;
   const watched = via ? via.name : s.name;
-  const off = heal.off.includes("*") || heal.off.includes(watched);
+  const off = heal.needs_heal && (heal.off.includes("*") || heal.off.includes(watched));
   const on = heal.strict.includes(s.name);
-  return h("label", { class: "check", title: off ? `Self-heal is off for ${watched}, so its servers are not watched` : null },
+  return h("label", { class: "check", title: off ? `This agent watches ${watched}'s servers only with self-heal on` : null },
     h("input", { type: "checkbox", role: "switch", checked: on, disabled: off, onchange: async (e) => {
       const sections = heal.strict.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
       e.target.disabled = true;
@@ -469,9 +469,9 @@ function strictField(w, s) {
       finally { w.redraw(); }
     } }),
     h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Kill switch"),
-      h("span", {}, off ? `Needs self-heal on for ${watched} (Connection health)`
+      h("span", {}, off ? `Needs self-heal on for ${watched}, or agent 0.17 (Connection health)`
         : via ? `Through ${via.name}'s servers or nowhere: connections refused at once while none of them answers (even if ${via.name} borrowed servers), its sites blocked on the router while podkop is down`
-          : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down")));
+          : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down (works with self-heal off too)")));
 }
 
 export async function toggleAuto(w, s, on) {
