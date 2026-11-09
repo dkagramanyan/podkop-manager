@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.12.0"
+AGENT_VERSION="0.13.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -331,6 +331,9 @@ health() {
 # restart_podkop <marker>
 restart_podkop() {
   logger -t podkop-agent "$1"
+  # strict sections: their domains answer NXDOMAIN while podkop is away
+  # (podkop's stop restarts dnsmasq, which then reads the file)
+  if command -v guard_dns_on >/dev/null 2>&1 && guard_wanted; then guard_build; guard_dns_on norestart; fi
   # 9>&-: podkop must not inherit (and keep holding) the apply lock
   /etc/init.d/podkop restart >/dev/null 2>&1 9>&-
 }
@@ -765,13 +768,33 @@ traffic_poll() {
     mv "$_d/state.new" "$_d/state.json"
 }
 
+# guard_watch: a service event of sing-box or podkop (start, stop, crash)
+# wakes the daemon at once, for the strict guard; ubusd restarts are followed
+guard_watch() {
+  while :; do
+    ubus -S subscribe service 2>/dev/null | while IFS= read -r _l; do
+      case "$_l" in *'"service":"sing-box"'*|*'"service":"podkop"'*) touch "$RUN/guard/poke" ;; esac
+    done
+    sleep 5
+  done
+}
+
 daemon() {
-  mkdir -p "$RUN/jobs" "$ETC"
+  mkdir -p "$RUN/jobs" "$RUN/guard" "$ETC"
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
   undo_interrupted
   _last=""; _down=0; _heal=0
+  guard_watch & _gw=$!
+  trap 'kill "$_gw" 2>/dev/null; exit 0' TERM INT
   while :; do
-    sleep 15
+    _w=0
+    while [ "$_w" -lt 15 ] && [ ! -f "$RUN/guard/poke" ]; do sleep 1; _w=$((_w + 1)); done
+    rm -f "$RUN/guard/poke"
+    if command -v guard_sync >/dev/null 2>&1; then
+      # not while an apply or a recovery restarts podkop: they raise it themselves
+      flock -n "$RUN/apply.lock" true && guard_sync
+    fi
+    [ "$_w" -lt 15 ] && continue     # woken by a service event: the guard only
     [ -n "$(singbox_pid)" ] && traffic_poll
     if [ -f "$ETC/paused" ] || ! podkop_enabled; then _down=0; continue; fi
     # a change or a recovery holds the lock; podkop's own start takes a while

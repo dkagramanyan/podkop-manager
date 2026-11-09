@@ -303,6 +303,176 @@ strict_filter() {
         else . end)' "$1" > "$1.strict" && mv "$1.strict" "$1"
 }
 
+# --- strict guard: while podkop is down -----------------------------------------
+#
+# With podkop's nft table gone (a crash loop stopped by the engine's failsafe,
+# a full restart, 20-30 s) traffic goes direct. For strict sections the
+# router blocks their destinations instead, from lists built in RAM from
+# podkop's settings: user domains and subnets, local and remote lists, and
+# the community lists (fetched like podkop fetches them, decompiled).
+# - nft: a table of ours with their IPv4 subnets (and podkop's fake-IP range,
+#   addresses devices may still hold), rejecting forwarded traffic from the
+#   LAN. It is in place whenever strict sections exist: with podkop up these
+#   packets go to sing-box before they could be forwarded, so it changes
+#   nothing then, and there is no window when podkop goes down.
+# - dnsmasq: a file in its conf-dir answering NXDOMAIN for their domains,
+#   put in only while podkop is down or starting (with podkop up it would
+#   shadow podkop's answers), taken out once podkop runs. Raised before
+#   every podkop restart (podkop's own dnsmasq restart picks it up) and
+#   within a second of sing-box going away (the daemon follows ubus events).
+# A device with its own DNS (DoH in a browser) is not caught by the dnsmasq
+# part; the subnet part catches it when the destination is in a list.
+
+GUARD_TABLE=podkop_agent_guard
+GUARD_DNS=podkop-agent-strict.conf
+GUARD_LIST_AGE=1440     # minutes: remote and community lists are fetched again after a day
+
+guard_dnsmasq_dir() {
+  _gd=$(grep -hs '^conf-dir=' /var/etc/dnsmasq.conf.* 2>/dev/null | head -n 1 | cut -d= -f2 | cut -d, -f1)
+  [ -n "$_gd" ] || _gd=/tmp/dnsmasq.d
+  printf '%s' "$_gd"
+}
+# the pieces that touch the system, so tests can stand them in
+guard_fetch() { wget -q -T 30 -O "$2" "$1" 2>/dev/null || curl -fsSL --max-time 30 -o "$2" "$1" 2>/dev/null; }
+guard_decompile() { sing-box rule-set decompile -o "$2" "$1" >/dev/null 2>&1; }
+guard_dnsmasq_restart() { /etc/init.d/dnsmasq restart >/dev/null 2>&1 8>&- 9>&-; }
+guard_nft() { nft "$@" 2>/dev/null; }
+
+# the lists of a strict section: lines "D domain", "S subnet", "C community
+# list", "LD file", "LS file", "RD url", "RS url"
+GUARD_LISTS_JQ='
+def lst: if . == null then [] elif type == "array" then . else [.] end;
+def words: (if type == "string" then [.] else lst end)
+  | [.[] | tostring | split("\n")[] | split(" ")[] | split(",")[] | split("\t")[]] | map(select(. != ""));
+.sections[] | select(.type == "section" and (.name as $n | $strict | index($n)))
+| .options as $o
+| (if ($o.user_domain_list_type // "disabled") == "dynamic" then ($o.user_domains | words | .[] | "D \(.)")
+   elif ($o.user_domain_list_type // "") == "text" then ($o.user_domains_text | words | .[] | "D \(.)") else empty end),
+  (if ($o.user_subnet_list_type // "disabled") == "dynamic" then ($o.user_subnets | words | .[] | "S \(.)")
+   elif ($o.user_subnet_list_type // "") == "text" then ($o.user_subnets_text | words | .[] | "S \(.)") else empty end),
+  ($o.community_lists | lst | .[] | "C \(.)"),
+  ($o.local_domain_lists | lst | .[] | "LD \(.)"), ($o.local_subnet_lists | lst | .[] | "LS \(.)"),
+  ($o.remote_domain_lists | lst | .[] | "RD \(.)"), ($o.remote_subnet_lists | lst | .[] | "RS \(.)")'
+
+# guard_cached <url> <file>: the file, fetched when missing or old; an old
+# copy stays when the fetch fails
+guard_cached() {
+  if [ ! -s "$2" ] || [ -z "$(find "$2" -mmin "-$GUARD_LIST_AGE" 2>/dev/null)" ]; then
+    if guard_fetch "$1" "$2.t" && [ -s "$2.t" ]; then mv "$2.t" "$2"; else rm -f "$2.t"; touch -c "$2"; fi
+  fi
+  [ -s "$2" ]
+}
+
+# guard_build: the nft and dnsmasq files for the strict sections, built again
+# when their lists change or a fetched list is a day old
+guard_build() {
+  mkdir -p "$RUN/guard/lists"
+  _gc=$(config_json) || return 1
+  _gs=$(strict_json)
+  _gk=$(printf '%s%s' "$_gc" "$_gs" | md5sum | cut -c 1-32)
+  if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ] &&
+     [ -z "$(find "$RUN/guard/lists" -type f -mmin "+$GUARD_LIST_AGE" 2>/dev/null | head -n 1)" ]; then return 0; fi
+  _srs=$(. "$PODKOP_LIB/constants.sh" 2>/dev/null; printf '%s' "${SRS_MAIN_URL:-https://github.com/itdoginfo/allow-domains/releases/latest/download}")
+  : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"
+  printf '%s' "$_gc" | jq -r --argjson strict "$_gs" "$GUARD_LISTS_JQ" 2>/dev/null | while IFS= read -r _gl; do
+    _gv=${_gl#* }
+    case "$_gl" in
+      "D "*) printf '%s\n' "$_gv" >> "$RUN/guard/domains.t" ;;
+      "S "*) printf '%s\n' "$_gv" >> "$RUN/guard/subnets.t" ;;
+      "LD "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/domains.t" ;;
+      "LS "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/subnets.t" ;;
+      "RD "*) guard_cached "$_gv" "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" && cat "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" >> "$RUN/guard/domains.t" ;;
+      "RS "*) guard_cached "$_gv" "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" && cat "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" >> "$RUN/guard/subnets.t" ;;
+      "C "*)
+        case "$_gv" in *[!A-Za-z0-9_-]*) continue ;; esac
+        if guard_cached "$_srs/$_gv.srs" "$RUN/guard/lists/$_gv.srs" &&
+           { [ -s "$RUN/guard/lists/$_gv.json" ] && [ "$RUN/guard/lists/$_gv.json" -nt "$RUN/guard/lists/$_gv.srs" ] ||
+             guard_decompile "$RUN/guard/lists/$_gv.srs" "$RUN/guard/lists/$_gv.json"; }; then
+          jq -r '.rules[]? | (.domain // [])[], (.domain_suffix // [])[]' "$RUN/guard/lists/$_gv.json" 2>/dev/null >> "$RUN/guard/domains.t"
+          jq -r '.rules[]? | (.ip_cidr // [])[]' "$RUN/guard/lists/$_gv.json" 2>/dev/null >> "$RUN/guard/subnets.t"
+        fi ;;
+    esac
+  done
+  # only names and IPv4 subnets that are safe in the two files
+  tr -d '\r' < "$RUN/guard/domains.t" | sed 's/^\.//' | while IFS= read -r _gd; do
+    case "$_gd" in ""|*[!A-Za-z0-9.-]*|-*|.*|*..*) ;; *) printf '%s\n' "$_gd" ;; esac
+  done | sort -u > "$RUN/guard/domains"
+  tr -d '\r' < "$RUN/guard/subnets.t" | while IFS= read -r _gn; do
+    case "$_gn" in ""|*[!0-9./]*|*/|/*|*.*.*.*.*) ;; *) printf '%s\n' "$_gn" ;; esac
+  done | sort -u > "$RUN/guard/subnets"
+  rm -f "$RUN/guard/domains.t" "$RUN/guard/subnets.t"
+  sed 's|.*|address=/&/|' "$RUN/guard/domains" > "$RUN/guard/dnsmasq.conf"
+  _gi=$(printf '%s' "$_gc" | jq -r '.sections[] | select(.name == "settings") | .options.source_network_interfaces
+          | if type == "array" then . else [.] end | map(select(. != null and . != "")) | if length == 0 then ["br-lan"] else . end
+          | map("\"" + . + "\"") | join(", ")')
+  {
+    echo "table inet $GUARD_TABLE"
+    echo "delete table inet $GUARD_TABLE"
+    echo "table inet $GUARD_TABLE {"
+    echo "  set strict4 { type ipv4_addr; flags interval; auto-merge;"
+    [ -s "$RUN/guard/subnets" ] && printf '    elements = { %s }\n' "$(tr '\n' ',' < "$RUN/guard/subnets" | sed 's/,$//; s/,/, /g')"
+    echo "  }"
+    echo "  chain forward { type filter hook forward priority -5; policy accept;"
+    echo "    iifname { $_gi } ip daddr @strict4 meta l4proto tcp reject with tcp reset"
+    echo "    iifname { $_gi } ip daddr @strict4 reject"
+    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 meta l4proto tcp reject with tcp reset"
+    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 reject"
+    echo "  }"
+    echo "}"
+  } > "$RUN/guard/nft.conf"
+  printf '%s' "$_gk" > "$RUN/guard/key"
+  rm -f "$RUN/guard/nft.applied"
+  logger -t podkop-agent "strict guard: $(wc -l < "$RUN/guard/domains") domains, $(wc -l < "$RUN/guard/subnets") subnets"
+}
+
+# guard_wanted: strict sections exist and podkop is meant to run
+guard_wanted() { [ -s "$ETC/strict" ] && [ ! -f "$ETC/paused" ] && podkop_enabled; }
+
+guard_nft_sync() {
+  if guard_wanted && [ -s "$RUN/guard/nft.conf" ]; then
+    if [ "$(cat "$RUN/guard/nft.applied" 2>/dev/null)" = "$(cat "$RUN/guard/key")" ] && guard_nft list table inet "$GUARD_TABLE" >/dev/null; then return 0; fi
+    if guard_nft -f "$RUN/guard/nft.conf"; then cp "$RUN/guard/key" "$RUN/guard/nft.applied"
+    else logger -t podkop-agent "strict guard: nft refused the table"; fi
+  elif guard_nft list table inet "$GUARD_TABLE" >/dev/null; then
+    guard_nft delete table inet "$GUARD_TABLE"; rm -f "$RUN/guard/nft.applied"
+  fi
+}
+
+# guard_dns_on [norestart]: the NXDOMAIN file in; podkop's own dnsmasq restart
+# follows when this is called before a podkop restart
+guard_dns_on() {
+  [ -s "$RUN/guard/dnsmasq.conf" ] || return 0
+  _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
+  cmp -s "$RUN/guard/dnsmasq.conf" "$_gf" 2>/dev/null && return 0
+  mkdir -p "${_gf%/*}" && cp "$RUN/guard/dnsmasq.conf" "$_gf.t" && mv "$_gf.t" "$_gf" || return 1
+  [ "${1:-}" = norestart ] || guard_dnsmasq_restart
+  event strict_guard '{"dns":true}'
+}
+guard_dns_off() {
+  _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
+  [ -f "$_gf" ] || return 0
+  rm -f "$_gf"; guard_dnsmasq_restart
+  event strict_guard '{"dns":false}'
+}
+
+# guard_sync: the daemon's step, every 15 s and within a second of a
+# sing-box or podkop service event
+guard_sync() {
+  if ! guard_wanted; then
+    guard_nft_sync; guard_dns_off; return 0
+  fi
+  guard_build || return 0
+  guard_nft_sync
+  if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then guard_dns_on; else guard_dns_off; fi
+}
+
+guard_status() {
+  _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
+  jq -nc --arg d "$(wc -l 2>/dev/null < "$RUN/guard/domains" || echo 0)" --arg s "$(wc -l 2>/dev/null < "$RUN/guard/subnets" || echo 0)" \
+    --arg nft "$([ -f "$RUN/guard/nft.applied" ] && echo 1)" --arg dns "$([ -f "$_gf" ] && echo 1)" \
+    '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1")}'
+}
+
 # strict_enforce <proxies file>: each strict section's selector on its
 # refusing member while the group is down (state.json .block), on its URLTest
 # group otherwise; a pinned section is left to its pin
@@ -560,9 +730,9 @@ heal_status() {
   _hf=$(config_fp 2>/dev/null)
   jq -nc --argjson off "$(heal_off_json)" --slurpfile st "$RUN/heal/state.json" --arg fp "$_hf" '
     ($st[0] // {}) as $s
-    | {off: $off, strict: $strict, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' \
-    --argjson strict "$(strict_json)" 2>/dev/null ||
-    jq -nc --argjson off "$(heal_off_json)" --argjson strict "$(strict_json)" '{off: $off, strict: $strict, groups: {}}'
+    | {off: $off, strict: $strict, guard: $guard, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' \
+    --argjson strict "$(strict_json)" --argjson guard "$(guard_status)" 2>/dev/null ||
+    jq -nc --argjson off "$(heal_off_json)" --argjson strict "$(strict_json)" '{off: $off, strict: $strict, guard: null, groups: {}}'
 }
 
 cmd_heal() { reply "$(heal_status)"; }
@@ -612,6 +782,7 @@ cmd_strict() {
       exec 9>&-
       proxies > "$RUN/heal/proxies.json" 2>/dev/null && strict_enforce "$RUN/heal/proxies.json"
     fi
+    guard_sync
   fi
   reply "$(heal_status)"
 }
