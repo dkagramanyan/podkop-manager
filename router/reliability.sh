@@ -263,6 +263,8 @@ cmd_diagnostics() (
 HEAL_LEASE=7200      # the manager's links, unless it sends them again
 HEAL_HOLD=600        # after a failed reload, no new try for this long
 HEAL_STRIKES=2       # checks in a row with no answering server before a group is down
+HEAL_RECOVER=4       # checks in a row with an answering server before it is up again
+HEAL_MIN_HOLD=300    # s a group keeps its borrowed servers at least (no reload churn)
 HEAL_TIMEOUT=5000    # ms for a test request through a server
 
 heal_off_json() {
@@ -283,7 +285,7 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
    | (.tag[:-12]) as $sec | ($old[$sec] // {}) as $o
    | (($o.added // []) + ($o.extra // [])) as $ours
    | {sec: $sec, off: ($alloff or ($off | index($sec) != null)),
-      strikes: ($o.strikes // 0),
+      strikes: ($o.strikes // 0), good: ($o.good // 0), borrowed_at: ($o.borrowed_at // 0),
       added: ($o.added // []), extra: ($o.extra // []), lease: ($o.lease // 0), hold: ($o.hold // 0),
       dead_since: $o.dead_since, reported: ($o.reported // false), alerted: ($o.alerted // false),
       orig: [((.outbounds // []) + (.fallbacks // []))[] | select(. as $t | $ours | index($t) | not)]}] as $G
@@ -293,8 +295,18 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
       if (($g.added + $g.extra) | length) > 0 then .apply = true else . end
     elif ([$g.orig[] | select(alive(.))] | length) > 0 then
       if (($g.added + $g.extra) | length) > 0 or $g.reported or $g.alerted then
-        .apply = (.apply or (($g.added + $g.extra) | length) > 0) | .lists = true
-        | .events += [{type: "group_recovered", data: {section: $g.sec, servers: ($g.added + $g.extra)}}]
+        # up again only after several good checks in a row, and not before the
+        # borrowed servers have been in for a while: one flapping server must
+        # not reload sing-box (and cut every connection) every minute
+        ($g.good + 1) as $good
+        | if $good >= $recover and ($now - $g.borrowed_at) >= $minhold then
+            .apply = (.apply or (($g.added + $g.extra) | length) > 0) | .lists = true
+            | .events += [{type: "group_recovered", data: {section: $g.sec, servers: ($g.added + $g.extra)}}]
+          else
+            .groups[$g.sec] = {dead_since: $g.dead_since, strikes: $g.strikes, reported: $g.reported, added: $g.added,
+                               extra: $g.extra, lease: $g.lease, hold: $g.hold, alerted: $g.alerted,
+                               borrowed_at: $g.borrowed_at, good: $good}
+          end
       else . end
     else
       ($g.dead_since // $now) as $since
@@ -305,14 +317,15 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
         elif $wan != true then
           .due = true
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: $g.reported, added: $g.added, extra: $extra,
-                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted}
+                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted, borrowed_at: $g.borrowed_at}
           | if $expired then .apply = true else . end
         else
           (if ([($g.added + $extra)[] | select(alive(.))] | length) > 0 or $g.hold > $now then $g.added
            else [$live | sort_by(.d)[] | select(.sec != $g.sec) | .tag | select(. as $t | $g.orig | index($t) | not)]
                 | dedupe | .[:3] end) as $donors
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: true, added: $donors, extra: $extra,
-                               lease: (if $expired then 0 else $g.lease end), hold: $g.hold, alerted: $g.alerted}
+                               lease: (if $expired then 0 else $g.lease end), hold: $g.hold, alerted: $g.alerted,
+                               borrowed_at: (if $donors != $g.added then $now else $g.borrowed_at end)}
           | if $donors != $g.added or $expired then .apply = true else . end
           | if ($donors | length) > 0 and $donors != $g.added then .lists = true else . end
           | if ($g.reported | not) or $expired then
@@ -326,7 +339,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
 # heal_plan <sing-box config> <proxies file> <fingerprint> <wan: true|false|null>
 heal_plan() {
   jq -nc --slurpfile cfg "$1" --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" --arg fp "$3" \
-    --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" --argjson need "$HEAL_STRIKES" "$HEAL_PLAN_JQ"
+    --argjson wan "$4" --argjson now "$(date +%s)" --argjson off "$(heal_off_json)" --argjson need "$HEAL_STRIKES" \
+    --argjson recover "$HEAL_RECOVER" --argjson minhold "$HEAL_MIN_HOLD" "$HEAL_PLAN_JQ"
 }
 
 # heal_filter <in> <out>: sing-box's config with the borrowed servers and the
@@ -543,7 +557,7 @@ cmd_heal_links() {
   [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
   _hnew=$(jq -c --arg fp "$_hf" --arg s "$_hs" --argjson o "$_hn" --argjson now "$(date +%s)" --argjson l "$HEAL_LEASE" '
     (if (.fingerprint // "") == $fp then . else {fingerprint: $fp, groups: {}} end)
-    | .groups[$s] = ((.groups[$s] // {dead_since: $now}) + {reported: true, extra: [$o[].tag], lease: ($now + $l), hold: 0})' \
+    | .groups[$s] = ((.groups[$s] // {dead_since: $now}) + {reported: true, extra: [$o[].tag], lease: ($now + $l), hold: 0, borrowed_at: $now})' \
     "$RUN/heal/state.json")
   heal_commit "$_hnew" "self-heal: $_hs +$(printf '%s' "$_hn" | jq length) from the manager"
   case $? in

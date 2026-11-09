@@ -93,7 +93,11 @@ export async function viewGlobal(main, id) {
           h("div", { class: "form-grid" },
             row("config_path", "Config file", selectField(b, "config_path", optionDef("settings", "config_path").values, { mono: true })),
             row("cache_path", "Cache file", textField(b, "cache_path", { mono: true })),
-            row("log_level", "Log level", selectField(b, "log_level", optionDef("settings", "log_level").values)))),
+            row("log_level", "Log level", selectField(b, "log_level", optionDef("settings", "log_level").values))),
+          // the config file is rewritten at every podkop start and at every self-heal change: on flash that wears the router out
+          !(b.val("config_path") || "/etc/sing-box/config.json").startsWith("/tmp/") ? h("div", { class: "banner", style: "margin-top: 12px" }, h("span", { class: "dot warn" }),
+            h("span", { class: "small grow" }, "The config file is on flash. podkop rewrites it at every start and self-heal rewrites it at every change; the flash wears out. In RAM (/tmp) podkop writes it again after a reboot, nothing is lost."),
+            h("button", { type: "button", class: "btn sm", onclick: () => b.set("config_path", "/tmp/sing-box/config.json", true) }, "Keep in RAM")) : null),
         card("YACD dashboard", null,
           flagField(b, "enable_yacd", "Turn on"),
           flagField(b, "enable_yacd_wan_access", "Reachable from WAN, with a secret", null, { disabled: b.val("enable_yacd") !== "1" }),

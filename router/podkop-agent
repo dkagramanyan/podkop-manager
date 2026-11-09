@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.10.0"
+AGENT_VERSION="0.11.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve","upgrade"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade"]'; fi
-  else printf '["resolve","upgrade"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","resolve","upgrade","ipv6"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6"]'; fi
+  else printf '["resolve","upgrade","ipv6"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -839,6 +839,45 @@ run_upgrade() {
   rm -rf "$_d" "$RUN/jobs/$_id.dir"
 }
 
+# --- IPv6 -----------------------------------------------------------------------
+
+# podkop routes IPv4 only. A LAN that gets IPv6 (router advertisements or
+# DHCPv6 from this router, and a default IPv6 route to the provider) lets a
+# device that resolves names itself reach any site over IPv6, past podkop.
+# ipv6_json: {lan: the LAN gets IPv6, blocked: our firewall rule is there}
+IPV6_RULE=podkop_agent_ipv6_block
+ipv6_json() {
+  _ra=0
+  ubus call uci get '{"config":"dhcp","type":"dhcp"}' 2>/dev/null |
+    jq -e '[.values[]? | (.ra // ""), (.dhcpv6 // "")] | any(. == "server" or . == "hybrid")' >/dev/null 2>&1 && _ra=1
+  _rt=0; [ -n "$(ip -6 route show default 2>/dev/null)" ] && _rt=1
+  _bl=0; uci -q get "firewall.$IPV6_RULE" >/dev/null && _bl=1
+  jq -nc --arg ra "$_ra" --arg rt "$_rt" --arg bl "$_bl" '{lan: ($ra == "1" and $rt == "1"), blocked: ($bl == "1")}'
+}
+
+# ipv6 on|off: a firewall rule (REJECT, so devices fall back to IPv4 at once)
+# for IPv6 forwarded from the LAN to the WAN; written only when it changes
+cmd_ipv6() {
+  case "${1:-}" in on|off) ;; *) fail bad_request "usage: ipv6 on|off" ;; esac
+  _have=0; uci -q get "firewall.$IPV6_RULE" >/dev/null && _have=1
+  if [ "$1" = on ] && [ "$_have" = 0 ]; then
+    uci set "firewall.$IPV6_RULE=rule"
+    uci set "firewall.$IPV6_RULE.name=podkop-agent: no IPv6 from the LAN to the internet"
+    uci set "firewall.$IPV6_RULE.family=ipv6"
+    uci set "firewall.$IPV6_RULE.src=lan"
+    uci set "firewall.$IPV6_RULE.dest=wan"
+    uci set "firewall.$IPV6_RULE.proto=all"
+    uci set "firewall.$IPV6_RULE.target=REJECT"
+    if ! { uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; }; then fail error "could not write the firewall rule"; fi
+    event ipv6_block '{"blocked":true}'
+  elif [ "$1" = off ] && [ "$_have" = 1 ]; then
+    uci -q delete "firewall.$IPV6_RULE"
+    if ! { uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; }; then fail error "could not remove the firewall rule"; fi
+    event ipv6_block '{"blocked":false}'
+  fi
+  reply "$(ipv6_json)"
+}
+
 # --- commands ---------------------------------------------------------------------
 
 cmd_status() {
@@ -863,14 +902,14 @@ cmd_status() {
     --arg fs "$(tail -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" --arg fst "$(head -n 1 /etc/sing-box/failsafe.last 2>/dev/null)" \
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
-    --argjson px "${_px:-null}" \
+    --argjson px "${_px:-null}" --argjson v6 "$(ipv6_json)" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
       singbox: {version: $fixed.singbox, features: $fixed.features},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
-      engine: $fixed.engine, heal: $heal, proxies: $px,
+      engine: $fixed.engine, heal: $heal, proxies: $px, ipv6: $v6,
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')"
 }
 
@@ -1356,6 +1395,7 @@ case "$_cmd" in
   heal-off)      command -v cmd_heal_off >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_off ;;
   heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
   resolve)       cmd_resolve ;;
+  ipv6)          cmd_ipv6 "$@" ;;
   upgrade)       cmd_upgrade ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
@@ -1393,7 +1433,7 @@ case "$_cmd" in
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links resolve ipv6 upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.36.0 — 2026-11-09
+
+- **Self-heal settles down**: a rule is up again only after 4 good checks in
+  a row (2 minutes), and borrowed servers stay at least 5 minutes. One
+  flapping server no longer reloads sing-box (and cuts every connection)
+  every minute.
+- **IPv6** (Connection health → IPv6, agent 0.11): podkop routes IPv4 only;
+  a LAN that gets IPv6 from the router lets a device with its own DNS reach
+  any site over IPv6 past podkop. One switch adds a firewall rule that keeps
+  IPv6 from the LAN off the internet (REJECT: devices fall back to IPv4 at
+  once). Overview warns while the LAN has IPv6 and the rule is off.
+- **Config file in RAM**: Global settings → sing-box shows a warning while
+  the config file is on flash (podkop rewrites it at every start, self-heal
+  at every change) with a one-click move to /tmp.
+- Agent 0.11.0: `status` carries `ipv6`, new command `ipv6 on|off`; the
+  uninstall removes the rule.
+
 ## 1.35.0 — 2026-11-07
 
 - **Scheduled changes**: Review and apply → When → Later applies the change
