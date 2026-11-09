@@ -15,9 +15,10 @@ export async function loadWork(id) {
   const prev = S.work[id];
   if (prev && prev.saving) saveWork(prev);
   if (prev && prev.inflight) await prev.inflight;      // its saves first, or they would look like someone else's
-  const [cur, draft, versions, rules, keys] = await Promise.all([api("GET", `/api/routers/${id}/config`),
+  const [cur, draft, versions, rules, keys, heal] = await Promise.all([api("GET", `/api/routers/${id}/config`),
     api("GET", `/api/routers/${id}/draft`), api("GET", `/api/routers/${id}/versions?limit=50`).catch(() => []),
-    api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {}, links: {} }))]);
+    api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {}, links: {} })),
+    api("GET", `/api/routers/${id}/heal`).catch(() => null)]);
   const old = S.work[id];
   const w = {
     id, orig: cur.config, fp: cur.fingerprint,
@@ -25,6 +26,7 @@ export async function loadWork(id) {
     config: draft ? draft.config : clone(cur.config), base: draft ? draft.base : cur.fingerprint,
     rev: draft ? draft.updated : null,     // the draft this page started from, see saveWork
     versions, auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
+    heal,      // self-heal state of the router: strict rules, rules left alone (agent 0.12 for strict)
     problems: old && old.problems && draft && same(old.config, draft.config) ? old.problems : null,
     saving: null, inflight: null, loaded: Date.now(), redraw: () => {},
   };

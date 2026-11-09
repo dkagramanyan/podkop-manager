@@ -453,7 +453,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         sections = [s["name"] for s in cfg["sections"]
                     if s.get("type") == "section" and s.get("options", {}).get("proxy_config_type") == "urltest"]
         return {"supported": heal is not None, "sections": sections,
-                "off": (heal or {}).get("off", []), "groups": (heal or {}).get("groups", {})}
+                "off": (heal or {}).get("off", []), "strict": (heal or {}).get("strict"),
+                "groups": (heal or {}).get("groups", {})}
 
     @app.put("/api/routers/{rid}/heal", dependencies=[api])
     async def heal_settings(rid: int, body: dict):
@@ -462,6 +463,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if not isinstance(off, list) or not all(isinstance(x, str) for x in off):
             raise HTTPException(400, "off must be a list of section names")
         out = await rt.agent.call("heal-off", payload={"sections": off}, timeout=30)
+        await hub.refresh(rt)
+        return out
+
+    @app.put("/api/routers/{rid}/strict", dependencies=[api])
+    async def strict_rules(rid: int, body: dict):
+        """Strict rules: through their own servers or nowhere (agent 0.12)."""
+        rt = router_or_404(rid)
+        sections = body.get("sections")
+        if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
+            raise HTTPException(400, "sections must be a list of section names")
+        out = await rt.agent.call("strict", payload={"sections": sections}, timeout=60)
         await hub.refresh(rt)
         return out
 

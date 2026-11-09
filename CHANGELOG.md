@@ -3,6 +3,19 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.37.0 — 2026-11-09
+
+- **Strict rules** (a switch on each Fastest rule, agent 0.12): the rule's
+  traffic goes through its own servers or nowhere. Self-heal never lends it
+  other rules' servers (servers from the rule's own history and from the
+  probe are still taken); while none of its servers answers, connections are
+  refused at once instead of hanging until a timeout, and open again the
+  moment one of them answers. Overview shows "refusing connections", the
+  Self-heal table marks strict rules. Events `strict_closed` / `strict_open`.
+- Agent 0.12.0: command `strict`, `heal` status carries `strict` and
+  `groups.<rule>.block`. The refusing member is `<rule>-strict-out` in the
+  rule's selector (this sing-box build has no block outbound).
+
 ## 1.36.0 — 2026-11-09
 
 - **Self-heal settles down**: a rule is up again only after 4 good checks in

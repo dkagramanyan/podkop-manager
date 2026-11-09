@@ -258,6 +258,7 @@ export function ruleEditor(w, s, { onRename }) {
       h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Take links from probe"),
         auto ? null : h("span", {}, "The probe tests your keys and picks servers by region, ping and speed"))) : null,
     ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
+    ct === "proxy" && pt === "urltest" ? strictField(w, s) : null,
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
     ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,
@@ -438,6 +439,26 @@ export function keyServers(w, s) {
 }
 
 // --- rules whose servers the probe picks from the subscriptions ----------------------------------------------------------
+
+// Strict: the rule's traffic goes through its own servers or nowhere (saved on
+// the router at once, like "Take links from probe"; agent 0.12)
+function strictField(w, s) {
+  const heal = w.heal;
+  if (!heal || !heal.supported || !Array.isArray(heal.strict)) return null;
+  const off = heal.off.includes("*") || heal.off.includes(s.name);
+  const on = heal.strict.includes(s.name);
+  return h("label", { class: "check", title: off ? "Self-heal is off for this rule, so its servers are not watched" : null },
+    h("input", { type: "checkbox", role: "switch", checked: on, disabled: off, onchange: async (e) => {
+      const sections = heal.strict.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
+      e.target.disabled = true;
+      try { Object.assign(heal, await api("PUT", `/api/routers/${w.id}/strict`, { sections })); toast(e.target.checked ? `${s.name} is strict` : `${s.name} is not strict`); }
+      catch (err) { toast(err.message, true); }
+      finally { w.redraw(); }
+    } }),
+    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Strict"),
+      h("span", {}, off ? "Needs self-heal on for this rule (Connection health)"
+        : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, blocked while podkop is down")));
+}
 
 export async function toggleAuto(w, s, on) {
   try {
