@@ -258,7 +258,7 @@ export function ruleEditor(w, s, { onRename }) {
       h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Take links from probe"),
         auto ? null : h("span", {}, "The probe tests your keys and picks servers by region, ping and speed"))) : null,
     ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
-    ct === "proxy" && pt === "urltest" ? strictField(w, s) : null,
+    ct === "proxy" && (pt === "urltest" || (pt === "outbound" && viaRule(w, s))) ? strictField(w, s) : null,
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
     ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,
@@ -440,24 +440,38 @@ export function keyServers(w, s) {
 
 // --- rules whose servers the probe picks from the subscriptions ----------------------------------------------------------
 
-// Strict: the rule's traffic goes through its own servers or nowhere (saved on
-// the router at once, like "Take links from probe"; agent 0.12)
+// the Fastest rule an outbound rule sends through: its JSON is a selector whose first member is "<rule>-out"
+export function viaRule(w, s) {
+  let o;
+  try { o = JSON.parse((s.options || {}).outbound_json || ""); } catch { return null; }
+  const first = o && o.type === "selector" && Array.isArray(o.outbounds) ? String(o.outbounds[0] || "") : "";
+  const name = first.endsWith("-out") ? first.slice(0, -4) : "";
+  const via = rulesOf(w.config).find((r) => r.name === name);
+  return via && (via.options || {}).proxy_config_type === "urltest" ? via : null;
+}
+
+// Kill switch: the rule's traffic goes through its servers or nowhere (saved on
+// the router at once, like "Take links from probe"; agent 0.12, through
+// another rule: agent 0.16)
 function strictField(w, s) {
   const heal = w.heal;
   if (!heal || !heal.supported || !Array.isArray(heal.strict)) return null;
-  const off = heal.off.includes("*") || heal.off.includes(s.name);
+  const via = (s.options || {}).proxy_config_type === "outbound" ? viaRule(w, s) : null;
+  const watched = via ? via.name : s.name;
+  const off = heal.off.includes("*") || heal.off.includes(watched);
   const on = heal.strict.includes(s.name);
-  return h("label", { class: "check", title: off ? "Self-heal is off for this rule, so its servers are not watched" : null },
+  return h("label", { class: "check", title: off ? `Self-heal is off for ${watched}, so its servers are not watched` : null },
     h("input", { type: "checkbox", role: "switch", checked: on, disabled: off, onchange: async (e) => {
       const sections = heal.strict.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
       e.target.disabled = true;
-      try { Object.assign(heal, await api("PUT", `/api/routers/${w.id}/strict`, { sections })); toast(e.target.checked ? `${s.name} is strict` : `${s.name} is not strict`); }
+      try { Object.assign(heal, await api("PUT", `/api/routers/${w.id}/strict`, { sections })); toast(e.target.checked ? `Kill switch on for ${s.name}` : `Kill switch off for ${s.name}`); }
       catch (err) { toast(err.message, true); }
       finally { w.redraw(); }
     } }),
-    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Strict"),
-      h("span", {}, off ? "Needs self-heal on for this rule (Connection health)"
-        : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, blocked while podkop is down")));
+    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Kill switch"),
+      h("span", {}, off ? `Needs self-heal on for ${watched} (Connection health)`
+        : via ? `Through ${via.name}'s servers or nowhere: connections refused at once while none of them answers (even if ${via.name} borrowed servers), its sites blocked on the router while podkop is down`
+          : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down")));
 }
 
 export async function toggleAuto(w, s, on) {

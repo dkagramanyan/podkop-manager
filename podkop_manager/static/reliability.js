@@ -207,14 +207,14 @@ export async function viewReliability(main, id) {
       else if (on) healDraft.delete(name); else healDraft.add(name);
       draw();
     };
-    const strict = name => (heal.strict || []).includes(name) ? h("span", { class: "mode", title: "Through its own servers or nowhere (set on the rule)" }, "strict") : null;
+    const strict = name => (heal.strict || []).includes(name) ? h("span", { class: "mode", title: "Through its own servers or nowhere (set on the rule)" }, "kill switch") : null;
     const status = name => {
       const g = heal.groups[name];
       if (!g) return h("span", { class: "row", style: "gap: 8px" }, h("span", { class: "pill ok" }, "Working"), strict(name));
       const n = (g.added || []).length + (g.extra || []).length;
       if (!g.reported) return h("span", { class: "pill warn" }, `No server answers since ${longWhen(g.dead_since)}`);
       return h("div", { class: "col" }, h("span", { class: "row", style: "gap: 8px" }, h("span", { class: "pill bad" }, `Down since ${longWhen(g.dead_since)}`), strict(name)),
-        h("span", { class: "small muted" }, g.block ? "Strict: connections are refused until one of its servers answers"
+        h("span", { class: "small muted" }, g.block ? "Kill switch: connections are refused until one of its servers answers"
           : n ? `Using ${n} borrowed server${n > 1 ? "s" : ""} until its own work again`
           : "Nothing to borrow; the probe looks for new servers"));
     };
@@ -231,8 +231,9 @@ export async function viewReliability(main, id) {
         h("p", { class: "small muted" }, "The router tests the server each rule uses every 30 seconds. When none of a rule's own servers answers in two checks in a row (30–75 seconds) and the router's line works, the router lends it up to 3 working servers of other rules at once, in memory only. The manager adds servers from earlier versions if there are none to lend, and runs the probe; its servers are applied when it finishes. Borrowed servers go away when the rule's own servers answer again or its settings change. Rules switched off here are never changed and never lend their servers.")),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff, disabled: healSaving,
         onchange: e => toggle("*", e.target.checked) }), "Self-heal on this router"),
-      heal.guard && (heal.strict || []).length ? h("p", { class: "small muted" }, `Strict guard: ${heal.guard.domains} domains and ${heal.guard.subnets} subnets of the strict rules are blocked on the router while podkop is down or restarting${
-        heal.guard.dns ? " — active now (podkop is not running)" : heal.guard.nft ? "; the subnet part is always in place" : "; not in place (podkop is stopped on purpose)"}.`) : null,
+      heal.guard && (heal.strict || []).length ? h("p", { class: "small muted" }, `Kill switch guard: ${heal.guard.domains} domains of the kill-switch rules answer NXDOMAIN while podkop is down or restarting${
+        heal.guard.dns ? " (active now: podkop is not running)" : ""}; ${heal.guard.subnets} subnets${heal.guard.resolved != null ? ` and ${heal.guard.resolved} addresses the rules' own domains resolve to (for devices with their own DNS, refreshed hourly)` : ""} are ${
+        heal.guard.nft ? "blocked on the router at all times" : "not blocked (podkop is stopped on purpose)"}.`) : null,
       heal.sections.length ? table(["Rule", "Self-heal", "Now"], heal.sections.map(name => [h("b", {}, name),
         h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff && !off.has(name), disabled: allOff || healSaving,
           onchange: e => toggle(name, e.target.checked) }), allOff || off.has(name) ? "Off" : "On"),

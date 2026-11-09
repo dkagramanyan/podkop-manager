@@ -289,14 +289,14 @@ strict_json() {
   if [ -s "$ETC/strict" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/strict"; else echo '[]'; fi
 }
 
-# strict_filter <config>, in place: every strict section with a URLTest group
-# gets its refusing member in its selector (a reload only, no podkop restart)
+# strict_filter <config>, in place: every strict section whose outbound is a
+# selector (of its own URLTest group, or of another rule, e.g. main-out) gets
+# its refusing member in that selector (a reload only, no podkop restart)
 strict_filter() {
   jq --argjson strict "$(strict_json)" '
     reduce ($strict[] | select(type == "string")) as $s (.;
       "\($s)-strict-out" as $b
-      | if (any(.outbounds[]?; .tag == "\($s)-urltest-out" and .type == "urltest")
-            and any(.outbounds[]?; .tag == "\($s)-out" and .type == "selector")) then
+      | if any(.outbounds[]?; .tag == "\($s)-out" and .type == "selector") then
           (if any(.outbounds[]?; .tag == $b) then . else
              .outbounds += [{type: "socks", tag: $b, server: "127.0.0.1", server_port: 9}] end)
           | (.outbounds[] | select(.tag == "\($s)-out") | .outbounds) |= (if index($b) then . else . + [$b] end)
@@ -326,6 +326,8 @@ strict_filter() {
 GUARD_TABLE=podkop_agent_guard
 GUARD_DNS=podkop-agent-strict.conf
 GUARD_LIST_AGE=1440     # minutes: remote and community lists are fetched again after a day
+GUARD_RESOLVE_AGE=60    # minutes: the strict sections' own domains are resolved again after an hour
+GUARD_RESOLVE_MAX=400   # names resolved at most
 
 guard_dnsmasq_dir() {
   _gd=$(grep -hs '^conf-dir=' /var/etc/dnsmasq.conf.* 2>/dev/null | head -n 1 | cut -d= -f2 | cut -d, -f1)
@@ -363,21 +365,44 @@ guard_cached() {
   [ -s "$2" ]
 }
 
+# guard_resolve_job: the addresses the strict sections' own domains resolve
+# to now (outside resolvers, podkop's fake answers skipped), for devices that
+# bring their own DNS; in the background, the daemon is poked when done
+guard_resolve_job() {
+  exec 5> "$RUN/guard/resolve.lock"; flock -n 5 || return 0
+  : > "$RUN/guard/resolved.t"
+  head -n "$GUARD_RESOLVE_MAX" "$RUN/guard/own-domains" 2>/dev/null | while IFS= read -r _gh; do
+    _ga=$(resolve_host "$_gh"); [ -n "$_ga" ] && printf '%s\n' "$_ga" >> "$RUN/guard/resolved.t"
+  done
+  sort -u "$RUN/guard/resolved.t" > "$RUN/guard/resolved.n" && mv "$RUN/guard/resolved.n" "$RUN/guard/resolved"
+  rm -f "$RUN/guard/resolved.t"
+  touch "$RUN/guard/poke"
+}
+guard_resolve_start() {
+  if [ -s "$RUN/guard/own-domains" ] && command -v resolve_host >/dev/null 2>&1 &&
+     { [ ! -f "$RUN/guard/resolved" ] || [ -z "$(find "$RUN/guard/resolved" -mmin "-$GUARD_RESOLVE_AGE" 2>/dev/null)" ]; }; then
+    touch "$RUN/guard/resolved" 2>/dev/null       # not again before the job is done
+    ( guard_resolve_job ) </dev/null >/dev/null 2>&1 &
+  fi
+}
+
 # guard_build: the nft and dnsmasq files for the strict sections, built again
-# when their lists change or a fetched list is a day old
+# when their lists change, a fetched list is a day old or the resolved
+# addresses changed
 guard_build() {
   mkdir -p "$RUN/guard/lists"
   _gc=$(config_json) || return 1
   _gs=$(strict_json)
-  _gk=$(printf '%s%s' "$_gc" "$_gs" | md5sum | cut -c 1-32)
+  _gk=$(printf '%s%s%s' "$_gc" "$_gs" "$(cat "$RUN/guard/resolved" 2>/dev/null)" | md5sum | cut -c 1-32)
+  guard_resolve_start
   if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ] &&
      [ -z "$(find "$RUN/guard/lists" -type f -mmin "+$GUARD_LIST_AGE" 2>/dev/null | head -n 1)" ]; then return 0; fi
   _srs=$(. "$PODKOP_LIB/constants.sh" 2>/dev/null; printf '%s' "${SRS_MAIN_URL:-https://github.com/itdoginfo/allow-domains/releases/latest/download}")
-  : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"
+  : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"; : > "$RUN/guard/own.t"
   printf '%s' "$_gc" | jq -r --argjson strict "$_gs" "$GUARD_LISTS_JQ" 2>/dev/null | while IFS= read -r _gl; do
     _gv=${_gl#* }
     case "$_gl" in
-      "D "*) printf '%s\n' "$_gv" >> "$RUN/guard/domains.t" ;;
+      "D "*) printf '%s\n' "$_gv" >> "$RUN/guard/domains.t"; printf '%s\n' "$_gv" >> "$RUN/guard/own.t" ;;
       "S "*) printf '%s\n' "$_gv" >> "$RUN/guard/subnets.t" ;;
       "LD "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/domains.t" ;;
       "LS "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/subnets.t" ;;
@@ -400,7 +425,11 @@ guard_build() {
   tr -d '\r' < "$RUN/guard/subnets.t" | while IFS= read -r _gn; do
     case "$_gn" in ""|*[!0-9./]*|*/|/*|*.*.*.*.*) ;; *) printf '%s\n' "$_gn" ;; esac
   done | sort -u > "$RUN/guard/subnets"
-  rm -f "$RUN/guard/domains.t" "$RUN/guard/subnets.t"
+  tr -d '\r' < "$RUN/guard/own.t" | sed 's/^\.//' | while IFS= read -r _gd; do
+    case "$_gd" in ""|*[!A-Za-z0-9.-]*|-*|.*|*..*) ;; *) printf '%s\n' "$_gd" ;; esac
+  done | sort -u > "$RUN/guard/own-domains.n" && mv "$RUN/guard/own-domains.n" "$RUN/guard/own-domains"
+  rm -f "$RUN/guard/domains.t" "$RUN/guard/subnets.t" "$RUN/guard/own.t"
+  guard_resolve_start
   sed 's|.*|address=/&/|' "$RUN/guard/domains" > "$RUN/guard/dnsmasq.conf"
   _gi=$(printf '%s' "$_gc" | jq -r '.sections[] | select(.name == "settings") | .options.source_network_interfaces
           | if type == "array" then . else [.] end | map(select(. != null and . != "")) | if length == 0 then ["br-lan"] else . end
@@ -410,7 +439,8 @@ guard_build() {
     echo "delete table inet $GUARD_TABLE"
     echo "table inet $GUARD_TABLE {"
     echo "  set strict4 { type ipv4_addr; flags interval; auto-merge;"
-    [ -s "$RUN/guard/subnets" ] && printf '    elements = { %s }\n' "$(tr '\n' ',' < "$RUN/guard/subnets" | sed 's/,$//; s/,/, /g')"
+    _ge=$(cat "$RUN/guard/subnets" "$RUN/guard/resolved" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+    [ -n "$_ge" ] && printf '    elements = { %s }\n' "$_ge"
     echo "  }"
     echo "  chain forward { type filter hook forward priority -5; policy accept;"
     echo "    iifname { $_gi } ip daddr @strict4 meta l4proto tcp reject with tcp reset"
@@ -422,7 +452,7 @@ guard_build() {
   } > "$RUN/guard/nft.conf"
   printf '%s' "$_gk" > "$RUN/guard/key"
   rm -f "$RUN/guard/nft.applied"
-  logger -t podkop-agent "strict guard: $(wc -l < "$RUN/guard/domains") domains, $(wc -l < "$RUN/guard/subnets") subnets"
+  logger -t podkop-agent "strict guard: $(wc -l < "$RUN/guard/domains") domains, $(wc -l < "$RUN/guard/subnets") subnets, $(wc -l 2>/dev/null < "$RUN/guard/resolved" || echo 0) resolved addresses"
 }
 
 # guard_wanted: strict sections exist and podkop is meant to run
@@ -469,26 +499,43 @@ guard_sync() {
 guard_status() {
   _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
   jq -nc --arg d "$(wc -l 2>/dev/null < "$RUN/guard/domains" || echo 0)" --arg s "$(wc -l 2>/dev/null < "$RUN/guard/subnets" || echo 0)" \
+    --arg r "$(wc -l 2>/dev/null < "$RUN/guard/resolved" || echo 0)" \
     --arg nft "$([ -f "$RUN/guard/nft.applied" ] && echo 1)" --arg dns "$([ -f "$_gf" ] && echo 1)" \
-    '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1")}'
+    '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), resolved: ($r | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1")}'
 }
 
-# strict_enforce <proxies file>: each strict section's selector on its
-# refusing member while the group is down (state.json .block), on its URLTest
-# group otherwise; a pinned section is left to its pin
+# strict_enforce <proxies file> <sing-box config>: each strict section's
+# selector on its refusing member while its servers are down, on its usual
+# member otherwise. A section with its own URLTest group follows the group's
+# .block; a section that sends through another rule (its selector's first
+# member is e.g. main-out) refuses while that rule's own servers are all
+# down (.own false), even if that rule borrowed servers. Pins win.
 strict_enforce() {
   [ -s "$ETC/strict" ] || return 0
-  jq -nr --slurpfile st "$RUN/heal/state.json" --slurpfile pf "$1" --argjson strict "$(strict_json)" --arg fp "$(config_fp 2>/dev/null)" '
+  jq -nr --slurpfile st "$RUN/heal/state.json" --slurpfile pf "$1" --slurpfile cfg "$2" \
+     --argjson strict "$(strict_json)" --arg fp "$(config_fp 2>/dev/null)" '
     (($st[0] // {}) | if (.fingerprint // "") == $fp then (.groups // {}) else {} end) as $g
-    | ($pf[0] // {}) as $p
+    | ($pf[0] // {}) as $p | (($cfg[0] // {}).outbounds // []) as $ob
     | $strict[] | select(type == "string") | . as $s
     | select(($p.proxies["\($s)-out"].all // []) | index("\($s)-strict-out"))
-    | (if ($g[$s].block // false) then "\($s)-strict-out" else "\($s)-urltest-out" end) as $want
-    | select($p.proxies["\($s)-out"].now != $want) | "\($s)\t\($want)"' 2>/dev/null |
-  while IFS="$TAB" read -r _ss _sw; do
+    | ([$ob[] | select(.tag == "\($s)-out") | .outbounds[]? | select(. != "\($s)-strict-out")]
+       | if index("\($s)-urltest-out") then "\($s)-urltest-out" else (first // "") end) as $usual
+    | select($usual != "")
+    | (if $usual == "\($s)-urltest-out" then {want: (if ($g[$s].block // false) then "\($s)-strict-out" else $usual end), dep: false}
+       else ($usual | if endswith("-out") then .[:-4] else . end) as $via
+            | {want: (if ($g[$via].reported // false) and (($g[$via].own // false) | not) then "\($s)-strict-out" else $usual end), dep: true}
+       end) as $w
+    | select($p.proxies["\($s)-out"].now != $w.want) | "\($s)\t\($w.want)\t\($w.dep)"' 2>/dev/null |
+  while IFS="$TAB" read -r _ss _sw _sd; do
     [ -n "$_ss" ] || continue
     grep -q "^$_ss$TAB" "$ETC/pins" 2>/dev/null && continue
-    select_server "$_ss" "$_sw" || logger -t podkop-agent "strict: could not switch $_ss-out to $_sw"
+    if select_server "$_ss" "$_sw"; then
+      # a section that follows another rule: its own events (the rule's come from the plan)
+      if [ "$_sd" = true ]; then
+        case "$_sw" in *-strict-out) event strict_closed "$(jq -nc --arg s "$_ss" '{section: $s, via: true}')" ;;
+                       *) event strict_open "$(jq -nc --arg s "$_ss" '{section: $s}')" ;; esac
+      fi
+    else logger -t podkop-agent "strict: could not switch $_ss-out to $_sw"; fi
   done
 }
 
@@ -527,7 +574,7 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
           else
             .groups[$g.sec] = {dead_since: $g.dead_since, strikes: $g.strikes, reported: $g.reported, added: $g.added,
                                extra: $g.extra, lease: $g.lease, hold: $g.hold, alerted: $g.alerted,
-                               borrowed_at: $g.borrowed_at, good: $good}
+                               borrowed_at: $g.borrowed_at, good: $good, own: true}
             # a strict rule is open again the moment one of its servers answers
             | if $g.block then .events += [{type: "strict_open", data: {section: $g.sec}}] else . end
           end
@@ -541,7 +588,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
         elif $wan != true then
           .due = true
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: $g.reported, added: $g.added, extra: $extra,
-                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted, borrowed_at: $g.borrowed_at, block: $g.block}
+                               lease: $g.lease, hold: $g.hold, alerted: $g.alerted, borrowed_at: $g.borrowed_at, block: $g.block,
+                               own: (([$extra[] | select(alive(.))] | length) > 0)}
           | if $expired then .apply = true else . end
         else
           (if $g.strict then []
@@ -552,7 +600,8 @@ def dedupe: reduce .[] as $t ([]; if index($t) then . else . + [$t] end);
           | ($g.strict and ([$extra[] | select(alive(.))] | length) == 0) as $block
           | .groups[$g.sec] = {dead_since: $since, strikes: $k, reported: true, added: $donors, extra: $extra,
                                lease: (if $expired then 0 else $g.lease end), hold: $g.hold, alerted: $g.alerted,
-                               borrowed_at: (if $donors != $g.added then $now else $g.borrowed_at end), block: $block}
+                               borrowed_at: (if $donors != $g.added then $now else $g.borrowed_at end), block: $block,
+                               own: (([$extra[] | select(alive(.))] | length) > 0)}
           | if $donors != $g.added or $expired then .apply = true else . end
           | if ($donors | length) > 0 and $donors != $g.added then .lists = true else . end
           | if ($g.reported | not) or $expired then
@@ -720,7 +769,7 @@ heal_check() {
     printf '%s\n' "$_hnew" > "$RUN/heal/state.json"
   fi
   heal_events "$_hplan"
-  strict_enforce "$RUN/heal/proxies.json"
+  strict_enforce "$RUN/heal/proxies.json" "$_hc"
   [ "$(printf '%s' "$_hplan" | jq -r .lists)" = true ] && heal_lists
   return 0
 }
@@ -780,7 +829,8 @@ cmd_strict() {
       exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
       _sw=$(hot_apply "strict rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_sw"; }
       exec 9>&-
-      proxies > "$RUN/heal/proxies.json" 2>/dev/null && strict_enforce "$RUN/heal/proxies.json"
+      _sc=$(uci -q get podkop.settings.config_path); [ -n "$_sc" ] || _sc=/etc/sing-box/config.json
+      proxies > "$RUN/heal/proxies.json" 2>/dev/null && strict_enforce "$RUN/heal/proxies.json" "$_sc"
     fi
     guard_sync
   fi

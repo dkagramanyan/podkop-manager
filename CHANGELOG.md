@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.41.0 — 2026-11-10
+
+- **Kill switch** is the new name of "Strict" (same switch on the rule).
+- It is now also offered on rules that send their traffic through another
+  rule (an outbound rule whose JSON is a selector of e.g. `main-out`, like
+  meta, github or ameriabank): such a rule refuses connections at once while
+  none of that rule's own servers answers, even when that rule borrowed
+  servers from others, and opens again the moment one of them answers. Its
+  domains and subnets are in the guard like the others' (agent 0.16).
+- The guard also blocks the addresses the kill-switch rules' own domains
+  resolve to (resolved on the router through outside resolvers, refreshed
+  every hour, at most 400 names): a device with its own DNS that reaches
+  such an address directly is stopped, as it is with podkop's lists.
+  Community lists are not resolved (too many names; their subnets are in).
+- Agent 0.16.0: `heal` status `guard.resolved`; `strict_closed` events of
+  rules that follow another rule carry `via: true`.
+
 ## 1.40.0 — 2026-11-09
 
 - **Self-heal fallback countries** (a rule's probe parameters → "If none
