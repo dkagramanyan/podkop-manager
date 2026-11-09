@@ -3,6 +3,22 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.38.0 — 2026-11-09
+
+- **Strict guard** (agent 0.13): while podkop is down or restarting, the
+  destinations of strict rules are blocked on the router instead of going
+  direct: their IPv4 subnets (user, local, remote and community lists) in an
+  nft table of ours that rejects forwarded traffic from the LAN, in place
+  whenever strict rules exist (with podkop up these packets never reach it),
+  and their domains (user, local, remote and community lists, decompiled
+  like podkop reads them) as NXDOMAIN answers in a dnsmasq file that is in
+  only while podkop is away: put in before every podkop restart and within a
+  second of sing-box going away (the daemon follows ubus service events),
+  taken out once podkop runs. Lists are built in RAM and fetched again daily.
+  Connection health shows the counts and whether the guard is active.
+- Agent 0.13.0: `heal` status carries `guard`; events `strict_guard`; the
+  uninstall removes the table and the file.
+
 ## 1.37.0 — 2026-11-09
 
 - **Strict rules** (a switch on each Fastest rule, agent 0.12): the rule's
