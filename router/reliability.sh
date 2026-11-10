@@ -592,7 +592,7 @@ guard_status() {
     '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), resolved: ($r | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1")}'
 }
 
-# strict_enforce <proxies file> <sing-box config>: each strict section's
+# strict_enforce <proxies file> <sing-box config> [fingerprint]: each strict section's
 # selector on its refusing member while its servers are down, on its usual
 # member otherwise. A section with its own URLTest group follows the group's
 # .block; a section that sends through another rule (its selector's first
@@ -601,7 +601,7 @@ guard_status() {
 strict_enforce() {
   [ -s "$ETC/strict" ] || return 0
   jq -nr --slurpfile st "$RUN/heal/state.json" --slurpfile pf "$1" --slurpfile cfg "$2" \
-     --argjson strict "$(strict_json)" --arg fp "$(config_fp 2>/dev/null)" '
+     --argjson strict "$(strict_json)" --arg fp "${3:-$(config_fp 2>/dev/null)}" '
     (($st[0] // {}) | if (.fingerprint // "") == $fp then (.groups // {}) else {} end) as $g
     | ($pf[0] // {}) as $p | (($cfg[0] // {}).outbounds // []) as $ob
     | $strict[] | select(type == "string") | . as $s
@@ -735,10 +735,17 @@ heal_filter() {
 }
 
 # clash_get <path> [curl -G args]: sing-box's Clash API
+# (its address and secret are read from sing-box's config once per config,
+# not for every request: a heal round makes a dozen, each a parse of a
+# config of hundreds of kB)
 clash_get() {
-  _cg=$(uci -q get podkop.settings.config_path); [ -n "$_cg" ] || _cg=/etc/sing-box/config.json
-  _ca=$(jq -r '.experimental.clash_api.external_controller // empty' "$_cg" 2>/dev/null)
-  _cs=$(jq -r '.experimental.clash_api.secret // empty' "$_cg" 2>/dev/null)
+  _cg=${HEAL_CFG:-$(uci -q get podkop.settings.config_path)}; [ -n "$_cg" ] || _cg=/etc/sing-box/config.json
+  if [ ! -s "$RUN/clash.api" ] || [ "$_cg" -nt "$RUN/clash.api" ]; then
+    if jq -r '.experimental.clash_api | [(.external_controller // ""), (.secret // "")] | join("\t")' "$_cg" > "$RUN/clash.api.$$" 2>/dev/null; then
+      mv "$RUN/clash.api.$$" "$RUN/clash.api"
+    else rm -f "$RUN/clash.api.$$"; return 1; fi
+  fi
+  IFS="$TAB" read -r _ca _cs < "$RUN/clash.api"
   [ -n "$_ca" ] || return 1
   _cp=$1; shift
   if [ -n "$_cs" ]; then curl -s --max-time 12 -G -H "Authorization: Bearer $_cs" "$@" "http://$_ca$_cp"
@@ -837,6 +844,7 @@ heal_check() {
   mkdir -p "$RUN/heal"
   _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
   [ -s "$_hc" ] || return 0
+  HEAL_CFG=$_hc
   proxies > "$RUN/heal/proxies.json" 2>/dev/null
   if ! jq -e '.proxies' "$RUN/heal/proxies.json" >/dev/null 2>&1; then
     # sing-box runs but its API is silent: nothing here can watch the servers
@@ -876,7 +884,7 @@ heal_round() {
     heal_state_write "$_hnew"
   fi
   heal_events "$_hplan"
-  strict_enforce "$RUN/heal/proxies.json" "$1"
+  strict_enforce "$RUN/heal/proxies.json" "$1" "$2"
   [ "$(printf '%s' "$_hplan" | jq -r .lists)" = true ] && heal_lists
   return 0
 }

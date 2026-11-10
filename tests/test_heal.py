@@ -719,3 +719,22 @@ def test_a_change_nobody_watches_that_is_not_applied_raises_an_alert(tmp_path):
     rt.alert = None
     asyncio.run(hub._track_job(rt, web, "j2"))
     assert rt.alert is None
+
+
+def test_cached_settings_and_database_copy(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    assert hub.cached_config(rt) is None                    # nothing read yet
+    rt.online, rt.checked, rt.status = True, time.time(), {"fingerprint": "fp"}
+    rt.config = {"fingerprint": "fp", "config": _cfg([])}
+    assert hub.cached_config(rt) is rt.config
+    rt.status = {"fingerprint": "other"}                   # changed on the router: read it again
+    assert hub.cached_config(rt) is None
+    rt.status, rt.checked = {"fingerprint": "fp"}, time.time() - 120      # the poll is behind
+    assert hub.cached_config(rt) is None
+    # a backup copies through its own connection: the shared one's lock stays free
+    assert db.q("PRAGMA synchronous")[0]["synchronous"] == 1
+    db.add_log(rid, "a line")
+    with db.lock:
+        pass
+    db.copy_to(tmp_path / "copy.db")
+    assert DB(tmp_path / "copy.db").q("SELECT line FROM logs") == [{"line": "a line"}]

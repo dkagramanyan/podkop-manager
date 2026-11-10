@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import shlex
+import time
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -70,11 +71,16 @@ class Agent:
         self.host, self.port, self.host_key, self.client_key = host, port, host_key, client_key
         self._conn: asyncssh.SSHClientConnection | None = None
         self._lock = asyncio.Lock()
+        self._failed: tuple[float, str] = (0.0, "")     # the last failed connect: when and why
 
     async def connection(self) -> asyncssh.SSHClientConnection:
         async with self._lock:
             if self._conn is not None and not self._conn.is_closed():
                 return self._conn
+            # a router that is away: callers queued behind a failed try (15 s each) get its answer
+            # at once for a few seconds, so a page or the scheduler does not wait for each in turn
+            if time.monotonic() - self._failed[0] < 5:
+                raise AgentError("unreachable", self._failed[1])
             try:
                 self._conn = await asyncio.wait_for(asyncssh.connect(
                     self.host, port=self.port, username="root",
@@ -82,7 +88,8 @@ class Agent:
                     known_hosts=asyncssh.import_known_hosts(known_hosts_line(self.host, self.port, self.host_key)),
                     keepalive_interval=20, keepalive_count_max=3), timeout=15)
             except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
-                raise AgentError("unreachable", f"cannot connect to {self.host}: {e or type(e).__name__}") from None
+                self._failed = (time.monotonic(), f"cannot connect to {self.host}: {e or type(e).__name__}")
+                raise AgentError("unreachable", self._failed[1]) from None
             return self._conn
 
     def close(self) -> None:
@@ -95,11 +102,15 @@ class Agent:
         conn = await self.connection()
         cmd = "podkop-agent " + " ".join(shlex.quote(a) for a in args)
         proc = None
+        async def run():
+            nonlocal proc
+            proc = await conn.create_process(cmd)       # inside the timeout: a half-open connection hangs here
+            return await proc.communicate(json.dumps(payload) if payload is not None else "")
         try:
-            proc = await conn.create_process(cmd)
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(json.dumps(payload) if payload is not None else ""), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(run(), timeout=timeout)
         except asyncio.TimeoutError:
+            if proc is None:
+                self.close()        # no channel within the time: the connection is dead
             raise AgentError("timeout", f"{args[0]} took longer than {timeout:.0f} s") from None
         except (OSError, asyncssh.Error) as e:
             self.close()

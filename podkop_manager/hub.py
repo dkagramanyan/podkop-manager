@@ -135,6 +135,7 @@ class RouterRuntime:
         self.upgrade: asyncio.Task | None = None    # the agent update being followed
         self.heal_sections: set[str] = set()        # rules the next self-heal probe is for
         self.offline_told = False                   # "router_offline" was reported for this outage
+        self.probe_cache: tuple | None = None       # (time, the router's probe-status)
         self.scheduled: list = []                   # changes waiting for their time: {id, due, note, changes}
 
     def snapshot(self) -> dict:
@@ -157,6 +158,7 @@ class Hub:
         self.tasks: list[asyncio.Task] = []
         self.probes: dict[int, asyncio.Task] = {}
         self.jobs: set[asyncio.Task] = set()      # apply jobs being followed
+        self._probe_rows: dict = {}               # router id -> (run id, its rows' links and verdicts)
 
     # --- lifecycle ------------------------------------------------------------------
     async def start(self) -> None:
@@ -386,7 +388,8 @@ class Hub:
             for group in (rt.proxies or {}).get("groups", []):
                 if group["name"] == observation["scope"]:
                     group["now"] = observation["server"]
-        self.db.observe(rt.id, source, observation, {
+        # built only for a new incident: a burst of failing lines is one incident
+        self.db.observe(rt.id, source, observation, lambda: {
             "selected": reliability.selections(cfg, rt.proxies),
             "server_names": podkop.tag_names(cfg),
             "server_ids": {t: reliability.identity(v[1]) for t, v in podkop.tag_links(cfg).items()},
@@ -419,7 +422,8 @@ class Hub:
             raise AgentError("busy", "connection checks wait while the full probe runs")
         async with rt.connection_lock:
             await require_connection_support(rt)
-            cfg = await self.config(rid)
+            # (the report's fingerprint is compared below, so a cached read cannot go unnoticed)
+            cfg = self.cached_config(rt) or await self.config(rid)
             # An explicit stop, a draft or an in-progress apply must never
             # be counteracted by automatic eligibility changes.
             rt.proxies = await rt.agent.call("proxies", timeout=15)
@@ -483,6 +487,14 @@ class Hub:
         rt.config = cfg
         rt.names, rt.names_fp = podkop.tag_names(cfg["config"]), cfg["fingerprint"]
         self.update_draft(rt)
+
+    def cached_config(self, rt: RouterRuntime) -> dict | None:
+        """The settings as last read, while the status poll (every 30 s) still
+        shows the same fingerprint: for looking, not for an apply."""
+        if (rt.online and rt.config and time.time() - rt.checked < 2 * POLL_SECONDS
+                and (rt.status or {}).get("fingerprint") == rt.config.get("fingerprint")):
+            return rt.config
+        return None
 
     async def config(self, rid: int) -> dict:
         rt = self.get(rid)
@@ -730,6 +742,7 @@ class Hub:
             raise AgentError("no_keys", "add your keys (subscription URLs or links) first")
         if rid in self.probes and not self.probes[rid].done():
             raise AgentError("busy", "a probe is already running")
+        rt.probe_cache = None
         # a self-heal probe is for the rules down now; one that goes down while it runs gets its own
         sections = set(rt.heal_sections) if trigger == "heal" else None
         options = self.probe_options(rid, sections, heal=trigger == "heal")
@@ -778,6 +791,7 @@ class Hub:
                 st = await rt.agent.call("probe-status", timeout=30)
             except AgentError:
                 continue
+            rt.probe_cache = (time.time(), st)
             self.publish({"type": "probe", "router_id": rt.id, "state": st.get("state"), "run": run_id})
             if st.get("state") != "running":
                 break
@@ -1005,7 +1019,13 @@ class Hub:
         if self.db.probe_settings(rt.id).get("test_from") == "manager":
             last = next(iter(self.db.probe_runs(rt.id, 1)), None)
             return (self.db.probe_result(last["id"]) if last else None) or {"state": "none", "log": [], "rows": []}
-        return await rt.agent.call("probe-status", timeout=30)
+        # pages ask for it on every event; the router is asked at most every 20 s
+        # (a running probe is followed every 15 s anyway)
+        if rt.probe_cache and time.time() - rt.probe_cache[0] < 20:
+            return dict(rt.probe_cache[1])
+        st = await rt.agent.call("probe-status", timeout=30)
+        rt.probe_cache = (time.time(), st)
+        return dict(st)
 
     def _event(self, rt: RouterRuntime, etype: str, data: dict) -> None:
         """An event of the manager itself, stored and sent like the router's."""
@@ -1520,7 +1540,13 @@ class Hub:
                 for k in rows]
         # what the last probe found of each key's servers, and the rules that use them now
         index = usage.link_index(rows)
-        st = self.db.last_probe_result(rid) or {}
+        # the last probe's rows, parsed once per run (hundreds of rows, asked for every minute)
+        run = self.db.last_probe_result_id(rid)
+        if self._probe_rows.get(rid, ("",))[0] != run:
+            full = self.db.last_probe_result(rid) or {}
+            self._probe_rows[rid] = (run, {"finished": full.get("finished"),
+                                           "rows": [{"link": r.get("link"), "verdict": r.get("verdict")} for r in full.get("rows") or []]})
+        st = self._probe_rows[rid][1]
         probe = {k["id"]: {"tested": 0, "good": 0, "flaky": 0, "bad": 0} for k in keys}
         for r in st.get("rows") or []:
             if (kid := index.get(usage.norm(r.get("link") or ""))) in probe:

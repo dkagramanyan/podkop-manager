@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS logs (
   source TEXT NOT NULL DEFAULT '', level TEXT NOT NULL DEFAULT 'info'
 );
 CREATE INDEX IF NOT EXISTS logs_router ON logs (router_id, id);
+CREATE INDEX IF NOT EXISTS logs_t ON logs (t);
 CREATE TABLE IF NOT EXISTS versions (
   id INTEGER PRIMARY KEY, router_id INTEGER NOT NULL, t REAL NOT NULL, job TEXT, state TEXT NOT NULL,
   message TEXT, note TEXT, fingerprint_before TEXT, config TEXT NOT NULL, diff TEXT NOT NULL,
@@ -114,11 +115,16 @@ COLUMNS = [
 
 class DB:
     def __init__(self, path: Path):
+        self.path = path
         self.conn = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.lock = threading.Lock()
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
+            # every statement is its own commit (a log line, a traffic row): with FULL each one
+            # waits for the disk. NORMAL in WAL mode cannot corrupt the database; a power cut
+            # may lose the last moments' rows.
+            self.conn.execute("PRAGMA synchronous=NORMAL")
         self.migrate()
 
     def migrate(self) -> None:
@@ -134,12 +140,16 @@ class DB:
                 rows = self.conn.execute("SELECT id, line FROM logs").fetchall()
                 parsed = [(p["source"], p["level"], r[0]) for r in rows for p in [parse_log(r[1])]]
                 self.conn.executemany("UPDATE logs SET source = ?, level = ? WHERE id = ?", parsed)
-        # lines stored before they counted as noise
-        noise = [(r["id"],) for r in self.q("SELECT id, line FROM logs WHERE level != 'noise' AND line LIKE '%arpa% IN PTR%'")
+        # lines stored before they counted as noise: only the lines added since the last
+        # start are read (it was every line of 14 days at every start)
+        upto = (self.one("SELECT max(id) AS n FROM logs") or {}).get("n") or 0
+        noise = [(r["id"],) for r in self.q("SELECT id, line FROM logs WHERE id > ? AND level != 'noise' AND line LIKE '%arpa% IN PTR%'",
+                                            self.get_setting("logs_noise_upto") or 0)
                  if parse_log(r["line"])["level"] == "noise"]
         if noise:
             with self.lock:
                 self.conn.executemany("UPDATE logs SET level = 'noise' WHERE id = ?", noise)
+        self.set_setting("logs_noise_upto", upto)
         # 1.28.0 kept a rule's keys with its probe parameters
         for r in self.q("SELECT router_id, section, keys FROM auto_rules WHERE keys != '[]'"):
             if r["section"] not in self.rule_keys(r["router_id"]):
@@ -186,6 +196,18 @@ class DB:
             self.x(f"UPDATE routers SET {k} = ? WHERE id = ?", v, rid)
 
     def delete_router(self, rid: int) -> None:
+        with self.lock:
+            self.conn.execute("BEGIN")
+        try:
+            self._delete_router(rid)
+        except BaseException:
+            with self.lock:
+                self.conn.execute("ROLLBACK")
+            raise
+        with self.lock:
+            self.conn.execute("COMMIT")
+
+    def _delete_router(self, rid: int) -> None:
         self.x("DELETE FROM key_usage WHERE key_id IN (SELECT id FROM keys WHERE router_id = ?)", rid)
         for table in ("events", "logs", "versions", "probe_runs", "drafts", "auto_rules", "keys", "traffic",
                       "connection_checks", "incidents", "observations"):
@@ -194,7 +216,7 @@ class DB:
         # the hub's per-router settings, so a router that gets this id later starts clean
         for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
                      "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced",
-                     "reliability", "server_health", "kuma_token"):
+                     "reliability", "server_health", "kuma_token", "heal_probe", "entry_ips"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -257,7 +279,7 @@ class DB:
                 else:
                     iid = self.conn.execute("INSERT INTO incidents(router_id, started, last, category, count, context) "
                                             "VALUES (?, ?, ?, ?, 1, ?)",
-                                            (rid, now, now, category, json.dumps(context))).lastrowid
+                                            (rid, now, now, category, json.dumps(context() if callable(context) else context))).lastrowid
             self.conn.execute("INSERT INTO observations(router_id, incident_id, t, source, data) VALUES (?, ?, ?, ?, ?)",
                               (rid, iid, now, source, json.dumps(data)))
         return iid
@@ -383,6 +405,11 @@ class DB:
         r = self.one("SELECT result FROM probe_runs WHERE router_id = ? AND state = 'done' AND result IS NOT NULL "
                      "AND trigger != 'heal' ORDER BY id DESC LIMIT 1", rid)
         return json.loads(r["result"]) if r else None
+
+    def last_probe_result_id(self, rid: int) -> int | None:
+        r = self.one("SELECT id FROM probe_runs WHERE router_id = ? AND state = 'done' AND result IS NOT NULL "
+                     "AND trigger != 'heal' ORDER BY id DESC LIMIT 1", rid)
+        return r["id"] if r else None
 
     def last_probe_finished(self, rid: int) -> float:
         """When the newest successful full run ended (0: never)."""
@@ -537,11 +564,13 @@ class DB:
 
     def copy_to(self, path: Path) -> None:
         """A consistent copy of the whole database, for a backup."""
-        dst = sqlite3.connect(str(path))
+        # through a connection of its own: with the shared one (and its lock) every request
+        # and every log line would wait until the copy is done
+        src, dst = sqlite3.connect(str(self.path)), sqlite3.connect(str(path))
         try:
-            with self.lock:
-                self.conn.backup(dst)
+            src.backup(dst)
         finally:
+            src.close()
             dst.close()
 
     def restore_from(self, path: Path) -> None:
