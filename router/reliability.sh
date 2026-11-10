@@ -140,6 +140,9 @@ reliability_expire() (
   [ -n "$_cp" ] || _cp=/etc/sing-box/config.json
   cp "$_cp" "$RUN/eligibility.restore" || exit 0
   echo "$(($(date +%s) + 60))" > "$RUN/eligibility.retry"
+  # with the provider's line down the reload's DNS check fails every time:
+  # no reload (it cuts every connection) until the line is back
+  if command -v heal_wan >/dev/null 2>&1 && ! heal_wan; then rm -f "$RUN/eligibility.restore"; exit 0; fi
   if hot_apply "eligibility lease expired" >/dev/null; then
     rm -f "$RUN/eligibility.json" "$RUN/eligibility.retry"; event eligibility_expired '{}'
   else
@@ -801,7 +804,7 @@ heal_lists() {
   logread 2>/dev/null | awk '/Starting lists update/ { f = 0 } /\[error\] Download .* failed/ { f = 1 } END { exit !f }' || return 0
   touch "$RUN/heal/lists.t"
   logger -t podkop-agent "self-heal: podkop's lists failed to download; updating them again"
-  setsid sh -c 'sleep 30; podkop list_update' </dev/null >/dev/null 2>&1 &
+  setsid sh -c 'sleep 30; podkop list_update' </dev/null >/dev/null 2>&1 9>&- &
 }
 
 # heal_events <plan>
@@ -811,25 +814,23 @@ heal_events() {
   done
 }
 
-# heal_commit <new state json> <marker>: reload sing-box with it (holds the
-# apply lock); on failure the old state stays, with a hold on new tries
+# heal_commit <new state json> <marker>: reload sing-box with it (the caller
+# holds the apply lock); on failure the old state stays, with a hold on new tries
 heal_commit() {
-  exec 9> "$RUN/apply.lock"; flock -n 9 || { exec 9>&-; return 2; }
   cp "$RUN/heal/state.json" "$RUN/heal/state.old"
-  printf '%s\n' "$1" > "$RUN/heal/state.json"
+  heal_state_write "$1"
   if ! _hwhy=$(hot_apply "$2"); then
     jq -c --argjson h "$(($(date +%s) + HEAL_HOLD))" '.groups |= map_values(.hold = $h | .added = [] | .extra = [])' \
       "$RUN/heal/state.json" > "$RUN/heal/state.t" && mv "$RUN/heal/state.t" "$RUN/heal/state.json"
     rm -f "$RUN/heal/state.old"
     hot_apply "self-heal undone" >/dev/null 2>&1
-    exec 9>&-
     event heal_failed "$(jq -nc --arg r "$_hwhy" '{reason: $r}')"
     return 1
   fi
   rm -f "$RUN/heal/state.old"
-  exec 9>&-
   return 0
 }
+heal_state_write() { printf '%s\n' "$1" > "$RUN/heal/state.t" && mv "$RUN/heal/state.t" "$RUN/heal/state.json"; }
 
 # heal_check: one round (the daemon runs it every 30 s)
 heal_check() {
@@ -852,21 +853,30 @@ heal_check() {
   _hf=$(config_fp) || return 0
   [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
   heal_test "$_hc" "$RUN/heal/proxies.json"
-  _hplan=$(heal_plan "$_hc" "$RUN/heal/proxies.json" "$_hf" null) || return 0
+  # the state is read and written under the apply lock: "heal-links" of the
+  # manager changes it too, and a write of a plan made before would drop
+  # the servers it lent
+  exec 9> "$RUN/apply.lock"; flock -n 9 || { exec 9>&-; return 0; }
+  heal_round "$_hc" "$_hf"
+  exec 9>&-
+  return 0
+}
+heal_round() {
+  _hplan=$(heal_plan "$1" "$RUN/heal/proxies.json" "$2" null) || return 0
   if [ "$(printf '%s' "$_hplan" | jq -r .due)" = true ]; then
     if heal_wan; then _hw=true; else _hw=false; fi
-    _hplan=$(heal_plan "$_hc" "$RUN/heal/proxies.json" "$_hf" "$_hw") || return 0
+    _hplan=$(heal_plan "$1" "$RUN/heal/proxies.json" "$2" "$_hw") || return 0
   fi
   _hnew=$(printf '%s' "$_hplan" | jq -c .state)
   if [ "$(printf '%s' "$_hplan" | jq -r .apply)" = true ]; then
     heal_commit "$_hnew" "self-heal: $(printf '%s' "$_hplan" | jq -r '[.state.groups | to_entries[]
-      | "\(.key) +\((.value.added // []) + (.value.extra // []) | length)"] | join(", ") | if . == "" then "borrowed servers removed" else . end')"
-    case $? in 2) return 0 ;; 1) heal_events "$_hplan"; return 0 ;; esac
+      | "\(.key) +\((.value.added // []) + (.value.extra // []) | length)"] | join(", ") | if . == "" then "borrowed servers removed" else . end')" ||
+      { heal_events "$_hplan"; return 0; }
   else
-    printf '%s\n' "$_hnew" > "$RUN/heal/state.json"
+    heal_state_write "$_hnew"
   fi
   heal_events "$_hplan"
-  strict_enforce "$RUN/heal/proxies.json" "$_hc"
+  strict_enforce "$RUN/heal/proxies.json" "$1"
   [ "$(printf '%s' "$_hplan" | jq -r .lists)" = true ] && heal_lists
   return 0
 }
@@ -944,6 +954,8 @@ cmd_heal_links() {
   _hs=$(printf '%s' "$_hr" | jq -r .section)
   case "$_hs" in ""|*[!A-Za-z0-9_]*) fail bad_request "section name expected" ;; esac
   heal_off_json | jq -e --arg s "$_hs" 'index($s) or index("*")' >/dev/null && fail heal_off "self-heal is off for $_hs"
+  # from here to the reload under the apply lock (see heal_check)
+  exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
   _hf=$(config_fp) || fail busy "configuration unavailable"
   [ "$(printf '%s' "$_hr" | jq -r .fingerprint)" = "$_hf" ] || fail conflict "podkop's settings changed"
   _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
@@ -968,11 +980,8 @@ cmd_heal_links() {
     (if (.fingerprint // "") == $fp then . else {fingerprint: $fp, groups: {}} end)
     | .groups[$s] = ((.groups[$s] // {dead_since: $now}) + {reported: true, extra: [$o[].tag], lease: ($now + $l), hold: 0, borrowed_at: $now})' \
     "$RUN/heal/state.json")
-  heal_commit "$_hnew" "self-heal: $_hs +$(printf '%s' "$_hn" | jq length) from the manager"
-  case $? in
-    2) fail busy "an apply is in progress" ;;
-    1) fail recovery_failed "sing-box did not take the servers" ;;
-  esac
+  heal_commit "$_hnew" "self-heal: $_hs +$(printf '%s' "$_hn" | jq length) from the manager" ||
+    fail recovery_failed "sing-box did not take the servers"
   event heal_links "$(jq -nc --arg s "$_hs" --argjson o "$_hn" '{section: $s, servers: [$o[].tag]}')"
   reply "$(heal_status)"
 }

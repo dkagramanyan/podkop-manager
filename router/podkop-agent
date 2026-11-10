@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.18.0"
+AGENT_VERSION="0.19.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -714,7 +714,7 @@ undo_interrupted() {
   rm -f "$ETC/apply-pending"
   if [ -f "$(job_file "$_id")" ]; then
     case "$(jq -r .state "$(job_file "$_id")" 2>/dev/null)" in
-      queued|checking|restarting|reverting) job_end "$_id" "$_st" "$_m" ;;
+      queued|checking|restarting|reloading|reverting) job_end "$_id" "$_st" "$_m" ;;
     esac
   fi
   event apply_interrupted "$(jq -nc --arg j "$_id" --arg b "$_bak" --arg m "$_m" '{job: $j, backup: $b, message: $m}')"
@@ -739,12 +739,20 @@ recover() {
   # them on purpose); the last settings applied here only if that fails
   _what="restarted podkop"
   restart_podkop "recover $_t"
+  # (not with the provider's line down: no settings pass the check then, and
+  # the last-good ones may be older than what the probe or LuCI set since)
   if ! _why=$(health "recover $_t") && [ -s "$ETC/last-good" ] && _fp=$(config_fp) &&
      [ "$_fp" != "$(cat "$ETC/last-good.fp" 2>/dev/null)" ] &&
-     backup_config >/dev/null && install_config "$ETC/last-good"; then
-    _what="podkop did not start with its settings ($_why); restored the last working settings and restarted podkop"
+     { ! command -v heal_wan >/dev/null 2>&1 || heal_wan; } &&
+     _bk=$(backup_config) && install_config "$ETC/last-good"; then
     restart_podkop "recover $_t last-good"
-    _why=$(health "recover $_t last-good") && _why=""
+    if _why=$(health "recover $_t last-good"); then
+      _what="podkop did not start with its settings; restored the last working settings and restarted podkop"; _why=""
+    else
+      # they do not work either: the settings there were go back
+      install_config "$_bk" && restart_podkop "recover $_t: settings back"
+      _what="podkop started neither with its settings nor with the last working ones; its settings are back in place"
+    fi
   fi
   if [ -z "$_why" ]; then
     rm -f "$RUN/gave-up"; reapply_pins
@@ -787,8 +795,10 @@ traffic_poll() {
   _d="$RUN/traffic"; mkdir -p "$_d"
   # a missing, empty or broken state starts over
   jq -e .servers "$_d/state.json" >/dev/null 2>&1 || jq -nc --arg t "$(now)" '{since: $t, total: 0, conns: {}, servers: {}, links: {}}' > "$_d/state.json"
-  printf '%s' "$_c" | jq -c --slurpfile st "$_d/state.json" --argjson tl "$_tl" '
-    $st[0] as $s
+  # (in a file: one argument holds 128 KB at most, a few hundred links are more)
+  printf '%s' "$_tl" > "$_d/links.json"
+  printf '%s' "$_c" | jq -c --slurpfile st "$_d/state.json" --slurpfile tlf "$_d/links.json" '
+    $st[0] as $s | $tlf[0] as $tl
     | [.connections[]? | {id, b: ((.upload // 0) + (.download // 0)), tag: ((.chains // [])[0] // "")}] as $cs
     | ((.uploadTotal // 0) + (.downloadTotal // 0)) as $total
     | [$cs[] | {tag, d: ([.b - ($s.conns[.id] // 0), 0] | max)}] as $ds
@@ -831,7 +841,7 @@ daemon() {
   mkdir -p "$RUN/jobs" "$RUN/guard" "$ETC"
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
   undo_interrupted
-  _last=""; _down=0; _heal=0
+  _last=""; _down=0; _heal=0; _pintry=0
   guard_watch $$ & _gw=$!
   trap 'kill_children "$_gw"; exit 0' TERM INT
   while :; do
@@ -863,7 +873,11 @@ daemon() {
       if [ "$_pid" != "$_last" ]; then
         _r=$( (flock -n 9 || exit 1; health_on) 9> "$RUN/apply.lock") || continue
         [ "$_r" = reloaded ] && continue
-        if [ -n "$(proxies)" ] && reapply_pins; then _last=$_pid; fi
+        # a pin that cannot be set (its server left the group) is tried a few
+        # rounds, not for ever: every try runs health_on again
+        if [ -n "$(proxies)" ]; then
+          if reapply_pins || [ "$_pintry" -ge 4 ]; then _last=$_pid; _pintry=0; else _pintry=$((_pintry + 1)); fi
+        fi
       fi
       continue
     fi
@@ -962,7 +976,8 @@ cmd_status() {
   _pid=$(singbox_pid)
   # the groups and servers come along, so the manager needs one call per look
   _px=null; [ -z "$_pid" ] || _px=$(proxies_json) || _px=null
-  reply "$(jq -nc --arg av "$AGENT_VERSION" --argjson pv "$PROTO" --argjson caps "$(capabilities)" --arg boot "$BOOT" \
+  printf '%s' "${_px:-null}" > "$RUN/status.$$.px"      # in a file: too long for one argument with many servers
+  _sr=$(jq -nc --arg av "$AGENT_VERSION" --argjson pv "$PROTO" --argjson caps "$(capabilities)" --arg boot "$BOOT" \
     --arg up "$(cut -d ' ' -f 1 /proc/uptime | cut -d . -f 1)" \
     --argjson fixed "$(static_json)" \
     --arg en "$(podkop_enabled && echo 1 || echo 0)" --arg pa "$([ -f "$ETC/paused" ] && echo 1 || echo 0)" \
@@ -974,15 +989,17 @@ cmd_status() {
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" \
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
-    --argjson px "${_px:-null}" --argjson v6 "$(ipv6_json)" \
+    --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
       singbox: {version: $fixed.singbox, features: $fixed.features},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
-      engine: $fixed.engine, heal: $heal, proxies: $px, ipv6: $v6,
-      failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')"
+      engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6,
+      failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')
+  rm -f "$RUN/status.$$.px"
+  reply "$_sr"
 }
 
 cmd_config_get() {
@@ -1037,19 +1054,26 @@ cmd_pin() {
   _pt=$(config_json | jq -r --arg s "$_s" '.sections[] | select(.name == $s) | .options.proxy_config_type // ""')
   case "$_pt" in selector|urltest) ;; *) fail bad_request "section $_s has no server choice (needs selector or urltest)" ;; esac
   exec 6> "$RUN/pins.lock"; flock 6
-  touch "$ETC/pins"
-  grep -v "^$_s$TAB" "$ETC/pins" > "$RUN/pins.t"
-  cmp -s "$RUN/pins.t" "$ETC/pins" || { cp "$RUN/pins.t" "$ETC/pins.t" && mv "$ETC/pins.t" "$ETC/pins"; }
-  rm -f "$RUN/pins.t"
+  # the pins file changes only after the switch worked (a wrong tag or a
+  # silent Clash API must not lose the pin there was), in one write
+  _l=""
   if [ "$_t" = auto ]; then
     [ "$_pt" = urltest ] && { select_server "$_s" "$_s-urltest-out" || fail clash "could not switch $_s-out"; }
+  else
+    case "$_t" in ""|*[!A-Za-z0-9_-]*) fail bad_request "server tag expected, like $_s-2-out, or auto" ;; esac
+    _l=$(tag_link "$_s" "$_t"); [ -n "$_l" ] || fail not_found "section $_s has no server $_t"
+    select_server "$_s" "$_t" || fail clash "could not switch $_s-out to $_t (is podkop running?)"
+  fi
+  grep -v "^$_s$TAB" "$ETC/pins" > "$RUN/pins.t" 2>/dev/null
+  [ -z "$_l" ] || printf '%s\t%s\n' "$_s" "$(link_md5 "$_l")" >> "$RUN/pins.t"
+  if ! cmp -s "$RUN/pins.t" "$ETC/pins" && { [ -s "$RUN/pins.t" ] || [ -e "$ETC/pins" ]; }; then
+    cp "$RUN/pins.t" "$ETC/pins.t" && mv "$ETC/pins.t" "$ETC/pins"
+  fi
+  rm -f "$RUN/pins.t"
+  if [ "$_t" = auto ]; then
     event pin_cleared "$(jq -nc --arg s "$_s" '{section: $s}')"
     reply "$(jq -nc --arg s "$_s" '{section: $s, server: "auto"}')"
   fi
-  case "$_t" in ""|*[!A-Za-z0-9_-]*) fail bad_request "server tag expected, like $_s-2-out, or auto" ;; esac
-  _l=$(tag_link "$_s" "$_t"); [ -n "$_l" ] || fail not_found "section $_s has no server $_t"
-  select_server "$_s" "$_t" || fail clash "could not switch $_s-out to $_t (is podkop running?)"
-  printf '%s\t%s\n' "$_s" "$(link_md5 "$_l")" >> "$ETC/pins"
   event pinned "$(jq -nc --arg s "$_s" --arg t "$_t" '{section: $s, server: $t}')"
   reply "$(jq -nc --arg s "$_s" --arg t "$_t" '{section: $s, server: $t}')"
 }
@@ -1071,7 +1095,8 @@ cmd_exit_ips() {
   for _s in $(jq -r '.sections[]' "$_d/in"); do
     case "$_s" in *[!A-Za-z0-9_]*) continue ;; esac
     ( cmd_exit_ip "$_s" ) > "$_d/$_s.json" 2>/dev/null &
-    _n=$((_n + 1)); [ $((_n % 4)) = 0 ] && wait
+    # two at a time: each lookup is a sing-box of its own (memory)
+    _n=$((_n + 1)); [ $((_n % 2)) = 0 ] && wait
   done
   wait
   # (reply exits: the folder goes first)
@@ -1109,13 +1134,13 @@ cmd_exit_ip() {
         | {log: {disabled: true}, dns: {servers: [{type: "local", tag: "local"}]},
            outbounds: [$all[] | select(.tag as $x | $chain | index($x)) | del(.domain_resolver)],
            route: {final: $t, default_domain_resolver: "local"}}
-        | if (.outbounds | length) == 0 then error("no outbound") else . end' "$_cfg" > "$RUN/exit.$$.json" 2>/dev/null ||
-        { rm -f "$RUN/exit.$$.json"; fail not_found "$_t is not in sing-box's config"; }
-      sing-box tools fetch -c "$RUN/exit.$$.json" https://ipinfo.io/json > "$RUN/exit.$$.out" 2>&1 &
+        | if (.outbounds | length) == 0 then error("no outbound") else . end' "$_cfg" > "$RUN/exit.$$.$_s.json" 2>/dev/null ||
+        { rm -f "$RUN/exit.$$.$_s.json"; fail not_found "$_t is not in sing-box's config"; }
+      sing-box tools fetch -c "$RUN/exit.$$.$_s.json" https://ipinfo.io/json > "$RUN/exit.$$.$_s.out" 2>&1 &
       _fp=$!; _w=0
       while kill -0 "$_fp" 2>/dev/null && [ "$_w" -lt 15 ]; do sleep 1; _w=$((_w + 1)); done
       kill "$_fp" 2>/dev/null; wait "$_fp" 2>/dev/null
-      _j=$(cat "$RUN/exit.$$.out"); rm -f "$RUN/exit.$$.json" "$RUN/exit.$$.out" ;;
+      _j=$(cat "$RUN/exit.$$.$_s.out"); rm -f "$RUN/exit.$$.$_s.json" "$RUN/exit.$$.$_s.out" ;;
     vpn)
       _if=$(printf '%s' "$_o" | jq -r '.interface // ""')
       case "$_if" in ""|*[!A-Za-z0-9_.@-]*) fail bad_request "section $_s has no interface" ;; esac
@@ -1168,6 +1193,8 @@ cmd_watch() {
   ( logread -f -e 'podkop\|sing-box' 2>/dev/null & echo $! > "$RUN/watch.$$"; wait ) |
     jq -Rc --unbuffered '{type: "log", line: .}' &
   _p2=$!
+  # a dropped ssh session ends this shell with a signal, not with EOF
+  trap 'kill "$(cat "$RUN/watch.$$" 2>/dev/null)" "$_p1" "$_p2" 2>/dev/null; rm -f "$RUN/watch.$$"; exit 0' HUP TERM INT PIPE
   cat > /dev/null
   kill "$(cat "$RUN/watch.$$" 2>/dev/null)" "$_p1" "$_p2" 2>/dev/null
   rm -f "$RUN/watch.$$"
@@ -1404,23 +1431,30 @@ cmd_probe_cron() {
 
 cmd_probe_status() {
   exec 7> "$RUN/probe.lock"; flock 7; probe_check; exec 7>&-
-  _log=$(tail -n 400 "$RUN/probe/log" 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != ""))')
-  _rows='[]'; [ -s "$RUN/probe/result.csv" ] && _rows=$(jq -Rsc "$CSV_JQ" "$RUN/probe/result.csv")
+  # rows and log go through files: with a few hundred servers they are too
+  # long for one argument (128 KB), and the answer would be empty
+  _pf="$RUN/status.$$"
+  tail -n 400 "$RUN/probe/log" 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != ""))' > "$_pf.log"
+  [ -s "$_pf.log" ] || echo '[]' > "$_pf.log"
+  echo '[]' > "$_pf.rows"; [ -s "$RUN/probe/result.csv" ] && jq -Rsc "$CSV_JQ" "$RUN/probe/result.csv" > "$_pf.rows"
+  [ -s "$_pf.rows" ] || echo '[]' > "$_pf.rows"
   # the link of each row, from podkop-probe's result.csv.links ("n<TAB>link")
   if [ -s "$RUN/probe/result.csv.links" ]; then
-    _rows=$(jq -Rsc --argjson rows "$_rows" '
+    jq -Rsc --slurpfile rows "$_pf.rows" '
       (split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1:] | join("\t"))}) | from_entries) as $l
-      | $rows | map(. + {link: ($l[.n] // null)})' "$RUN/probe/result.csv.links")
+      | $rows[0] | map(. + {link: ($l[.n] // null)})' "$RUN/probe/result.csv.links" > "$_pf.rows.t" && mv "$_pf.rows.t" "$_pf.rows"
   fi
-  reply "$(jq -nc --arg st "$(cat "$RUN/probe/state" 2>/dev/null || echo none)" \
+  _pr=$(jq -nc --arg st "$(cat "$RUN/probe/state" 2>/dev/null || echo none)" \
     --arg s "$(cat "$RUN/probe/started" 2>/dev/null)" --arg f "$(cat "$RUN/probe/finished" 2>/dev/null)" \
-    --arg rc "$(cat "$RUN/probe/exit" 2>/dev/null)" --argjson log "${_log:-[]}" --argjson rows "$_rows" \
+    --arg rc "$(cat "$RUN/probe/exit" 2>/dev/null)" --slurpfile log "$_pf.log" --slurpfile rows "$_pf.rows" \
     --argjson main "$(lines_json /tmp/podkop-probe-best.txt)" \
     --argjson mainfb "$(lines_json /tmp/podkop-probe-fallback.txt)" \
     --argjson yt "$(lines_json /tmp/podkop-probe-youtube.txt)" \
     --argjson ytfb "$(lines_json /tmp/podkop-probe-youtube-fallback.txt)" \
-    '{state: $st, started: $s, finished: $f, exit: ($rc | tonumber? // null), log: $log, rows: $rows,
-      lists: {main: $main, main_fallback: $mainfb, youtube: $yt, youtube_fallback: $ytfb}}')"
+    '{state: $st, started: $s, finished: $f, exit: ($rc | tonumber? // null), log: $log[0], rows: $rows[0],
+      lists: {main: $main, main_fallback: $mainfb, youtube: $yt, youtube_fallback: $ytfb}}')
+  rm -f "$_pf.log" "$_pf.rows" "$_pf.rows.t"
+  reply "$_pr"
 }
 
 # resolve_host <name>: its IPv4 address from outside DNS servers (the router's

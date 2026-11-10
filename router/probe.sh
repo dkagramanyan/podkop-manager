@@ -12,7 +12,7 @@
 #
 # https://github.com/dkagramanyan/podkop-manager
 
-VERSION="1.43.0"
+VERSION="1.44.0"
 REPO_URL="https://github.com/dkagramanyan/podkop-manager"
 RELEASE_URL="$REPO_URL/releases/latest/download/probe.sh"
 BIN=/usr/bin/podkop-probe            # installed copy, used by the nightly run
@@ -1424,7 +1424,12 @@ apply_podkop() {
   # not at the same time as an apply or a recovery by podkop-agent
   if [ -d /tmp/podkop-agent ] && command -v flock >/dev/null 2>&1; then
     exec 8> /tmp/podkop-agent/apply.lock
-    flock -w 600 8 || die "podkop-agent is busy with podkop's settings; try again later"
+    # BusyBox flock has no -w
+    _lw=0
+    until flock -n 8; do
+      [ "$_lw" -ge 600 ] && die "podkop-agent is busy with podkop's settings; try again later"
+      sleep 1; _lw=$((_lw + 1))
+    done
   fi
   podkop_state > "$WORK/podkop.before"
   _msg=""; _secs=""
