@@ -448,3 +448,30 @@ def test_saved_backups(tmp_path, monkeypatch):
         assert backup.restore(DB(tmp_path / "r.db"), tmp_path / "rkey", r.content).startswith("ssh-ed25519")
         assert c.get("/api/backups/..%2Fid_ed25519").status_code == 404
         assert c.get("/api/backups/podkop-manager-99999999-9999.tar.gz").status_code == 404
+
+
+def test_logout_ends_the_session_everywhere_and_fonts_are_local(tmp_path):
+    with client(tmp_path) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        assert c.get("/api/manager").status_code == 200
+        cookie = c.cookies.get("podkop_manager")
+        c.post("/logout")
+        c.cookies.set("podkop_manager", cookie)               # a copy of the cookie made before the logout
+        assert c.get("/api/manager").status_code == 401
+        assert c.get("/", follow_redirects=False).headers["location"] == "/login"
+        # nothing of the page comes from another site
+        for page in ("/login", "/static/app.html"):
+            assert "googleapis" not in c.get(page).text and "/static/fonts/fonts.css" in c.get(page).text
+        r = c.get("/static/fonts/ibm-plex-sans-latin-400.woff2")
+        assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+
+
+def test_login_tries_sent_at_once_all_count(tmp_path):
+    import concurrent.futures
+    with client(tmp_path) as c:
+        with concurrent.futures.ThreadPoolExecutor(12) as pool:
+            got = list(pool.map(lambda _: c.post("/login", data={"user": "admin", "password": "x"}, follow_redirects=False)
+                                .headers["location"], range(12)))
+        assert got.count("/login?bad=locked") >= 2             # 10 tries per window, however they arrive
+        r = c.post("/login", data={"user": "admin", "password": "secret-pass"}, follow_redirects=False)
+        assert r.headers["location"] == "/login?bad=locked"

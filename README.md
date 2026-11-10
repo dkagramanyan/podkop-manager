@@ -58,7 +58,7 @@ agent 0.16.0 (0.17.0 with self-heal off).
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.46.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.46.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.47.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.47.0
 ```
 
 ## Add a router

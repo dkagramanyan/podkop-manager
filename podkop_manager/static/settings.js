@@ -219,8 +219,11 @@ export async function viewSettings(main) {
   };
 
   // the daily copies in the data folder (filled in after the page shows)
+  // (asked once: the page redraws at every status of a router)
+  let backupsBox = null;
   const savedBackups = () => {
-    const box = h("div", { class: "col", style: "gap: 4px" });
+    if (backupsBox) return backupsBox;
+    const box = backupsBox = h("div", { class: "col", style: "gap: 4px" });
     api("GET", "/api/backups").then(({ backups, keep }) => {
       put(box, h("span", { style: "font-size: 13px; font-weight: 500" }, `Saved on this server daily, the last ${keep} kept`),
         backups.length ? h("ul", { class: "plain small", style: "margin: 0; padding: 0; list-style: none" }, backups.slice(0, 5).map((b) =>

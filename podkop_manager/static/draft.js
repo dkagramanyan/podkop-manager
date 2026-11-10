@@ -15,8 +15,8 @@ export async function loadWork(id) {
   const prev = S.work[id];
   if (prev && prev.saving) saveWork(prev);
   if (prev && prev.inflight) await prev.inflight;      // its saves first, or they would look like someone else's
-  const [cur, draft, versions, rules, keys, heal] = await Promise.all([api("GET", `/api/routers/${id}/config`),
-    api("GET", `/api/routers/${id}/draft`), api("GET", `/api/routers/${id}/versions?limit=50`).catch(() => []),
+  const [cur, draft, rules, keys, heal] = await Promise.all([api("GET", `/api/routers/${id}/config`),
+    api("GET", `/api/routers/${id}/draft`),
     api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {}, links: {} })),
     api("GET", `/api/routers/${id}/heal`).catch(() => null)]);
   const old = S.work[id];
@@ -25,7 +25,7 @@ export async function loadWork(id) {
     ctx: { lists: cur.community_lists || [], devices: cur.devices || [], interfaces: cur.interfaces || [] },
     config: draft ? draft.config : clone(cur.config), base: draft ? draft.base : cur.fingerprint,
     rev: draft ? draft.updated : null,     // the draft this page started from, see saveWork
-    versions, auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
+    auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
     heal,      // self-heal state of the router: strict rules, rules left alone (agent 0.12 for strict)
     problems: old && old.problems && draft && same(old.config, draft.config) ? old.problems : null,
     saving: null, inflight: null, loaded: Date.now(), redraw: () => {},
@@ -86,10 +86,23 @@ export function touch(w) {
 export async function discardWork(w) {
   clearTimeout(w.saving);
   w.saving = null;
-  await api("DELETE", `/api/routers/${w.id}/draft?discard=1`);
-  await loadWork(w.id);
+  try {
+    await api("DELETE", `/api/routers/${w.id}/draft?discard=1`);
+    await loadWork(w.id);
+  } catch (e) { toast(`The draft was not discarded: ${e.message}`, true); return; }
   render();
 }
+
+// an edit made within the last half second before the tab closes or reloads is saved on the way out
+window.addEventListener("pagehide", () => {
+  for (const w of Object.values(S.work || {})) {
+    if (!w || !w.saving || w.stale || S.work[w.id] !== w) continue;
+    clearTimeout(w.saving); w.saving = null;
+    fetch(`/api/routers/${w.id}/draft`, { method: "PUT", keepalive: true,
+      headers: { "Content-Type": "application/json", "X-Podkop-Manager": "1" },
+      body: JSON.stringify({ config: w.config, base: w.base, rev: w.rev }) }).catch(() => {});
+  }
+});
 
 export async function checkWork(w) {
   w.checking = true; w.drawBar && w.drawBar();
@@ -103,7 +116,10 @@ export async function checkWork(w) {
 
 export function reviewWork(w) {
   openApply(w.id, { base: w.base, config: w.config, note: "", trigger: "web", done: async (ok) => {
-    if (ok) { await loadWork(w.id); render(); }
+    if (!ok) return;
+    await loadWork(w.id);
+    // "Close, keep going": the job may end while another page is open, which must not be redrawn under the user
+    if ([`#/r/${w.id}/rules`, `#/r/${w.id}/global`].some((p) => location.hash.startsWith(p))) render();
   } });
 }
 

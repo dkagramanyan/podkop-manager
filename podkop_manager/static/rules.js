@@ -3,7 +3,7 @@
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
   tokenField, touch, userListField, workChanges, workFor } from "./draft.js";
 import { bySection, destChip, optionDef, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
-import { pageHead, seg } from "./shell.js";
+import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
@@ -187,11 +187,13 @@ export function ruleEditor(w, s, { onRename }) {
         h("button", { type: "button", class: "btn danger", onclick: () => {
           m.close();
           w.config.sections = sectionsOf(w.config).filter((x) => x !== s);
-          if (auto) api("DELETE", `/api/routers/${w.id}/auto-rules/${s.name}`).then(() => { delete w.auto[s.name]; }).catch(() => {});
+          const failed = (e) => toast(`${s.name}: its probe settings and keys were not removed: ${e.message}`, true);
+          if (auto) api("DELETE", `/api/routers/${w.id}/auto-rules/${s.name}`).then(() => { delete w.auto[s.name]; }).catch(failed);
           if (ruleKeys(w, s.name).length || ownLinks(w, s.name).length) api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: [], links: [] })
-            .then(() => { delete w.keys.rules[s.name]; delete w.keys.links[s.name]; }).catch(() => {});
+            .then(() => { delete w.keys.rules[s.name]; delete w.keys.links[s.name]; }).catch(failed);
           touch(w);
-          location.hash = `#/r/${w.id}/rules`;
+          // the first rule is shown without its name in the address: no hashchange then, so draw here
+          if (location.hash === `#/r/${w.id}/rules`) render(); else location.hash = `#/r/${w.id}/rules`;
         } }, "Delete rule"))] });
   };
 
@@ -378,13 +380,23 @@ export function fillKeyServers(w, s) {
 export function ruleKeysField(w, s) {
   if (!w.keys.subs.length) return null;
   const chosen = ruleKeys(w, s.name), auto = w.auto[s.name];
-  const set = async (ids) => {
-    try {
-      const r = await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ids });
-      w.keys.rules[s.name] = r.keys; w.keys.links[s.name] = r.links;
-      if (auto) { const ui = w.ui[`${s.name}:auto`]; if (ui) ui.preview = null; } else fillKeyServers(w, s);
-    } catch (e) { toast(e.message, true); }
+  // shown at once and saved one after the other: a second click before the first answer
+  // must build on the first, not on what was drawn before it
+  const set = (ids) => {
+    w.keys.rules[s.name] = ids;
     w.redraw();
+    w.keySave = (w.keySave || Promise.resolve()).then(async () => {
+      try {
+        const r = await api("PUT", `/api/routers/${w.id}/rule-keys/${s.name}`, { keys: ids });
+        if (same(w.keys.rules[s.name], ids)) w.keys.rules[s.name] = r.keys;
+        w.keys.links[s.name] = r.links;
+        if (auto) { const ui = w.ui[`${s.name}:auto`]; if (ui) ui.preview = null; } else fillKeyServers(w, s);
+      } catch (e) {
+        toast(e.message, true);
+        w.keys = await api("GET", `/api/routers/${w.id}/rule-keys`).catch(() => w.keys);
+      }
+      w.redraw();
+    });
   };
   return h("div", { class: "field", role: "group", "aria-label": "Servers from keys" },
     h("span", { class: "label xs muted", style: "font-size: 12px" }, "Servers from keys"),
@@ -500,7 +512,7 @@ export function nightlyProbeBlock(w, key, redraw) {
   if (!c.settings) {
     if (!c.loading) {
       c.loading = true;
-      Promise.all([api("GET", `/api/routers/${w.id}/probe`), S.manager || api("GET", "/api/manager")])
+      Promise.all([api("GET", `/api/routers/${w.id}/probe?settings=1`), S.manager || api("GET", "/api/manager")])
         .then(([p, m]) => { c.settings = p.settings; S.manager = m; c.loading = false; redraw(); })
         .catch((e) => { c.loading = false; toast(e.message, true); });
     }

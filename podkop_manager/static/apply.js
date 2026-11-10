@@ -204,7 +204,8 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       if (state === "reloading") marks.reload = marks.reload || t;
       if (state === "restarting") marks.restart = marks.restart || t;
       if (state === "reverting") { marks.restart = marks.restart || marks.check; marks.revert = t; }
-      if (FINAL_STATES.includes(state)) end(job, t);
+      // "unknown": the router never told how it ended (away for 10 minutes); nothing more will come
+      if (FINAL_STATES.includes(state) || ["unknown", "cancelled"].includes(state)) end(job, t);
       draw();
     };
     const end = (job, t) => {
@@ -228,7 +229,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       S.jobWatch.set(vid, onJob);
       const poll = async () => {
         if (finished) return;
-        const v = await api("GET", `/api/versions/${vid}`).catch(() => null);
+        const v = await api("GET", `/api/versions/${vid}?brief=1`).catch(() => null);
         if (v && !["pending", "running"].includes(v.state)) onJob(Object.assign({}, v.details || {}, { state: v.state, message: v.message }));
         else setTimeout(poll, 3000);
       };

@@ -377,5 +377,6 @@ export async function viewReliability(main, id) {
   };
   poll = setInterval(() => reload(id), 30000);
   S.view = { leave: () => { left = true; ++request; clearTimeout(timer); clearInterval(poll); },
-    onReliability: m => reload(m.router_id), onRouter: rt => reload(rt.id), onLive: () => reload(id) };
+    // (not on every status of the router, twice a minute and more: the page is 60 reports and 300 rows)
+    onReliability: m => reload(m.router_id), onLive: () => reload(id) };
 }
