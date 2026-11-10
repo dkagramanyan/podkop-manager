@@ -189,7 +189,33 @@ export async function viewSettings(main) {
           h("div", { class: "row" },
             h("a", { class: "btn", href: "/api/backup", download: "" }, "Download backup"),
             h("button", { type: "button", class: "btn", onclick: restore }, "Restore…")),
-          savedBackups())));
+          savedBackups()),
+        notifyCard()));
+  };
+
+  // where alerts go; loaded once, edits live in notifyS until saved
+  let notifyS = null;
+  api("GET", "/api/notify").then((n) => { notifyS = n; if (!page.querySelector(":focus")) draw(); }).catch(() => {});
+  const notifyCard = () => {
+    if (!notifyS) return null;
+    const field = (key, label, type, hint) => h("label", { class: "col", style: "gap: 4px" },
+      h("span", { style: "font-size: 13px; font-weight: 500" }, label),
+      h("input", { class: "input", type, value: notifyS[key], autocomplete: "off", placeholder: hint, oninput: (e) => { notifyS[key] = e.target.value; } }));
+    const save = async (then) => {
+      try { notifyS = await api("PUT", "/api/notify", notifyS); if (then) await then(); else toast("Notifications saved"); }
+      catch (err) { toast(err.message, true); }
+    };
+    return h("section", { class: "card pad", "aria-labelledby": "s-ntf", style: "gap: 12px" },
+      h("h2", { id: "s-ntf" }, "Notifications"),
+      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a kill switch closes or opens, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes."),
+      field("telegram_token", "Telegram bot token", "password", "from @BotFather"),
+      field("telegram_chat", "Telegram chat id", "text", "your id or a group's, e.g. 123456789"),
+      field("webhook_url", "Webhook URL (JSON POST)", "url", "https://…"),
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: notifyS.daily, onchange: (e) => { notifyS.daily = e.target.checked; } }),
+        h("span", {}, "A daily summary at 9:00")),
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "btn primary", onclick: () => save() }, "Save"),
+        h("button", { type: "button", class: "btn", onclick: () => save(async () => { await api("POST", "/api/notify/test"); toast("Test notification sent"); }) }, "Save and send a test")));
   };
 
   // the daily copies in the data folder (filled in after the page shows)

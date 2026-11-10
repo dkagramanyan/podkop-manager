@@ -58,7 +58,7 @@ agent 0.16.0 (0.17.0 with self-heal off).
 For an already paired router, the command for this release is:
 
 ```sh
-wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.44.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.44.0
+wget -qO /tmp/podkop-install.sh https://github.com/dkagramanyan/podkop-manager/releases/download/v1.45.0/install.sh && sh /tmp/podkop-install.sh --upgrade --release v1.45.0
 ```
 
 ## Add a router
@@ -119,6 +119,14 @@ that already runs there are taken into **Keys and usage** and the rules.
   change, and podkop's lists are downloaded again if they failed while the
   rule was down. Rules switched off there (e.g. one that must keep its own
   exit country) are never changed and never lend servers.
+- **Notifications** (**Settings → Notifications**): a Telegram bot (create
+  one with @BotFather, write to it once, put its token and your chat id in)
+  and/or a webhook that gets `{"text", "router", "event", "data"}` as JSON.
+  A message goes out when a rule loses all its servers or recovers, a kill
+  switch closes or opens, podkop goes down, a change is reverted or not
+  applied, a probe fails, or a router is out of reach for 5 minutes. If this
+  server reaches the internet through the router that is down, the message
+  is tried again for about 13 minutes.
 - **Kill switch** (a switch on a Fastest rule, or on a rule that sends
   through one): the rule's traffic goes through its servers or nowhere.
   Self-heal never lends a kill-switch rule other rules' servers; while none

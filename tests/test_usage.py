@@ -217,7 +217,7 @@ def test_restart_follows_unfinished_changes_and_probe_runs(tmp_path: Path):
     async def track_job(rt, vid, job):
         followed.append(("job", vid, job))
 
-    async def track_probe(rt, run_id, trigger):
+    async def track_probe(rt, run_id, trigger, sections=None):
         followed.append(("probe", run_id, trigger))
 
     async def main():

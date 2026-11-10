@@ -27,7 +27,11 @@ export function routerState(rt) {
 // a change undone on the router in the last day
 export const recentAlert = (rt) => (rt.alert && Date.now() / 1000 - rt.alert.t < 86400 ? rt.alert : null);
 export const alertText = (a) => (a.type === "group_down" ? `a rule's servers stopped answering ${ago(a.t)}`
-  : a.type === "schedule_failed" ? `a scheduled change was not applied ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
+  : a.type === "schedule_failed" ? `a scheduled change was not applied ${ago(a.t)}`
+  : a.type === "change_not_applied" ? `a change was not applied ${ago(a.t)}`
+  : a.type === "probe_failed" ? `the nightly probe failed ${ago(a.t)}`
+  : a.type === "probe_not_started" ? `the nightly probe did not start ${ago(a.t)}`
+  : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
 export const draftChanges = (rt) => (rt.draft && rt.draft.changes) || 0;
 
 // "running, 4 changes not applied" and its color, for the router list
