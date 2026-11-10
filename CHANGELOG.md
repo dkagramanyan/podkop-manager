@@ -3,6 +3,36 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.43.0 — 2026-11-11
+
+Kill switch and leak fixes (agent 0.18.0).
+
+- **The guard stands at once after a reboot.** The block list was written
+  only after every remote and community list had been downloaded, one after
+  the other, so until then (or for good, with the lists' host unreachable)
+  kill-switch sites went direct while podkop was down. It is now built at
+  once from the rules' own domains and subnets and the lists already in RAM;
+  lists are fetched in the background, a failed fetch is tried again after
+  10 minutes, and the guard is built again when one arrives.
+- **Kill switches are closed again right after a reload.** A sing-box reload
+  (self-heal, an apply of servers) puts every selector back on its default,
+  which opened a closed kill switch until the next self-heal round, up to
+  30 s later.
+- **A hung sing-box is noticed.** When sing-box runs but its API has not
+  answered for 2 minutes, nothing could watch servers or close a kill
+  switch, silently. Now: a `clash_api_silent` event and one podkop restart
+  through the watchdog (its limit of 3 an hour holds).
+- **The apply lock no longer leaks** into the background job that resolves
+  kill-switch domains (minutes with many names or the WAN down), which
+  stalled applies, self-heal and recovery for as long.
+- One malformed address in a list (`300.1.1.1`, `/40`) made nft refuse the
+  whole block list; addresses are validated now, and a refusal is logged
+  and reported once, not every 15 s.
+- The guard was rebuilt at every podkop start and stop (its key included the
+  flag podkop writes then), delaying the DNS block by seconds; builds from
+  the daemon, an apply and the kill-switch command no longer run at once.
+- Events of the kill switch have readable texts in the manager.
+
 ## 1.42.0 — 2026-11-10
 
 - **Kill switch works with self-heal off.** Until now the agent watched only

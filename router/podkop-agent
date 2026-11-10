@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.17.0"
+AGENT_VERSION="0.18.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -453,6 +453,11 @@ hot_apply() {
     [ -n "$_p" ] && [ -z "$_miss" ] && break
     [ "$_w" -ge 15 ] && { echo "sing-box did not take the new servers:${_miss:- no Clash API}"; return 1; }
   done
+  # a reload puts every selector back on its default member: kill switches
+  # that were closed are closed again now, not at the next self-heal round
+  if command -v strict_enforce >/dev/null 2>&1 && [ -s "$ETC/strict" ]; then
+    mkdir -p "$RUN/heal"; printf '%s' "$_p" > "$RUN/heal/proxies.json"; strict_enforce "$RUN/heal/proxies.json" "$_cp"
+  fi
   dns_ok || { sleep 2; dns_ok; } || { echo "DNS through the router does not answer"; return 1; }
 }
 

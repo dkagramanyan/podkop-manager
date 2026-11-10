@@ -286,7 +286,7 @@ podkop_start_state() { cat "$D/start" 2>/dev/null || echo 0; }
 singbox_pid() { cat "$D/pid" 2>/dev/null; }
 guard_dnsmasq_dir() { printf '%s' "$D/dnsmasq.d"; }
 guard_dnsmasq_restart() { echo restart >> "$D/dnsmasq-restarts"; }
-guard_fetch() { echo "$1" >> "$D/fetched"; echo srs > "$2"; }
+guard_fetch() { echo "$1" >> "$D/fetched"; [ ! -f "$D/fetch-fails" ] && echo srs > "$2"; }
 guard_decompile() { printf '{"version":3,"rules":[{"domain_suffix":["youtube.com","ytimg.com"],"domain":["www.youtube.com"]},{"ip_cidr":["5.6.7.0/24"]}]}' > "$2"; }
 guard_nft() { echo "$*" >> "$D/nft"; case "$1" in -f) touch "$D/nft-table" ;; delete) rm -f "$D/nft-table" ;; list) [ -f "$D/nft-table" ] ;; esac; }
 resolve_host() { echo "$1" >> "$D/resolved-names"; case "$1" in netflix.com) echo 45.57.40.1 ;; fast.com) echo 45.57.40.2 ;; esac; }
@@ -300,7 +300,7 @@ PODKOP = {"sections": [
     {"name": "main", "type": "section", "anonymous": False, "options": {
         "connection_type": "proxy", "proxy_config_type": "urltest", "community_lists": ["youtube"],
         "user_domain_list_type": "text", "user_domains_text": "netflix.com fast.com\n.nflxvideo.net\nbad domain\n",
-        "user_subnet_list_type": "dynamic", "user_subnets": ["1.2.3.0/24", "not-a-subnet", "9.9.9.9"]}},
+        "user_subnet_list_type": "dynamic", "user_subnets": ["1.2.3.0/24", "not-a-subnet", "9.9.9.9", "300.1.1.1", "1.2.3.4/40"]}},
     {"name": "youtube", "type": "section", "anonymous": False, "options": {
         "connection_type": "proxy", "proxy_config_type": "urltest", "user_domain_list_type": "text", "user_domains_text": "other.example"}}]}
 
@@ -312,9 +312,20 @@ def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_pat
     (tmp_path / "podkop.json").write_text(json.dumps(PODKOP))
     (tmp_path / "pid").write_text("123")
     sh = lambda c, i="": r.sh(GUARD_STUBS + c, i)       # noqa: E731
-    sh("guard_sync")
-    sh("guard_sync")                                   # the resolved addresses came in after the first build: built once more
     g = tmp_path / "run/guard"
+    # the first build does not wait for the community list: the guard stands with the rule's own
+    # domains and subnets at once (after a reboot, or with the list's host unreachable)
+    (tmp_path / "fetch-fails").write_text("")
+    sh("guard_sync; wait")
+    assert "youtube.com" not in (g / "domains").read_text() and (tmp_path / "nft-table").exists()
+    assert (g / "subnets").read_text().splitlines() == ["1.2.3.0/24", "9.9.9.9"]       # 300.1.1.1 and /40 would make nft refuse it all
+    sh("guard_sync; wait")                             # the failed fetch is not tried again within 10 minutes
+    assert (tmp_path / "fetched").read_text().count("\n") == 1
+    (tmp_path / "fetch-fails").unlink(); (g / "fetch.stamp").unlink()
+    sh("guard_sync; wait")                             # fetched in the background, the daemon is poked
+    assert (g / "poke").exists() and (tmp_path / "fetched").read_text().count("\n") == 2
+    (tmp_path / "fetched").write_text("u/youtube.srs\n")
+    sh("guard_sync")                                   # built once more, with the list
     assert (g / "domains").read_text().splitlines() == sorted(["netflix.com", "fast.com", "nflxvideo.net", "youtube.com", "ytimg.com", "www.youtube.com", "bad", "domain"])
     assert (g / "subnets").read_text().splitlines() == ["1.2.3.0/24", "5.6.7.0/24", "9.9.9.9"]
     assert (tmp_path / "fetched").read_text().strip().endswith("/youtube.srs")
@@ -355,6 +366,20 @@ def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_pat
     sh("guard_sync")
     assert not (tmp_path / "nft-table").exists() and not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()
     assert json.loads(sh("guard_status"))["nft"] is False
+
+
+def test_silent_clash_api_restarts_podkop_once(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "proxies.json").write_text("")
+    stub = 'recover() { echo recover >> "$D/recovers"; }\n'
+    for t in (1000, 1030, 1060):
+        r.now(t); r.sh(stub + "heal_check")
+    assert r.events() == [] and not (tmp_path / "recovers").exists()
+    for t in (1090, 1120, 1150):                # the 4th silent round: an event and one restart, no more after it
+        r.now(t); r.sh(stub + "heal_check")
+    assert r.events() == [("clash_api_silent", {"seconds": 120})] and (tmp_path / "recovers").read_text() == "recover\n"
+    r.alive(["main-1-out"]); r.now(1180); r.check()
+    assert not (tmp_path / "run/heal/silent").exists()
 
 
 def test_heal_off_command_validates_and_writes_only_on_change(tmp_path):
