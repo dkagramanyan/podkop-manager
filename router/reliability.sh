@@ -269,6 +269,7 @@ HEAL_STRIKES=2       # checks in a row with no answering server before a group i
 HEAL_RECOVER=4       # checks in a row with an answering server before it is up again
 HEAL_MIN_HOLD=300    # s a group keeps its borrowed servers at least (no reload churn)
 HEAL_TIMEOUT=5000    # ms for a test request through a server
+HEAL_SILENT=4        # checks in a row without an answer of sing-box's API before podkop is restarted
 
 heal_off_json() {
   if [ -s "$ETC/heal-off" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/heal-off"; else echo '[]'; fi
@@ -342,6 +343,7 @@ GUARD_DNS=podkop-agent-strict.conf
 GUARD_LIST_AGE=1440     # minutes: remote and community lists are fetched again after a day
 GUARD_RESOLVE_AGE=60    # minutes: the strict sections' own domains are resolved again after an hour
 GUARD_RESOLVE_MAX=400   # names resolved at most
+GUARD_RETRY=10          # minutes before a list that could not be fetched is tried again
 
 guard_dnsmasq_dir() {
   _gd=$(grep -hs '^conf-dir=' /var/etc/dnsmasq.conf.* 2>/dev/null | head -n 1 | cut -d= -f2 | cut -d, -f1)
@@ -349,7 +351,30 @@ guard_dnsmasq_dir() {
   printf '%s' "$_gd"
 }
 # the pieces that touch the system, so tests can stand them in
-guard_fetch() { wget -q -T 30 -O "$2" "$1" 2>/dev/null || curl -fsSL --max-time 30 -o "$2" "$1" 2>/dev/null; }
+# guard_fetch <url> <file>: straight from the router; where the lists' host is
+# cut off without the proxy (the router's own traffic is not routed by
+# podkop), through a server that answers now: a sing-box run of just that
+# outbound, like "exit-ip"
+guard_fetch() {
+  wget -q -T 30 -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+  curl -fsSL --max-time 30 -o "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+  _fc=$(uci -q get podkop.settings.config_path); [ -n "$_fc" ] || _fc=/etc/sing-box/config.json
+  proxies > "$2.px" 2>/dev/null
+  jq -c --slurpfile p "$2.px" '.outbounds as $all
+    | ([$all[] | select(.type == "urltest") | ($p[0].proxies[.tag].now // "") as $n
+        | select($n != "" and ((($p[0].proxies[$n].history // []) | last | (.delay // 0)) > 0)) | $n] | first) as $t
+    | [$t | recurse(. as $x | ($all[] | select(.tag == $x) | .detour) // empty)] as $chain
+    | {log: {disabled: true}, dns: {servers: [{type: "local", tag: "local"}]},
+       outbounds: [$all[] | select(.tag as $x | $chain | index($x)) | del(.domain_resolver)],
+       route: {final: $t, default_domain_resolver: "local"}}
+    | if (.outbounds | length) == 0 then error("no outbound") else . end' "$_fc" > "$2.cfg" 2>/dev/null || { rm -f "$2.px" "$2.cfg"; return 1; }
+  sing-box tools fetch -c "$2.cfg" "$1" > "$2" 2>/dev/null &
+  _fp=$!; _fw=0
+  while kill -0 "$_fp" 2>/dev/null && [ "$_fw" -lt 45 ]; do sleep 1; _fw=$((_fw + 1)); done
+  if kill "$_fp" 2>/dev/null; then wait "$_fp" 2>/dev/null; _fr=1; else wait "$_fp" 2>/dev/null; _fr=$?; fi
+  rm -f "$2.px" "$2.cfg"
+  [ "$_fr" = 0 ] && [ -s "$2" ]
+}
 guard_decompile() { sing-box rule-set decompile -o "$2" "$1" >/dev/null 2>&1; }
 guard_dnsmasq_restart() { /etc/init.d/dnsmasq restart >/dev/null 2>&1 8>&- 9>&-; }
 guard_nft() { nft "$@" 2>/dev/null; }
@@ -370,13 +395,47 @@ def words: (if type == "string" then [.] else lst end)
   ($o.local_domain_lists | lst | .[] | "LD \(.)"), ($o.local_subnet_lists | lst | .[] | "LS \(.)"),
   ($o.remote_domain_lists | lst | .[] | "RD \(.)"), ($o.remote_subnet_lists | lst | .[] | "RS \(.)")'
 
-# guard_cached <url> <file>: the file, fetched when missing or old; an old
-# copy stays when the fetch fails
-guard_cached() {
-  if [ ! -s "$2" ] || [ -z "$(find "$2" -mmin "-$GUARD_LIST_AGE" 2>/dev/null)" ]; then
-    if guard_fetch "$1" "$2.t" && [ -s "$2.t" ]; then mv "$2.t" "$2"; else rm -f "$2.t"; touch -c "$2"; fi
-  fi
-  [ -s "$2" ]
+# guard_ip4: only well-formed IPv4 addresses and subnets pass (one bad
+# element and nft refuses the whole table)
+guard_ip4() {
+  awk -F '[./]' '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+(\/[0-9]+)?$/ && $1 <= 255 && $2 <= 255 && $3 <= 255 && $4 <= 255 && (NF == 4 || $5 <= 32)'
+}
+
+# The remote and community lists are fetched in the background, never by the
+# build itself (an apply or a recovery holds the lock while it builds, and
+# after a reboot the guard must stand before the network does): the build
+# takes the copies in $RUN/guard/lists and writes what it wants to
+# $RUN/guard/want ("url<TAB>file"); the job fetches what is missing or a day
+# old, and the daemon builds again (lists.rev is part of the key). A failed
+# fetch keeps the old copy and is tried again after GUARD_RETRY minutes.
+guard_lists_job() {
+  exec 6> "$RUN/guard/fetch.lock"; flock -n 6 || return 0
+  mkdir -p "$RUN/guard/fetch"; _gch=""
+  while IFS="$TAB" read -r _gu _gf; do
+    [ -n "$_gf" ] || continue
+    [ -s "$_gf" ] && [ -n "$(find "$_gf" -mmin "-$GUARD_LIST_AGE" 2>/dev/null)" ] && continue
+    _gt="$RUN/guard/fetch/${_gf##*/}"
+    if guard_fetch "$_gu" "$_gt" < /dev/null && [ -s "$_gt" ]; then
+      case "$_gf" in *.srs)
+        if guard_decompile "$_gt" "$_gt.json" && [ -s "$_gt.json" ]; then mv "$_gt.json" "${_gf%.srs}.json"
+        else rm -f "$_gt" "$_gt.json"; continue; fi ;;
+      esac
+      mv "$_gt" "$_gf"; _gch=1
+    else rm -f "$_gt"; fi
+  done < "$RUN/guard/want"
+  if [ -n "$_gch" ]; then date +%s > "$RUN/guard/lists.rev"; touch "$RUN/guard/poke"; fi
+}
+guard_lists_start() {
+  [ -s "$RUN/guard/want" ] || return 0
+  _gneed=""
+  while IFS="$TAB" read -r _gu _gf; do
+    if [ ! -s "$_gf" ] || [ -z "$(find "$_gf" -mmin "-$GUARD_LIST_AGE" 2>/dev/null)" ]; then _gneed=1; break; fi
+  done < "$RUN/guard/want"
+  [ -n "$_gneed" ] || return 0
+  [ -n "$(find "$RUN/guard/fetch.stamp" -mmin "-$GUARD_RETRY" 2>/dev/null)" ] && return 0
+  touch "$RUN/guard/fetch.stamp"
+  # no lock of the caller's goes along (the apply lock above all)
+  ( guard_lists_job ) </dev/null >/dev/null 2>&1 4>&- 5>&- 7>&- 8>&- 9>&- &
 }
 
 # guard_resolve_job: the addresses the strict sections' own domains resolve
@@ -396,23 +455,29 @@ guard_resolve_start() {
   if [ -s "$RUN/guard/own-domains" ] && command -v resolve_host >/dev/null 2>&1 &&
      { [ ! -f "$RUN/guard/resolved" ] || [ -z "$(find "$RUN/guard/resolved" -mmin "-$GUARD_RESOLVE_AGE" 2>/dev/null)" ]; }; then
     touch "$RUN/guard/resolved" 2>/dev/null       # not again before the job is done
-    ( guard_resolve_job ) </dev/null >/dev/null 2>&1 &
+    # no lock of the caller's goes along: resolving takes minutes, and an
+    # inherited apply lock would stop applies, self-heal and recovery for as long
+    ( guard_resolve_job ) </dev/null >/dev/null 2>&1 4>&- 6>&- 7>&- 8>&- 9>&- &
   fi
 }
 
 # guard_build: the nft and dnsmasq files for the strict sections, built again
-# when their lists change, a fetched list is a day old or the resolved
-# addresses changed
+# when podkop's settings change (not the flag podkop writes at every start
+# and stop), a list was fetched or the resolved addresses changed. One build
+# at a time: the daemon, an apply and "strict" all come here.
 guard_build() {
   mkdir -p "$RUN/guard/lists"
+  ( flock 4; guard_build_locked ) 4> "$RUN/guard/build.lock"
+}
+guard_build_locked() {
   _gc=$(config_json) || return 1
   _gs=$(strict_json)
-  _gk=$(printf '%s%s%s' "$_gc" "$_gs" "$(cat "$RUN/guard/resolved" 2>/dev/null)" | md5sum | cut -c 1-32)
+  _gk=$(printf '%s%s%s%s' "$(printf '%s' "$_gc" | jq -cS "${FP_JQ:-.}" 2>/dev/null)" "$_gs" "$(cat "$RUN/guard/resolved" 2>/dev/null)" \
+    "$(cat "$RUN/guard/lists.rev" 2>/dev/null)" | md5sum | cut -c 1-32)
   guard_resolve_start
-  if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ] &&
-     [ -z "$(find "$RUN/guard/lists" -type f -mmin "+$GUARD_LIST_AGE" 2>/dev/null | head -n 1)" ]; then return 0; fi
+  if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ]; then guard_lists_start; return 0; fi
   _srs=$(. "$PODKOP_LIB/constants.sh" 2>/dev/null; printf '%s' "${SRS_MAIN_URL:-https://github.com/itdoginfo/allow-domains/releases/latest/download}")
-  : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"; : > "$RUN/guard/own.t"
+  : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"; : > "$RUN/guard/own.t"; : > "$RUN/guard/want.t"
   printf '%s' "$_gc" | jq -r --argjson strict "$_gs" "$GUARD_LISTS_JQ" 2>/dev/null | while IFS= read -r _gl; do
     _gv=${_gl#* }
     case "$_gl" in
@@ -420,30 +485,33 @@ guard_build() {
       "S "*) printf '%s\n' "$_gv" >> "$RUN/guard/subnets.t" ;;
       "LD "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/domains.t" ;;
       "LS "*) [ -r "$_gv" ] && cat "$_gv" >> "$RUN/guard/subnets.t" ;;
-      "RD "*) guard_cached "$_gv" "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" && cat "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" >> "$RUN/guard/domains.t" ;;
-      "RS "*) guard_cached "$_gv" "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" && cat "$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt" >> "$RUN/guard/subnets.t" ;;
+      "RD "*|"RS "*)
+        case "$_gv" in *"$TAB"*) continue ;; esac
+        _gf="$RUN/guard/lists/$(printf '%s' "$_gv" | md5sum | cut -c 1-16).txt"
+        printf '%s\t%s\n' "$_gv" "$_gf" >> "$RUN/guard/want.t"
+        if [ -s "$_gf" ]; then
+          case "$_gl" in "RD "*) cat "$_gf" >> "$RUN/guard/domains.t" ;; *) cat "$_gf" >> "$RUN/guard/subnets.t" ;; esac
+        fi ;;
       "C "*)
         case "$_gv" in *[!A-Za-z0-9_-]*) continue ;; esac
-        if guard_cached "$_srs/$_gv.srs" "$RUN/guard/lists/$_gv.srs" &&
-           { [ -s "$RUN/guard/lists/$_gv.json" ] && [ "$RUN/guard/lists/$_gv.json" -nt "$RUN/guard/lists/$_gv.srs" ] ||
-             guard_decompile "$RUN/guard/lists/$_gv.srs" "$RUN/guard/lists/$_gv.json"; }; then
+        printf '%s\t%s\n' "$_srs/$_gv.srs" "$RUN/guard/lists/$_gv.srs" >> "$RUN/guard/want.t"
+        if [ -s "$RUN/guard/lists/$_gv.json" ]; then
           jq -r '.rules[]? | (.domain // [])[], (.domain_suffix // [])[]' "$RUN/guard/lists/$_gv.json" 2>/dev/null >> "$RUN/guard/domains.t"
           jq -r '.rules[]? | (.ip_cidr // [])[]' "$RUN/guard/lists/$_gv.json" 2>/dev/null >> "$RUN/guard/subnets.t"
         fi ;;
     esac
   done
+  sort -u "$RUN/guard/want.t" > "$RUN/guard/want.n" && mv "$RUN/guard/want.n" "$RUN/guard/want"; rm -f "$RUN/guard/want.t"
   # only names and IPv4 subnets that are safe in the two files
   tr -d '\r' < "$RUN/guard/domains.t" | sed 's/^\.//' | while IFS= read -r _gd; do
     case "$_gd" in ""|*[!A-Za-z0-9.-]*|-*|.*|*..*) ;; *) printf '%s\n' "$_gd" ;; esac
   done | sort -u > "$RUN/guard/domains"
-  tr -d '\r' < "$RUN/guard/subnets.t" | while IFS= read -r _gn; do
-    case "$_gn" in ""|*[!0-9./]*|*/|/*|*.*.*.*.*) ;; *) printf '%s\n' "$_gn" ;; esac
-  done | sort -u > "$RUN/guard/subnets"
+  tr -d '\r' < "$RUN/guard/subnets.t" | guard_ip4 | sort -u > "$RUN/guard/subnets"
   tr -d '\r' < "$RUN/guard/own.t" | sed 's/^\.//' | while IFS= read -r _gd; do
     case "$_gd" in ""|*[!A-Za-z0-9.-]*|-*|.*|*..*) ;; *) printf '%s\n' "$_gd" ;; esac
   done | sort -u > "$RUN/guard/own-domains.n" && mv "$RUN/guard/own-domains.n" "$RUN/guard/own-domains"
   rm -f "$RUN/guard/domains.t" "$RUN/guard/subnets.t" "$RUN/guard/own.t"
-  guard_resolve_start
+  guard_resolve_start; guard_lists_start
   sed 's|.*|address=/&/|' "$RUN/guard/domains" > "$RUN/guard/dnsmasq.conf"
   _gi=$(printf '%s' "$_gc" | jq -r '.sections[] | select(.name == "settings") | .options.source_network_interfaces
           | if type == "array" then . else [.] end | map(select(. != null and . != "")) | if length == 0 then ["br-lan"] else . end
@@ -453,7 +521,7 @@ guard_build() {
     echo "delete table inet $GUARD_TABLE"
     echo "table inet $GUARD_TABLE {"
     echo "  set strict4 { type ipv4_addr; flags interval; auto-merge;"
-    _ge=$(cat "$RUN/guard/subnets" "$RUN/guard/resolved" 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+    _ge=$(cat "$RUN/guard/subnets" "$RUN/guard/resolved" 2>/dev/null | guard_ip4 | sort -u | tr '\n' ',' | sed 's/,$//; s/,/, /g')
     [ -n "$_ge" ] && printf '    elements = { %s }\n' "$_ge"
     echo "  }"
     echo "  chain forward { type filter hook forward priority -5; policy accept;"
@@ -475,8 +543,11 @@ guard_wanted() { [ -s "$ETC/strict" ] && [ ! -f "$ETC/paused" ] && podkop_enable
 guard_nft_sync() {
   if guard_wanted && [ -s "$RUN/guard/nft.conf" ]; then
     if [ "$(cat "$RUN/guard/nft.applied" 2>/dev/null)" = "$(cat "$RUN/guard/key")" ] && guard_nft list table inet "$GUARD_TABLE" >/dev/null; then return 0; fi
-    if guard_nft -f "$RUN/guard/nft.conf"; then cp "$RUN/guard/key" "$RUN/guard/nft.applied"
-    else logger -t podkop-agent "strict guard: nft refused the table"; fi
+    if guard_nft -f "$RUN/guard/nft.conf"; then cp "$RUN/guard/key" "$RUN/guard/nft.applied"; rm -f "$RUN/guard/nft.refused"
+    elif ! cmp -s "$RUN/guard/key" "$RUN/guard/nft.refused"; then     # once per build, not every 15 s
+      logger -t podkop-agent "strict guard: nft refused the table"; cp "$RUN/guard/key" "$RUN/guard/nft.refused"
+      event strict_guard '{"nft":false}'
+    fi
   elif guard_nft list table inet "$GUARD_TABLE" >/dev/null; then
     guard_nft delete table inet "$GUARD_TABLE"; rm -f "$RUN/guard/nft.applied"
   fi
@@ -766,7 +837,18 @@ heal_check() {
   _hc=$(uci -q get podkop.settings.config_path); [ -n "$_hc" ] || _hc=/etc/sing-box/config.json
   [ -s "$_hc" ] || return 0
   proxies > "$RUN/heal/proxies.json" 2>/dev/null
-  jq -e '.proxies' "$RUN/heal/proxies.json" >/dev/null 2>&1 || return 0
+  if ! jq -e '.proxies' "$RUN/heal/proxies.json" >/dev/null 2>&1; then
+    # sing-box runs but its API is silent: nothing here can watch the servers
+    # or close a kill switch. After HEAL_SILENT rounds in a row podkop is
+    # restarted, once (the count goes on until the API answers again).
+    _hn=$(( $(cat "$RUN/heal/silent" 2>/dev/null || echo 0) + 1 )); echo "$_hn" > "$RUN/heal/silent"
+    if [ "$_hn" = "$HEAL_SILENT" ]; then
+      event clash_api_silent "$(jq -nc --argjson s "$((HEAL_SILENT * 30))" '{seconds: $s}')"
+      if command -v recover >/dev/null 2>&1; then recover; fi
+    fi
+    return 0
+  fi
+  rm -f "$RUN/heal/silent"
   _hf=$(config_fp) || return 0
   [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
   heal_test "$_hc" "$RUN/heal/proxies.json"

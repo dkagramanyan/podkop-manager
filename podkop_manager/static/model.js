@@ -154,6 +154,12 @@ export const EVENT_TEXT = {
   recovered: (d) => `Watchdog: ${d.action}`,
   recovery_failed: (d) => `Watchdog could not bring podkop back: ${d.reason}`,
   recovery_gave_up: () => "Watchdog gave up: 3 tries in the last hour",
+  clash_api_silent: (d) => `sing-box runs but has not answered for ${d.seconds} s; podkop is restarted`,
+  strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
+  strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
+  strict_open: (d) => `${d.section}: kill switch open again`,
+  strict_guard: (d) => (d.nft === false ? "Kill switch: the firewall refused the block list"
+    : d.dns ? "Kill switch: its sites are blocked on the router while podkop is down" : "Kill switch: podkop is up, the router's block is lifted"),
   pinned: (d) => `${d.section}: pinned ${serverName(d.section, d.server)}`,
   pin_cleared: (d) => `${d.section}: back to automatic`,
   pin_restored: (d) => `${d.section}: pin ${serverName(d.section, d.server)} set again`,
@@ -185,7 +191,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", clash_api_silent: "bad", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
