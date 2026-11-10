@@ -523,8 +523,28 @@ def test_heal_probe_is_quick_and_only_for_the_dead_rules(tmp_path):
         applied.append(sections)
         return 7
     hub.apply_probe = apply_probe
-    asyncio.run(hub._finish_probe(rt, db.add_probe_run(rid, "heal"), "heal", st))
-    assert applied == [{"main"}] and rt.heal_sections == set()
+    # youtube went down while the probe for main ran: the result is applied to main only, and
+    # youtube (its countries were not tested) gets a probe of its own
+    rt.heal_sections.add("youtube")
+    started = []
+
+    async def start_probe(r, trigger="manual"):
+        started.append((trigger, set(rt.heal_sections)))
+        return 2
+    real_start, hub.start_probe = hub.start_probe, start_probe
+    run = db.add_probe_run(rid, "heal", sections=["main"])
+    assert db.one("SELECT sections, ran_on FROM probe_runs WHERE id = ?", run) == {"sections": '["main"]', "ran_on": "router"}
+    asyncio.run(hub._finish_probe(rt, run, "heal", st, {"main"}))
+    assert applied == [{"main"}] and started == [("heal", {"youtube"})]
+    hub.start_probe = real_start
+    # a result the manager cannot read ends the run as failed, with an event, not "running" for ever
+    async def boom(*a, **k):
+        raise KeyError("rows")
+    hub.apply_probe = boom
+    bad = db.add_probe_run(rid, "heal", sections=["youtube"])
+    asyncio.run(hub._finish_probe(rt, bad, "heal", st, {"youtube"}))
+    assert db.one("SELECT state FROM probe_runs WHERE id = ?", bad)["state"] == "failed" and rt.heal_sections == set()
+    assert db.q("SELECT type FROM events WHERE router_id = ? ORDER BY id DESC LIMIT 1", rid)[0]["type"] == "probe_failed"
     # a self-heal run is never the "last probe" other rules take their servers from
     full = db.add_probe_run(rid, "manual")
     db.finish_probe_run(full, "done", {"state": "done", "rows": [{"link": "vless://u@full:443#f"}]})
@@ -633,7 +653,7 @@ def test_low_memory_router_tests_servers_on_the_manager(tmp_path, monkeypatch):
     hub.local_probe_missing = lambda: ""
     ran = []
 
-    async def local(rt_, run_id, trigger, options):
+    async def local(rt_, run_id, trigger, options, sections=None):
         ran.append(("local", trigger))
     hub._run_local_probe = local
     asyncio.run(hub.start_probe(rid, "manual"))
@@ -651,3 +671,51 @@ def test_failed_list_downloads_are_observed():
     o = r.log_observation(line)
     assert o["kind"] == "lists" and o["scope"] == "main-hetzner-community-ruleset"
     assert r.classify("dial tcp: i/o timeout") == "transport"
+
+
+def test_notifications_text_and_channels(tmp_path, monkeypatch):
+    from podkop_manager import notify
+    assert notify.text("home", "group_down", {"section": "main", "borrowed": []}) == "home: main: no server answers (nothing to borrow)"
+    assert notify.text("home", "strict_closed", {"section": "meta"}) == "home: meta: kill switch closed, connections are refused"
+    assert notify.text("home", "applied", {}) is None           # not worth a message
+    assert not notify.configured({"telegram_token": "t", "telegram_chat": ""}) and notify.configured({"webhook_url": "http://x"})
+    sent = []
+
+    class Answer:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def urlopen(req, data=None, timeout=None):
+        sent.append((req if isinstance(req, str) else req.full_url, data if data is not None else req.data))
+        return Answer()
+    monkeypatch.setattr(notify.urllib.request, "urlopen", urlopen)
+    assert notify.send({"telegram_token": "T", "telegram_chat": "42", "webhook_url": "http://hook/x"}, "hello", {"event": "e"}) == []
+    assert sent[0][0] == "https://api.telegram.org/botT/sendMessage" and b"chat_id=42" in sent[0][1] and b"text=hello" in sent[0][1]
+    assert sent[1][0] == "http://hook/x" and json.loads(sent[1][1]) == {"text": "hello", "event": "e"}
+    # the hub sends router events and its own through it
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    db.set_setting("notify", {"webhook_url": "http://hook/x"})
+    sent.clear()
+
+    async def go():
+        hub._on_message(rt, {"type": "strict_closed", "id": "b:1", "t": "now", "section": "main"})
+        hub._on_message(rt, {"type": "applied", "id": "b:2", "t": "now"})
+        await asyncio.gather(*hub.jobs)
+    asyncio.run(go())
+    assert [json.loads(d)["text"] for _, d in sent] == ["reserv: main: kill switch closed, connections are refused"]
+
+
+def test_a_change_nobody_watches_that_is_not_applied_raises_an_alert(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+
+    async def call(name, *args, **kw):
+        return {"state": "rejected", "message": "podkop's settings changed"}
+    rt.agent.call = call
+    vid = db.add_version(rid, _cfg(["vless://u@b:443#b"]), [], "nightly probe", "fp", "probe")
+    asyncio.run(hub._track_job(rt, vid, "j1"))
+    assert rt.alert["type"] == "change_not_applied"
+    web = db.add_version(rid, _cfg(["vless://u@c:443#c"]), [], "", "fp", "web")     # the apply dialog shows this one
+    rt.alert = None
+    asyncio.run(hub._track_job(rt, web, "j2"))
+    assert rt.alert is None

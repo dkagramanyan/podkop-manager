@@ -19,7 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import backup, configs, podkop, usage, reliability
+from . import backup, configs, notify, podkop, usage, reliability
 from .agent import AGENT_FILES, Agent, AgentError, check_forward, connection_support, require_connection_support
 from .db import DB
 
@@ -28,7 +28,9 @@ log = logging.getLogger("podkop_manager")
 FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "failed"}
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
-ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed")
+ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
+                "probe_failed", "probe_not_started", "clash_api_silent")
+OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
@@ -132,6 +134,7 @@ class RouterRuntime:
         self.heal_lock = asyncio.Lock()     # its down groups are healed one at a time
         self.upgrade: asyncio.Task | None = None    # the agent update being followed
         self.heal_sections: set[str] = set()        # rules the next self-heal probe is for
+        self.offline_told = False                   # "router_offline" was reported for this outage
         self.scheduled: list = []                   # changes waiting for their time: {id, due, note, changes}
 
     def snapshot(self) -> dict:
@@ -246,10 +249,16 @@ class Hub:
                 with contextlib.suppress(AgentError):
                     rt.proxies = await rt.agent.call("proxies", timeout=30)
             rt.online, rt.error, rt.down_since = True, "", None
+            if rt.offline_told:
+                rt.offline_told = False
+                self._event(rt, "router_online", {})
             self._check_exits(rt)
         except AgentError as e:
             rt.online, rt.error = False, e.message
             rt.down_since = rt.down_since or time.time()
+            if not rt.offline_told and time.time() - rt.down_since >= OFFLINE_SECONDS:
+                rt.offline_told = True
+                self._event(rt, "router_offline", {"message": e.message})
         except (KeyError, TypeError, AttributeError) as e:     # an answer without the expected fields
             log.warning("status of %s: unexpected answer: %r", rt.row["host"], e)
             rt.online, rt.error = False, "podkop-agent gave an unexpected answer"
@@ -315,11 +324,11 @@ class Hub:
 
     async def _poll_loop(self, rt: RouterRuntime) -> None:
         while True:
+            rt.wake.clear()         # before: a wake during the refresh starts the next one at once
             try:
                 await self.refresh(rt)
             except Exception:  # noqa: BLE001 - polling must go on whatever happens
                 log.exception("poll %s", rt.row["host"])
-            rt.wake.clear()
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(rt.wake.wait(), timeout=POLL_SECONDS)
 
@@ -330,7 +339,12 @@ class Hub:
                 since = self.db.router(rt.id)["last_event"] or ""
                 async for m in rt.agent.watch(since):
                     delay = 5
-                    self._on_message(rt, m)
+                    try:
+                        self._on_message(rt, m)
+                    except Exception:  # noqa: BLE001 - skipped, or the agent would replay it for ever
+                        log.exception("message of %s: %r", rt.row["host"], m)
+                        if isinstance(m, dict) and m.get("id"):
+                            self.db.update_router(rt.id, last_event=m["id"])
             except AgentError as e:
                 log.info("watch %s: %s", rt.row["host"], e.message)
             except Exception:  # noqa: BLE001 - keep the stream alive whatever happens
@@ -361,6 +375,7 @@ class Hub:
             rt.alert = None
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])
+        self._notify(rt, typ, data)
         self.publish({"type": "event", "router_id": rt.id, "event": typ, "data": data, "t": m.get("t")})
         rt.wake.set()
 
@@ -381,17 +396,20 @@ class Hub:
         self.publish({"type": "reliability", "router_id": rt.id})
 
     async def _connection_loop(self, rt: RouterRuntime) -> None:
+        interval = reliability.DEFAULTS["interval"]
         while True:
-            opts = self.db.get_setting(f"reliability:{rt.id}", reliability.DEFAULTS)
-            if opts["enabled"] and rt.online:
-                try:
+            try:
+                opts = self.db.get_setting(f"reliability:{rt.id}", reliability.DEFAULTS)
+                interval = opts["interval"]
+                if opts["enabled"] and rt.online:
                     await self.check_connections(rt.id)
-                except AgentError as e:
+            except AgentError as e:
+                if e.code != "busy":        # a probe or an apply runs: the last result stays
                     rt.connection_check = {"checked": time.time(), "error": e.message, "code": e.code}
                     self.publish({"type": "reliability", "router_id": rt.id})
-                except Exception:
-                    log.exception("connection checks for router %s", rt.id)
-            await asyncio.sleep(opts["interval"])
+            except Exception:
+                log.exception("connection checks for router %s", rt.id)
+            await asyncio.sleep(interval)
 
     async def check_connections(self, rid: int) -> dict:
         rt = self.get(rid)
@@ -507,7 +525,9 @@ class Hub:
         try:
             job = (await rt.agent.call("apply", payload={"base": base, "config": config}, timeout=30))["job"]
         except AgentError as e:
-            self.db.update_version(vid, state="failed", message=e.message)
+            # no answer in time: the router may have started the job all the same
+            self.db.update_version(vid, state="unknown" if e.code == "timeout" else "failed",
+                                   message=e.message + ("; the router may have applied it: look at its settings" if e.code == "timeout" else ""))
             raise
         self.db.update_version(vid, job=job, state="running")
         self._follow_job(rt, vid, job)
@@ -570,7 +590,11 @@ class Hub:
         try:
             return await self._send(rt, vid, cur["fingerprint"], config)
         except AgentError as e:
-            self._event(rt, "schedule_failed", {"version": vid, "message": e.message})
+            if e.code == "unreachable":     # nothing was sent: it waits on, _run_due gives up after the grace time
+                self.db.update_version(vid, state="scheduled", message=None)
+                self._scheduled_changed(rt)
+            else:
+                self._event(rt, "schedule_failed", {"version": vid, "message": e.message})
             raise
 
     async def _run_due(self) -> None:
@@ -587,7 +611,7 @@ class Hub:
             except AgentError as e:
                 if self.db.version(v["id"])["state"] != "scheduled":
                     continue                    # it failed on the router: run_scheduled told already
-                if e.code in ("unreachable", "timeout", "busy") and now - v["due"] < SCHEDULE_GRACE:
+                if e.code in ("unreachable", "timeout") and now - v["due"] < SCHEDULE_GRACE:
                     continue
                 msg = f"not applied: {e.message}"
                 self.db.update_version(v["id"], state="failed", message=msg)
@@ -612,6 +636,11 @@ class Hub:
         self.db.update_version(vid, state="cancelled", message="moved back to the draft" if to_draft else "cancelled")
         self._event(rt, "schedule_cancelled", {"version": vid, "to_draft": to_draft})
         self._scheduled_changed(rt)
+
+    def _background_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self.jobs.add(task)
+        task.add_done_callback(self.jobs.discard)
 
     def _background(self, rt: RouterRuntime, coro) -> None:
         """A task of the router's, stopped with it."""
@@ -638,11 +667,12 @@ class Hub:
             else:
                 self.db.update_version(v["id"], state="unknown",
                                        message="the manager restarted while sending this change; check the router")
-        for r in self.db.q("SELECT id, router_id, trigger FROM probe_runs WHERE state = 'running'"):
+        for r in self.db.q("SELECT id, router_id, trigger, sections, ran_on FROM probe_runs WHERE state = 'running'"):
             rt = self.routers.get(r["router_id"])
-            local = self.db.probe_settings(r["router_id"]).get("test_from") == "manager"
-            if rt and r["router_id"] not in self.probes and not local:
-                self.probes[rt.id] = asyncio.create_task(self._track_probe(rt, r["id"], r["trigger"]))
+            # a probe run on this server ended with it (also one moved here for the router's memory)
+            if rt and r["router_id"] not in self.probes and r["ran_on"] != "manager":
+                sections = set(json.loads(r["sections"])) if r["sections"] else None
+                self.probes[rt.id] = asyncio.create_task(self._track_probe(rt, r["id"], r["trigger"], sections))
             else:
                 self.db.finish_probe_run(r["id"], "failed", {}, None)
 
@@ -665,6 +695,11 @@ class Hub:
             state = "unknown"
         self.db.update_version(vid, state=state, message=(data or {}).get("message", "no answer from the router"),
                                details=data)
+        version = self.db.version(vid) or {}
+        # ("reverted" has the router's own event)
+        if state in ("rejected", "failed", "unknown") and (version.get("trigger") != "web" or version.get("due")):
+            self._event(rt, "change_not_applied", {"version": vid, "state": state, "trigger": version.get("trigger"),
+                                                   "message": (data or {}).get("message", "no answer from the router")})
         if state in OK_JOB_STATES:
             # the draft that was applied is done with
             draft, version = self.db.draft(rt.id), self.db.version(vid)
@@ -695,7 +730,9 @@ class Hub:
             raise AgentError("no_keys", "add your keys (subscription URLs or links) first")
         if rid in self.probes and not self.probes[rid].done():
             raise AgentError("busy", "a probe is already running")
-        options = self.probe_options(rid, rt.heal_sections if trigger == "heal" else None, heal=trigger == "heal")
+        # a self-heal probe is for the rules down now; one that goes down while it runs gets its own
+        sections = set(rt.heal_sections) if trigger == "heal" else None
+        options = self.probe_options(rid, sections, heal=trigger == "heal")
         if trigger == "heal":
             # quick: the dead rules' countries, pings only; speeds are checked at the next nightly run
             options += ["-q", "--no-speed"]
@@ -713,21 +750,26 @@ class Hub:
                 raise AgentError("no_engine", f"this server can't test servers: {why}")
             if agent < [0, 4, 0]:
                 raise AgentError("old_agent", "the router's podkop-agent is too old to test servers here: reinstall it")
-            run_id = self.db.add_probe_run(rid, trigger, ps["keys"])
-            self.probes[rid] = asyncio.create_task(self._run_local_probe(rt, run_id, trigger, options))
+            run_id = self.db.add_probe_run(rid, trigger, ps["keys"], sorted(sections) if sections else None, "manager")
+            self.probes[rid] = asyncio.create_task(self._run_local_probe(rt, run_id, trigger, options, sections))
             self.publish({"type": "probe", "router_id": rid, "state": "running", "run": run_id})
             return run_id
         if ps.get("fix_fingerprint") and agent >= [0, 3, 1]:
             options.append("--fix-fingerprint")    # test them as they will be used
         if links and not ps.get("keys") and agent < [0, 10, 0]:
             raise AgentError("old_agent", "the router's podkop-agent is too old to test single links: update it")
-        await rt.agent.call("probe-start", payload={"keys": ps["keys"], "links": links, "options": options}, timeout=30)
-        run_id = self.db.add_probe_run(rid, trigger, ps["keys"])
-        self.probes[rid] = asyncio.create_task(self._track_probe(rt, run_id, trigger))
+        try:
+            await rt.agent.call("probe-start", payload={"keys": ps["keys"], "links": links, "options": options}, timeout=30)
+        except AgentError as e:
+            # no answer in time, but the router may have started it: then it is followed like any other
+            if e.code != "timeout" or (await rt.agent.call("probe-status", timeout=30)).get("state") != "running":
+                raise
+        run_id = self.db.add_probe_run(rid, trigger, ps["keys"], sorted(sections) if sections else None)
+        self.probes[rid] = asyncio.create_task(self._track_probe(rt, run_id, trigger, sections))
         self.publish({"type": "probe", "router_id": rid, "state": "running", "run": run_id})
         return run_id
 
-    async def _track_probe(self, rt: RouterRuntime, run_id: int, trigger: str) -> None:
+    async def _track_probe(self, rt: RouterRuntime, run_id: int, trigger: str, sections: set | None = None) -> None:
         st: dict = {}
         end = time.time() + 3 * 3600
         while time.time() < end:
@@ -739,9 +781,28 @@ class Hub:
             self.publish({"type": "probe", "router_id": rt.id, "state": st.get("state"), "run": run_id})
             if st.get("state") != "running":
                 break
-        await self._finish_probe(rt, run_id, trigger, st)
+        await self._finish_probe(rt, run_id, trigger, st, sections)
 
-    async def _finish_probe(self, rt: RouterRuntime, run_id: int, trigger: str, st: dict) -> None:
+    async def _finish_probe(self, rt: RouterRuntime, run_id: int, trigger: str, st: dict, sections: set | None = None) -> None:
+        """Never leaves the run "running": whatever goes wrong here, it ends as failed, with an event."""
+        try:
+            await self._finish_probe_run(rt, run_id, trigger, st, sections)
+        except Exception as e:  # noqa: BLE001
+            log.exception("probe run %s of %s", run_id, rt.row["host"])
+            self.db.finish_probe_run(run_id, "failed", None, None)
+            if rt.local_probe and rt.local_probe.get("state") == "running":
+                rt.local_probe["state"] = "failed"
+            self._event(rt, "probe_failed", {"trigger": trigger, "message": f"the manager could not read its result: {e!r}"[:300]})
+            self.publish({"type": "probe", "router_id": rt.id, "state": "failed", "run": run_id})
+        if trigger == "heal":
+            rt.heal_sections -= sections or set(rt.heal_sections)
+            if rt.heal_sections:            # rules that went down while it ran: their countries were not tested
+                try:
+                    await self.start_probe(rt.id, "heal")
+                except AgentError as e:
+                    self._event(rt, "heal_probe_failed", {"message": e.message})
+
+    async def _finish_probe_run(self, rt: RouterRuntime, run_id: int, trigger: str, st: dict, sections: set | None) -> None:
         state = st.get("state", "unknown")
         if state not in ("done", "failed"):
             state = "failed"            # still running after 3 hours, or no answer at all
@@ -750,20 +811,22 @@ class Hub:
         if state == "done":
             await self._entry_ips(rt, st)
             for section, pick in self.auto_picks(rt.id, st).items():
-                if not pick["links"]:
+                # (a self-heal probe tested only its rules' countries)
+                if not pick["links"] and (trigger != "heal" or not sections or section in sections):
                     self._event(rt, "auto_rule_empty", {"section": section})
         if state == "done" and (trigger == "heal" or (trigger == "schedule" and ps.get("auto_apply"))):
             try:
                 # a self-heal probe tested only its rules' countries: the other rules keep their servers
                 vid = await self.apply_probe(rt.id, st, note="self-heal probe" if trigger == "heal" else "nightly probe",
-                                             sections=set(rt.heal_sections) or None if trigger == "heal" else None)
+                                             sections=(sections or None) if trigger == "heal" else None)
             except (AgentError, ValueError) as e:
                 self._event(rt, "probe_apply_failed", {"message": str(e)})
-        elif state != "done" and trigger == "heal":
+        elif state != "done" and trigger in ("heal", "schedule"):
             last = next((x for x in reversed(st.get("log") or []) if x.strip()), "")
-            self._event(rt, "heal_probe_failed", {"message": last[:300] or "the probe failed"})
-        if trigger == "heal":
-            rt.heal_sections.clear()
+            if trigger == "heal":
+                self._event(rt, "heal_probe_failed", {"message": last[:300] or "the probe failed"})
+            else:       # nobody watches the nightly one
+                self._event(rt, "probe_failed", {"trigger": "nightly", "message": last[:300] or "the probe failed or the router restarted"})
         self.db.finish_probe_run(run_id, state, st, vid)
         self.publish({"type": "probe", "router_id": rt.id, "state": state, "run": run_id})
 
@@ -858,7 +921,19 @@ class Hub:
         rt = self.get(rid)
         return await check_forward(rt.row["host"], rt.row["port"], rt.row["host_key"], self.forward_key)
 
-    async def _run_local_probe(self, rt: RouterRuntime, run_id: int, trigger: str, options: list) -> None:
+    async def _run_local_probe(self, rt: RouterRuntime, run_id: int, trigger: str, options: list,
+                               sections: set | None = None) -> None:
+        try:
+            await self._local_probe(rt, run_id, options)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the run must end
+            log.exception("probe of %s on this server", rt.row["host"])
+            if rt.local_probe:
+                rt.local_probe.update(state="failed", finished=_utc(), exit=1)
+        await self._finish_probe(rt, run_id, trigger, self._local_status(rt) if rt.local_probe and rt.local_probe.get("dir") else {}, sections)
+
+    async def _local_probe(self, rt: RouterRuntime, run_id: int, options: list) -> None:
         """The router builds the servers of the keys with podkop's parser
         (probe-nodes), podkop-probe tests them here with every connection
         going out through the router over SSH (the forwarding key)."""
@@ -907,7 +982,6 @@ class Hub:
                     proc.terminate()
             (d / "nodes.txt").unlink(missing_ok=True)
         lp.update(state="done" if rc == 0 else "failed", finished=_utc(), exit=rc)
-        await self._finish_probe(rt, run_id, trigger, self._local_status(rt))
 
     def _local_status(self, rt: RouterRuntime) -> dict:
         """Like the agent's probe-status, for the run on this server."""
@@ -938,7 +1012,42 @@ class Hub:
         self.db.add_event(rt.id, etype, data)
         if etype in ALERT_EVENTS:            # e.g. a scheduled change that was not applied
             rt.alert = {"type": etype, "t": time.time()}
+        self._notify(rt, etype, data)
         self.publish({"type": "event", "router_id": rt.id, "event": etype, "data": data, "t": time.time()})
+
+    # --- notifications -----------------------------------------------------------------------
+    def _notify(self, rt: RouterRuntime, etype: str, data: dict) -> None:
+        settings = self.db.get_setting("notify", notify.DEFAULTS)
+        if not notify.configured(settings):
+            return
+        message = notify.text(rt.row.get("name") or rt.row["host"], etype, data)
+        if message:
+            self._background_task(self.send_notification(settings, message, {"router": rt.row["host"], "event": etype, "data": data}))
+
+    async def send_notification(self, settings: dict, message: str, payload: dict | None = None, tries: int = 4) -> list[str]:
+        """Sent off the loop; tried again after 30 s, 2 min and 10 min (this
+        server may reach the internet through the very router that is down)."""
+        errors: list[str] = []
+        for wait in (30, 120, 600, 0)[-tries:]:
+            errors = await asyncio.to_thread(notify.send, settings, message, payload)
+            if not errors or not wait:
+                break
+            log.info("notification not sent (%s), again in %s s", "; ".join(errors), wait)
+            await asyncio.sleep(wait)
+        if errors:
+            log.warning("notification not sent: %s", "; ".join(errors))
+        return errors
+
+    def daily_summary(self) -> str:
+        lines = []
+        for rt in self.routers.values():
+            groups = ((rt.status or {}).get("heal") or {}).get("groups") or {}
+            down = sorted(k for k, g in groups.items() if g.get("reported"))
+            last = self.db.one("SELECT state FROM probe_runs WHERE router_id = ? AND trigger = 'schedule' ORDER BY id DESC LIMIT 1", rt.id)
+            lines.append(f"{rt.row.get('name') or rt.row['host']}: " + ("online" if rt.online else "OFFLINE")
+                         + (f", down: {', '.join(down)}" if down else ", all rules up")
+                         + (f", last nightly probe {last['state']}" if last else ""))
+        return "Daily summary\n" + "\n".join(lines)
 
     def _lists_to_rules(self, rid: int) -> None:
         """Once: the probe's own main and YouTube lists of older versions become
@@ -1508,6 +1617,14 @@ class Hub:
             except Exception:  # noqa: BLE001 - the nightly probes must still start
                 log.exception("scheduled changes")
             now = dt.datetime.now()
+            try:
+                ns = self.db.get_setting("notify", notify.DEFAULTS)
+                today = now.strftime("%Y-%m-%d")
+                if ns.get("daily") and notify.configured(ns) and now.hour >= 9 and self.db.get_setting("notify_day") != today:
+                    self.db.set_setting("notify_day", today)
+                    self._background_task(self.send_notification(ns, self.daily_summary()))
+            except Exception:  # noqa: BLE001
+                log.exception("daily summary")
             for rid in list(self.routers):
                 try:
                     await self._maybe_nightly(rid, now)
@@ -1520,7 +1637,7 @@ class Hub:
             return
         ps = self.db.probe_settings(rid)
         sched = (ps.get("schedule") or "").strip()
-        if not sched or ps.get("last_run_day") == now.strftime("%Y-%m-%d"):
+        if not sched:
             return
         try:
             hh, mm = (int(x) for x in sched.split(":"))
@@ -1529,14 +1646,24 @@ class Hub:
         # within an hour after the set time, so a manager started at
         # noon doesn't run the nightly probe right away
         due = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-        if 0 <= (now - due).total_seconds() < 3600:
+        if now < due:
+            due -= dt.timedelta(days=1)     # 23:30's hour goes on after midnight
+        day = due.strftime("%Y-%m-%d")
+        if ps.get("last_run_day") == day:
+            return
+        late = (now - due).total_seconds()
+        if late < 3600:
             try:
                 await self.start_probe(rid, "schedule")
             except AgentError as e:
                 if e.code in ("unreachable", "timeout"):
                     return          # the router is away: try again in 30 s, within the hour
                 self._event(self.routers[rid], "probe_not_started", {"message": e.message})
-            self.db.set_probe_settings(rid, last_run_day=now.strftime("%Y-%m-%d"))
+            self.db.set_probe_settings(rid, last_run_day=day)
+        elif late < 3600 + 120 and not self.routers[rid].online:
+            # the hour passed with the router away (not: the manager was started later in the day)
+            self._event(self.routers[rid], "probe_not_started", {"message": "the router was away for the hour after its time"})
+            self.db.set_probe_settings(rid, last_run_day=day)
 
     async def _backup_loop(self) -> None:
         """A copy of everything in the data folder once a day (backup.KEEP kept)."""

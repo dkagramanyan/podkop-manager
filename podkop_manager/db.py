@@ -97,6 +97,8 @@ COLUMNS = [
     ("logs", "level", "TEXT NOT NULL DEFAULT 'info'"),
     ("versions", "trigger", "TEXT NOT NULL DEFAULT 'web'"),
     ("probe_runs", "keys", "TEXT NOT NULL DEFAULT '[]'"),
+    ("probe_runs", "sections", "TEXT"),                    # a self-heal probe: the rules it is for (JSON list)
+    ("probe_runs", "ran_on", "TEXT NOT NULL DEFAULT 'router'"),     # or 'manager'
     ("auto_rules", "max_ping", "INTEGER NOT NULL DEFAULT 700"),
     ("auto_rules", "min_speed", "REAL NOT NULL DEFAULT 40"),
     ("auto_rules", "youtube", "TEXT NOT NULL DEFAULT ''"),
@@ -350,9 +352,11 @@ class DB:
             self.x(f"UPDATE probe_settings SET {k} = ? WHERE router_id = ?",
                    json.dumps(v) if k in ("keys", "options") else v, rid)
 
-    def add_probe_run(self, rid: int, trigger: str, keys: list | None = None) -> int:
-        return self.x("INSERT INTO probe_runs (router_id, started, state, trigger, keys) VALUES (?, ?, 'running', ?, ?)",
-                      rid, time.time(), trigger, json.dumps(keys or []))
+    def add_probe_run(self, rid: int, trigger: str, keys: list | None = None, sections: list | None = None,
+                      ran_on: str = "router") -> int:
+        return self.x("INSERT INTO probe_runs (router_id, started, state, trigger, keys, sections, ran_on) "
+                      "VALUES (?, ?, 'running', ?, ?, ?, ?)", rid, time.time(), trigger, json.dumps(keys or []),
+                      json.dumps(sections) if sections is not None else None, ran_on)
 
     def last_probe_keys(self, rid: int) -> list:
         """The keys the newest run was started with."""

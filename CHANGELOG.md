@@ -3,6 +3,39 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.45.0 — 2026-11-11
+
+Failures nobody saw become alerts, and alerts can reach you (manager 0.32.0).
+
+- **Notifications** (**Settings → Notifications**): a Telegram bot (token
+  and chat id) and/or a webhook (JSON POST). Sent when a rule loses all its
+  servers or gets them back, a kill switch closes or opens, podkop goes down
+  or comes back, the watchdog acts, a change is reverted or not applied, a
+  probe fails, or a router is out of reach for 5 minutes. Tried again after
+  30 s, 2 min and 10 min; optional daily summary at 9:00; "Save and send a
+  test" checks the channel.
+- A change sent by the nightly probe or a schedule that the router
+  rejected, or that never answered, raised nothing (it showed only in
+  History): `change_not_applied`, shown next to the router's name.
+- A failed nightly probe, and a night when the router was away for the whole
+  hour, were silent: `probe_failed`, `probe_not_started`. A schedule at
+  23:xx keeps its hour past midnight.
+- An apply or a probe start the router did not answer within 30 s was
+  recorded as failed although the router may have started it: the change is
+  now "unknown" (look at the router), a started probe is followed.
+- A scheduled change waits out its grace hour also when the router drops
+  between reading its settings and the apply.
+- A probe whose result the manager could not read stayed "running" for
+  ever; it ends as failed with an event.
+- Self-heal: a rule that went down while a self-heal probe ran was dropped
+  from the next one and got the first one's result applied without its
+  countries having been tested; it now gets a probe of its own. The rules of
+  a run, and where it ran, are stored, so a manager restart applies the
+  result to the right rules.
+- The periodic connection check no longer replaces its last result with
+  "busy" while a probe runs; one malformed message of a router no longer
+  stalls its event stream; a wake during a status read is not lost.
+
 ## 1.44.0 — 2026-11-11
 
 Agent bugs from the review (agent 0.19.0).

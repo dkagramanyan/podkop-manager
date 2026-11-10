@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop, reliability
+from . import __version__, backup, configs, podkop, reliability, notify
 from .agent import (AgentError, connection_support, forward_line, install_command, pair,
                     parse_pairing, release_tag, require_connection_support, upgrade_command)
 from .db import DB
@@ -879,6 +879,34 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"ok": True}
 
     # --- the whole manager: backup and restore ---------------------------------------------
+    @app.get("/api/notify", dependencies=[api])
+    async def notify_settings():
+        return {**notify.DEFAULTS, **db.get_setting("notify", {})}
+
+    @app.put("/api/notify", dependencies=[api])
+    async def set_notify(body: dict):
+        """Where alerts go: a Telegram bot (token + chat id) and/or a webhook URL."""
+        new = {k: body.get(k, v) for k, v in notify.DEFAULTS.items()}
+        if not all(isinstance(new[k], str) and len(new[k]) <= 500 for k in ("telegram_token", "telegram_chat", "webhook_url")):
+            raise HTTPException(400, "token, chat and URL must be text")
+        new = {k: v.strip() if isinstance(v, str) else bool(v) for k, v in new.items()}
+        if new["webhook_url"] and not new["webhook_url"].startswith(("http://", "https://")):
+            raise HTTPException(400, "the webhook URL must start with http:// or https://")
+        if bool(new["telegram_token"]) != bool(new["telegram_chat"]):
+            raise HTTPException(400, "Telegram needs both the bot token and the chat id")
+        db.set_setting("notify", new)
+        return new
+
+    @app.post("/api/notify/test", dependencies=[api])
+    async def test_notify():
+        settings = {**notify.DEFAULTS, **db.get_setting("notify", {})}
+        if not notify.configured(settings):
+            raise HTTPException(400, "set a Telegram bot or a webhook first")
+        errors = await hub.send_notification(settings, "podkop-manager: test notification", {"event": "test"}, tries=1)
+        if errors:
+            raise HTTPException(502, "; ".join(errors))
+        return {"ok": True}
+
     @app.get("/api/backup", dependencies=[api])
     async def get_backup():
         data = await asyncio.to_thread(backup.make, db, hub.key)
