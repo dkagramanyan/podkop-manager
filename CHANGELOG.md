@@ -3,6 +3,33 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.46.0 — 2026-11-11
+
+Speed (manager 0.33.0, agent 0.20.0).
+
+- **Database**: every log line, traffic row and setting waited for the disk
+  (`synchronous=FULL`); it is `NORMAL` now (safe in WAL mode). A backup
+  copied the database while holding the lock every request needs, freezing
+  the whole service for the copy; it reads through its own connection. The
+  hourly clean-up of old log lines has an index. The start no longer reads
+  every stored log line. Removing a router is one transaction.
+- **Pages ask the router less**: the settings are served as the status poll
+  last read them while the router's fingerprint is the same (an apply still
+  reads them fresh), the probe's status at most every 20 s. Opening Overview
+  made two ssh round trips each time, and again after every event.
+- A connection check no longer reads the router's settings every minute.
+- **A router that is away fails fast**: requests queued behind a failed
+  connect (15 s each) get its answer at once for 5 s, and a half-open
+  connection is dropped at the call's own timeout instead of after ssh's
+  keepalive, so pages and the scheduler do not hang on it.
+- Keys and usage: the last probe's rows are parsed once per run, not every
+  minute per router; an incident's context is built only for a new incident,
+  not for every failing log line.
+- **Agent**: the Clash API's address and secret are read from sing-box's
+  config once per config instead of twice per request (a self-heal round
+  makes a dozen requests against a config of hundreds of kB), and the
+  settings' fingerprint once per round.
+
 ## 1.45.0 — 2026-11-11
 
 Failures nobody saw become alerts, and alerts can reach you (manager 0.32.0).

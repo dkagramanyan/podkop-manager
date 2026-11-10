@@ -247,6 +247,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.get("/api/routers/{rid}/config", dependencies=[api])
     async def get_config(rid: int):
         rt = router_or_404(rid)
+        if cached := hub.cached_config(rt):      # the poll read them moments ago: no trip to the router
+            return cached
         try:
             return await hub.config(rid)
         except AgentError as e:

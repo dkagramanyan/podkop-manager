@@ -22,6 +22,7 @@ class FakeRouter:
     status = {"fingerprint": "fp1", "podkop": {"version": "0.7.24"}}
     row = {"name": "home"}
     local_probe = None
+    probe_cache = None
     online = True
 
     def snapshot(self):
@@ -33,6 +34,7 @@ class FakeHub:
     key = Path("/nonexistent/id_ed25519")
     forward_key = Path("/nonexistent/id_forward")
     engine = {"state": "", "error": ""}
+    _probe_rows: dict = {}
     auto_picks = Hub.auto_picks
     usage = Hub.usage
     load_config = Hub.load_config
