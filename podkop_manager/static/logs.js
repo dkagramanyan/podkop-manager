@@ -37,9 +37,14 @@ export async function viewLogs(main, id) {
       ? "No line matches these filters." : "No lines stored yet. New lines arrive while the router is connected."));
     toBottom();
   };
+  let asked = 0;
   const load = async () => {
+    const mine = ++asked;       // a slower, older answer must not replace a newer one
     const qs = new URLSearchParams({ limit: "1000", q: f.q, source: [...f.sources].join(","), level: levels().join(",") });
-    fill(await api("GET", `/api/routers/${id}/logs?${qs}`));
+    try {
+      const rows = await api("GET", `/api/routers/${id}/logs?${qs}`);
+      if (mine === asked) fill(rows);
+    } catch (e) { if (mine === asked) toast(e.message, true); }
   };
 
   const drawFoot = () => put(foot,

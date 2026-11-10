@@ -29,4 +29,4 @@ packages = ["podkop_manager"]
 version = {attr = "podkop_manager.__version__"}
 
 [tool.setuptools.package-data]
-podkop_manager = ["static/*"]
+podkop_manager = ["static/*", "static/fonts/*"]

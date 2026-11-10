@@ -105,9 +105,10 @@ export async function viewOverview(main, id) {
         h("div", { class: "col" }, h("span", {}, `podkop-probe also runs by itself every night${at}`),
           h("span", {}, "Set up on the router before the manager, it changes the servers without it. The manager can run it instead, at the same time.")),
         h("button", { type: "button", class: "btn sm", onclick: async (e) => {
-          e.currentTarget.disabled = true;
+          const btn = e.currentTarget;        // gone from the event after the first await
+          btn.disabled = true;
           try { await api("POST", `/api/routers/${id}/probe/take-over`); toast("The manager runs the nightly probe now"); await load(); draw(); }
-          catch (err) { toast(err.message, true); e.currentTarget.disabled = false; }
+          catch (err) { toast(err.message, true); btn.disabled = false; }
         } }, "Let the manager run it")));
     }
     for (const a of (rt.usage && rt.usage.alerts) || []) {

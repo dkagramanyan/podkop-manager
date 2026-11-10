@@ -3,6 +3,38 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.47.0 — 2026-11-11
+
+Web interface and login (manager 0.34.0).
+
+- Deleting the rule shown first left it in the list with a dead editor.
+- Two quick clicks on a rule's keys saved only the second; clicks are shown
+  at once and saved in order.
+- History reloaded at every status of the router when scheduled changes
+  were not in order of their numbers, and a reload closed "Show older".
+- The apply dialog span for ever when the router never told how a change
+  ended; a job that ends after "Close, keep going" no longer redraws the
+  page you moved to (and wipes what you were typing).
+- Logs: a slow answer to an older filter no longer replaces the newer one.
+- Errors that showed nothing now show a message (Discard, removing a rule's
+  probe settings, History, "Let the manager run it").
+- An edit made in the last half second before a reload or closing the tab
+  is saved on the way out.
+- Lighter pages: Connection health no longer reloads 60 reports at every
+  status of the router; Rules no longer fetches 50 versions and the whole
+  probe result it does not show; the apply dialog asks for a change's state
+  without its two full configs; Settings asks for the backups once.
+- **Fonts are served by the manager**, not by Google: the page opens at once
+  when the browser cannot reach it (a broken proxy, which is when you open
+  the manager).
+- **Login**: wrong tries sent at the same time each saw an empty count, so
+  the limit of 10 per 10 minutes could be passed; behind the TLS proxy the
+  limit is per client, not for everyone at once. Log out ends the session
+  on the server, so a copied cookie stops working (everyone logs in once
+  more after this update). `/health` tells only whether it is up.
+- A draft with a malformed section is refused instead of breaking the
+  router's pages until it is discarded.
+
 ## 1.46.0 — 2026-11-11
 
 Speed (manager 0.33.0, agent 0.20.0).

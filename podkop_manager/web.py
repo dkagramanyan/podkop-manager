@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import time
@@ -25,6 +26,8 @@ from .agent import (AgentError, connection_support, forward_line, install_comman
 from .db import DB
 from .hub import Hub
 
+log = logging.getLogger("podkop_manager.web")
+
 STATIC = Path(__file__).parent / "static"
 # the web interface's files: the browser asks each time whether they changed (a 304 when not),
 # so after an update it never runs yesterday's app.js with today's server
@@ -34,7 +37,8 @@ NO_CACHE = {"Cache-Control": "no-cache"}
 class _Static(StaticFiles):
     def file_response(self, *args, **kwargs):
         r = super().file_response(*args, **kwargs)
-        r.headers.update(NO_CACHE)
+        # fonts never change; everything else is checked again at every load
+        r.headers.update({"Cache-Control": "public, max-age=31536000, immutable"} if str(args[0]).endswith(".woff2") else NO_CACHE)
         return r
 
 
@@ -90,7 +94,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return body[name]
 
     def user(request: Request) -> None:
-        if not request.session.get("auth"):
+        if not logged_in(request):
             raise HTTPException(401, "log in first")
         # a page from another site can't add this header to its requests
         if request.method not in ("GET", "HEAD") and request.headers.get("x-podkop-manager") != "1":
@@ -113,7 +117,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     @app.get("/")
     async def index(request: Request):
-        if not request.session.get("auth"):
+        if not logged_in(request):
             return RedirectResponse("/login", status_code=303)
         return FileResponse(STATIC / "app.html", headers=NO_CACHE)
 
@@ -121,23 +125,38 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def login_page():
         return FileResponse(STATIC / "login.html", headers=NO_CACHE)
 
-    failures: dict[str, list[float]] = {}     # client address -> times of its wrong logins
+    failures: dict[str, list[float]] = {}     # client address -> times of its login tries not (yet) right
+    # logins that are still good: {session id: expiry}; kept in the database so a restart logs nobody out
+    sessions: dict[str, float] = {k: v for k, v in (db.get_setting("sessions") or {}).items() if v > time.time()}
+
+    def logged_in(request: Request) -> bool:
+        return bool(request.session.get("auth")) and sessions.get(request.session.get("sid") or "", 0) > time.time()
 
     @app.post("/login")
     async def login(request: Request):
         addr = request.client.host if request.client else ""
+        if secure_cookies:      # behind the TLS proxy every client has the proxy's address: the one it reports
+            addr = request.headers.get("x-forwarded-for", "").split(",")[-1].strip() or addr
         now = time.time()
-        recent = failures[addr] = [t for t in failures.get(addr, []) if now - t < LOGIN_WINDOW]
+        # one list per address, changed in place, and a try counts from its start: requests
+        # sent at the same time must not each see an empty list while the slow hash runs
+        recent = failures.setdefault(addr, [])
+        recent[:] = [t for t in recent if now - t < LOGIN_WINDOW]
         if len(recent) >= LOGIN_FAILURES:
             return RedirectResponse("/login?bad=locked", status_code=303)
+        recent.append(now)
         form = await request.form()
         name_ok = hmac.compare_digest(str(form.get("user", "")).strip().encode(), username.encode())
         # the slow hash runs off the event loop, so guessing can't stall the live updates
         if await asyncio.to_thread(check_password, str(form.get("password", "")), password_hash) and name_ok:
             failures.pop(addr, None)
-            request.session["auth"] = True
+            sid = secrets.token_hex(16)
+            for old in [k for k, v in sessions.items() if v <= now]:
+                del sessions[old]
+            sessions[sid] = now + 14 * 86400
+            db.set_setting("sessions", sessions)
+            request.session["auth"], request.session["sid"] = True, sid
             return RedirectResponse("/", status_code=303)
-        recent.append(now)
         await asyncio.sleep(1)
         return RedirectResponse("/login?bad=1", status_code=303)
 
@@ -146,13 +165,16 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         """For Docker's health check and uptime monitors: no login, no names."""
         try:
             db.one("SELECT 1")
-        except Exception as e:  # noqa: BLE001
-            return JSONResponse({"ok": False, "error": f"database: {e}"}, status_code=503)
-        return {"ok": True, "version": __version__, "routers": len(hub.routers),
-                "online": sum(1 for rt in hub.routers.values() if rt.online)}
+        except Exception:  # noqa: BLE001
+            log.exception("health check")
+            return JSONResponse({"ok": False}, status_code=503)
+        return {"ok": True, "routers": len(hub.routers), "online": sum(1 for rt in hub.routers.values() if rt.online)}
 
     @app.post("/logout")
     async def logout(request: Request):
+        # the cookie stops working everywhere, not only in this browser
+        if sessions.pop(request.session.get("sid") or "", None):
+            db.set_setting("sessions", sessions)
         request.session.clear()
         return RedirectResponse("/login", status_code=303)
 
@@ -324,6 +346,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         cfg = body.get("config")
         if not isinstance(cfg, dict) or not isinstance(cfg.get("sections"), list):
             raise HTTPException(400, "expected {\"config\": {\"sections\": [...]}, \"base\": ...}")
+        if not all(isinstance(s, dict) and isinstance(s.get("name"), str) and isinstance(s.get("type"), str)
+                   and isinstance(s.get("options", {}), dict) for s in cfg["sections"]):
+            raise HTTPException(400, "every section needs a name, a type and options")
         # the draft the page started from: another tab, or "Load into draft", may have changed it since
         if "rev" in body and body["rev"] != ((db.draft(rid) or {}).get("updated")):
             raise HTTPException(409, "the draft was changed elsewhere")
@@ -347,10 +372,12 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"ok": True}
 
     @app.get("/api/versions/{vid}", dependencies=[api])
-    async def version(vid: int):
+    async def version(vid: int, brief: bool = False):
         v = db.version(vid)
         if not v:
             raise HTTPException(404, "no such version")
+        if brief:       # the apply dialog asks every 3 s for the state only
+            v = {k: x for k, x in v.items() if k not in ("config", "base_config", "diff")}
         return v
 
     @app.post("/api/routers/{rid}/pin", dependencies=[api])
@@ -513,7 +540,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.post("/api/kuma/{rid}/{token}")
     async def kuma_observation(rid: int, token: str, request: Request):
         expected = db.get_setting(f"kuma_token:{rid}")
-        if not expected or not hmac.compare_digest(token, expected):
+        if not expected or not hmac.compare_digest(token.encode(), str(expected).encode()):
             raise HTTPException(403, "invalid webhook token")
         raw = bytearray()
         async for chunk in request.stream():
@@ -541,10 +568,12 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"ok": True}
 
     @app.get("/api/routers/{rid}/probe", dependencies=[api])
-    async def probe(rid: int):
+    async def probe(rid: int, settings: bool = False):
         rt = router_or_404(rid)
         st = None
         ps = db.probe_settings(rid)
+        if settings:        # a rule's page needs only these
+            return {"settings": ps}
         rules = db.auto_rules(rid)
         with contextlib.suppress(AgentError):
             st = await hub.probe_status(rt)

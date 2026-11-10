@@ -112,9 +112,10 @@ export async function viewHistory(main, id) {
   const open = new Set();
   const load = async (older) => {
     const before = older && list.length ? `&before=${list[list.length - 1].id}` : "";
-    const got = await api("GET", `/api/routers/${id}/versions?limit=30${before}`);
+    const n = older ? 30 : Math.max(30, list.length);      // a reload keeps what "Show older" opened
+    const got = await api("GET", `/api/routers/${id}/versions?limit=${n}${before}`);
     list = older ? list.concat(got) : got;
-    more = got.length === 30;
+    more = got.length === n;
   };
 
   const draw = () => {
@@ -194,11 +195,13 @@ export async function viewHistory(main, id) {
     onRouter: (r) => {
       if (r.id !== id) return;
       // a scheduled change started, was cancelled or added: the list changed
-      const ids = (r.scheduled || []).map((x) => x.id).join();
-      if (ids !== list.filter((v) => v.state === "scheduled").map((v) => v.id).sort((a, b) => a - b).join()) load().then(draw);
+      // (the router lists them by time, the page by number; one older than the page shows is not in its list)
+      const oldest = list.length ? list[list.length - 1].id : 0;
+      const ids = (r.scheduled || []).map((x) => x.id).filter((x) => x >= oldest).sort((a, b) => a - b).join();
+      if (ids !== list.filter((v) => v.state === "scheduled").map((v) => v.id).sort((a, b) => a - b).join()) load().then(draw).catch((e) => toast(e.message, true));
       else draw();
     },
-    onJob: (m) => { if (m.router_id === id && FINAL_STATES.includes(m.job.state)) load().then(draw); },
+    onJob: (m) => { if (m.router_id === id && FINAL_STATES.includes(m.job.state)) load().then(draw).catch((e) => toast(e.message, true)); },
   };
 }
 
