@@ -3,6 +3,37 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.44.0 — 2026-11-11
+
+Agent bugs from the review (agent 0.19.0).
+
+- **Exit IPs of several rules at once** shared one temp file, so rules could
+  show each other's exit IP or "no answer"; each lookup has its own files
+  now, two run at a time (each is a sing-box of its own).
+- **podkop-probe's own apply** (cron or by hand, not through the manager)
+  always ended with "podkop-agent is busy": BusyBox `flock` has no `-w`.
+- An apply killed during a reload in place left its job in "reloading" for
+  ever; it is finished like the other states now.
+- **Self-heal state**: a check that had started before the manager lent
+  servers wrote its older state over them, so the lent servers counted as
+  the rule's own and never expired. State is read and written under the
+  apply lock, through a temp file.
+- **Pins**: a pin with a wrong tag, or with the Clash API silent, removed
+  the pin there was. The file is written once, after the switch worked.
+  A pin that cannot be set is tried 4 rounds, not every 15 s for ever.
+- **Recovery after a power cut**: with the provider's line still down the
+  watchdog replaced podkop's settings with the last-good ones (possibly
+  older than the last probe or a LuCI change) and left them there. It no
+  longer does with the line down, and puts the settings back when the
+  last-good ones do not start either.
+- An expired eligibility lease no longer reloads sing-box every minute
+  while the provider's line is down.
+- `status`, `probe-status` and the traffic counters passed servers and probe
+  rows as one command argument (128 KB at most): with a few hundred servers
+  the answer came back empty. They go through files now.
+- `watch` cleans up its `logread` and readers when the ssh session drops.
+- The list update self-heal starts no longer holds the apply lock.
+
 ## 1.43.0 — 2026-11-11
 
 Kill switch and leak fixes (agent 0.18.0).
