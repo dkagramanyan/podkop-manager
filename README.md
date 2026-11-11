@@ -286,6 +286,30 @@ packaged installer and release include both. Preserve the existing agent's
 keys and firewall rules. An older agent gives an explicit unsupported-command
 error and continues its existing watchdog behavior.
 
+## VPN: OpenVPN for some sites (manager 0.35, agent 0.21)
+
+The **VPN** page runs an OpenVPN client on the router and sends the sites of
+VPN rules through it:
+
+1. **Install OpenVPN** (packages `openvpn-openssl` and `kmod-tun`, about
+   1 MB of flash). When the package server is cut off from the router, the
+   install goes through a server that answers now.
+2. Import the `.ovpn` file (certificates inline, `<ca>...</ca>`), enter the
+   login and password, **Save**. The password goes to the router only
+   (`/etc/podkop-agent/vpn/auth`, root-only); the manager keeps none of it.
+3. **Add a VPN rule** (connection type VPN, interface `pkvpn`), add its
+   domains on the rule page and apply. Turn **VPN on**.
+4. **Devices**: addresses (one per line) that may use the rule. The others
+   go on as if the rule weren't there (to the next matching rule, or
+   direct). Empty: every device. Give those devices fixed DHCP leases.
+
+The tunnel takes no routes from the server (`route-nopull`): only the sites
+of VPN rules use it. While it is off or not connected, those sites fail at
+once; they never go out direct. The agent drops directives that run scripts
+or change routes from the imported config. Right after a full podkop
+restart, the device limit is back within seconds (the agent adds it when
+podkop is up again).
+
 ## podkop-probe without the manager
 
 Tests every server of your keys on the router and puts the best into podkop:
@@ -337,3 +361,8 @@ before: nothing is written to the router's flash and podkop isn't restarted. Log
 команду из **podkop-probe without the manager** на роутере, вставьте ключи,
 Enter — лучшие серверы попадут в podkop (`main`, `youtube` и по 5 резервных).
 Каждую ночь: **Система → Планировщик**, строка `30 4 * * * podkop-probe --cron`.
+
+OpenVPN для части сайтов: страница **VPN** — установить OpenVPN, загрузить
+`.ovpn`, логин и пароль (пароль хранится только на роутере), включить; затем
+правило с типом VPN и интерфейсом `pkvpn`, при желании — список устройств,
+которым оно доступно. Пока VPN выключен, сайты правила не открываются.

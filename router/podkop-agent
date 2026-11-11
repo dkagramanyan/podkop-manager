@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.20.0"
+AGENT_VERSION="0.21.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6"]'; fi
-  else printf '["resolve","upgrade","ipv6"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -425,6 +425,11 @@ hot_apply() {
   if ! { jq "$HEALTH_JQ" "$_hb" > "$_hb.i" && mv "$_hb.i" "$_hb"; }; then
     rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
   fi
+  if [ -s "$VPN_DIR/allow" ]; then
+    if ! { vpn_filter "$_hb" "$_hb.v" && mv "$_hb.v" "$_hb" && sing-box check -c "$_hb" >/dev/null 2>&1; }; then
+      rm -f "$_hb" "$_hb.v" "$_hb.err"; echo "invalid devices of VPN rules"; return 1
+    fi
+  fi
   if command -v reliability_filter >/dev/null 2>&1; then
     if ! { reliability_filter "$_hb" "$_hb.r" && mv "$_hb.r" "$_hb"; }; then
       rm -f "$_hb" "$_hb.r"; echo "invalid eligibility policy"; return 1
@@ -489,6 +494,9 @@ health_on() {
   else cp "$_ic" "$RUN/health.in"; fi
   jq "$HEALTH_JQ" "$RUN/health.in" > "$RUN/health.json" 2>/dev/null || { rm -f "$RUN/health.json" "$RUN/health.in"; return 0; }
   rm -f "$RUN/health.in"
+  if ! { vpn_filter "$RUN/health.json" "$RUN/health.vpn" && mv "$RUN/health.vpn" "$RUN/health.json"; }; then
+    rm -f "$RUN/health.json" "$RUN/health.vpn"; return 0
+  fi
   if command -v reliability_filter >/dev/null 2>&1; then
     reliability_filter "$RUN/health.json" "$RUN/health.filtered" && mv "$RUN/health.filtered" "$RUN/health.json" || return 0
   fi
@@ -961,6 +969,245 @@ cmd_ipv6() {
     event ipv6_block '{"blocked":false}'
   fi
   reply "$(ipv6_json)"
+}
+
+# --- OpenVPN client -----------------------------------------------------------------
+
+# An OpenVPN tunnel (device pkvpn) that podkop's VPN rules send their sites
+# through (connection type vpn, interface pkvpn). Its own procd service,
+# podkop-vpn, runs it while $VPN_DIR/enabled is there. Routes from the server
+# are ignored (route-nopull), so only the rules' sites use the tunnel; while
+# it is down they fail (sing-box can't bind to a missing device), they never
+# go out direct. $VPN_DIR/allow: {rule: [addresses]}: only those LAN devices
+# use the rule (the others go on as if it weren't there).
+VPN_DIR=$ETC/vpn
+VPN_DEV=pkvpn
+VPN_INIT=/etc/init.d/podkop-vpn
+VPN_PKGS="openvpn-openssl kmod-tun"
+# directives the manager's config may not set: ours, scripts, files, routes
+VPN_DENY="dev dev-type dev-node auth-user-pass auth-nocache script-security up down route-up route-pre-down ipchange
+ tls-verify plugin learn-address client-connect client-disconnect auth-user-pass-verify log log-append status
+ writepid daemon cd chroot config syslog management management-client-auth management-hold management-query-passwords
+ redirect-gateway route route-ipv6 route-nopull route-noexec pull-filter iproute user group tmp-dir askpass"
+# directives that name a file: only inline (<ca>...</ca>) works
+VPN_FILES="ca cert key tls-auth tls-crypt tls-crypt-v2 pkcs12 secret dh crl-verify extra-certs http-proxy-user-pass"
+
+vpn_init_text() {
+  cat <<'EOF'
+#!/bin/sh /etc/rc.common
+# podkop-vpn: the OpenVPN client of podkop-agent (podkop-manager, VPN page)
+START=90
+USE_PROCD=1
+D=/etc/podkop-agent/vpn
+start_service() {
+  [ -f "$D/enabled" ] && [ -s "$D/client.conf" ] && [ -x /usr/sbin/openvpn ] || return 0
+  procd_open_instance
+  procd_set_param command /usr/sbin/openvpn --cd "$D" --config client.conf
+  procd_set_param respawn 3600 10 0
+  procd_close_instance
+}
+EOF
+}
+
+# vpn_clean: the manager's .ovpn on stdin -> the lines we keep; exit 2 with
+# "file: <directives>" on stderr when it names files instead of inline blocks
+vpn_clean() {
+  awk -v deny="$(printf '%s' "$VPN_DENY" | tr '\n' ' ')" -v files="$VPN_FILES" '
+    function has(list, w) { return index(" " list " ", " " w " ") > 0 }
+    { sub(/\r$/, "") }
+    blk != "" { if ($0 ~ "^[ \t]*</" blk ">[ \t]*$") { if (!drop) print; blk = ""; next } if (!drop) print; next }
+    /^[ \t]*<[A-Za-z0-9-]+>[ \t]*$/ { blk = $0; gsub(/[ \t<>]/, "", blk); blk = tolower(blk); drop = has(deny, blk); if (!drop) print; next }
+    /^[ \t]*([#;]|$)/ { next }
+    { w = tolower($1); sub(/^--/, "", w)
+      if (has(deny, w)) next
+      if (has(files, w) && $2 != "[inline]") { bad = bad " " w; next }
+      print }
+    END { if (blk != "") { print "unclosed <" blk ">" > "/dev/stderr"; exit 2 }
+          if (bad != "") { print "file:" bad > "/dev/stderr"; exit 2 } }'
+}
+
+# vpn_build: client.conf = the manager's config + our part
+vpn_build() {
+  {
+    cat "$VPN_DIR/source.conf"
+    echo "# --- podkop-agent ---"
+    echo "dev $VPN_DEV"
+    echo "dev-type tun"
+    echo "route-nopull"
+    echo 'pull-filter ignore "redirect-gateway"'
+    echo "script-security 1"
+    echo "syslog podkop-vpn"
+    [ -s "$VPN_DIR/auth" ] && echo "auth-user-pass $VPN_DIR/auth"
+  } > "$VPN_DIR/client.conf.t" || return 1
+  if cmp -s "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"; then rm -f "$VPN_DIR/client.conf.t"; return 1; fi
+  mv "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"
+}
+
+vpn_installed() { [ -x /usr/sbin/openvpn ] && { [ -e /dev/net/tun ] || modprobe tun >/dev/null 2>&1; [ -e /dev/net/tun ]; }; }
+
+# vpn_init: our service file, written only when it differs
+vpn_init() {
+  vpn_init_text > "$RUN/podkop-vpn.init"
+  if ! cmp -s "$RUN/podkop-vpn.init" "$VPN_INIT"; then
+    { cp "$RUN/podkop-vpn.init" "$VPN_INIT.t" && chmod 755 "$VPN_INIT.t" && mv "$VPN_INIT.t" "$VPN_INIT"; } || return 1
+  fi
+  rm -f "$RUN/podkop-vpn.init"
+  "$VPN_INIT" enabled 2>/dev/null || "$VPN_INIT" enable
+}
+
+vpn_allow_json() { if [ -s "$VPN_DIR/allow" ]; then cat "$VPN_DIR/allow"; else echo '{}'; fi; }
+
+# vpn_filter <sing-box config> <out>: the rules of $VPN_DIR/allow match only
+# their devices (podkop's own rules for "fully routed IPs" stay as they are)
+vpn_filter() {
+  if [ ! -s "$VPN_DIR/allow" ]; then cp "$1" "$2"; return; fi
+  jq --argjson a "$(vpn_allow_json)" '
+    if (.route.rules | type) == "array" then .route.rules |= map(
+      ((.outbound // "") | if endswith("-out") then .[:-4] else "" end) as $s
+      | if $s != "" and .source_ip_cidr == null and (($a[$s] // []) | length) > 0
+        then . + {source_ip_cidr: $a[$s]} else . end) else . end' "$1" > "$2"
+}
+
+vpn_status() {
+  _vu=""; _vr=""
+  [ -s "$VPN_DIR/auth" ] && _vu=$(head -n 1 "$VPN_DIR/auth")
+  [ -s "$VPN_DIR/source.conf" ] && _vr=$(awk '$1 == "remote" { print $2 ($3 != "" ? ":" $3 : "") ($4 != "" ? " " $4 : ""); exit }' "$VPN_DIR/source.conf")
+  _vp=$(ubus call service list '{"name":"podkop-vpn"}' 2>/dev/null | jq -r '.["podkop-vpn"].instances[]?.pid // empty' | head -n 1)
+  _va=$(ip -4 -o addr show dev "$VPN_DEV" 2>/dev/null | awk '{ print $4; exit }')
+  _vl=$(logread -e podkop-vpn 2>/dev/null | tail -n 30 | jq -Rsc 'split("\n") | map(select(. != ""))')
+  _vi=false; vpn_installed && _vi=true
+  jq -nc --argjson inst "$_vi" --arg u "$_vu" --arg r "$_vr" --arg p "$_vp" --arg a "$_va" --arg dev "$VPN_DEV" \
+    --argjson allow "$(vpn_allow_json)" --argjson log "${_vl:-[]}" \
+    --arg conf "$([ -s "$VPN_DIR/source.conf" ] && echo 1)" --arg en "$([ -f "$VPN_DIR/enabled" ] && echo 1)" \
+    --arg pw "$(sed -n 2p "$VPN_DIR/auth" 2>/dev/null | grep -c .)" \
+    '{installed: $inst, configured: ($conf == "1"), enabled: ($en == "1"), running: ($p != ""), up: ($a != ""),
+      address: (if $a == "" then null else $a end), remote: (if $r == "" then null else $r end), device: $dev,
+      username: $u, password_set: ($pw == "1"), allow: $allow, log: $log}'
+}
+
+# vpn status | vpn set (stdin {config?, username?, password?, enabled?, allow?}) | vpn install (job)
+cmd_vpn() {
+  case "${1:-status}" in
+    status) reply "$(vpn_status)" ;;
+    install)
+      _id=$(job_new vpn-install); spawn _run-vpn-install "$_id"
+      reply "$(jq -nc --arg id "$_id" '{job: $id}')" ;;
+    set) ;;
+    *) fail bad_request "usage: vpn status|set|install" ;;
+  esac
+  _vq=$(head -c 131072)
+  printf '%s' "$_vq" | jq -e 'type == "object"
+    and ((.config // "") | type == "string" and length <= 65536)
+    and ((.username // "") | type == "string" and length <= 256 and (contains("\n") | not))
+    and ((.password // "") | type == "string" and length <= 256 and (contains("\n") | not))
+    and ((.enabled // false) | type == "boolean")
+    and ((.allow // {}) | type == "object" and length <= 100 and all(to_entries[];
+      (.key | length > 0 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
+      and (.value | type == "array" and length <= 256 and all(.[]; type == "string" and length > 0 and length <= 43
+        and (explode | all(. == 46 or . == 47 or . == 58 or (. >= 48 and . <= 57) or (. >= 65 and . <= 70) or (. >= 97 and . <= 102)))))))' \
+    >/dev/null 2>&1 || fail bad_request 'expected {"config", "username", "password", "enabled", "allow": {"rule": ["addresses"]}}'
+  mkdir -p "$VPN_DIR" && chmod 700 "$VPN_DIR"
+  _restart=0
+  if printf '%s' "$_vq" | jq -e 'has("config")' >/dev/null; then
+    printf '%s' "$_vq" | jq -j '.config' | vpn_clean > "$RUN/vpn.conf" 2> "$RUN/vpn.err" ||
+      { _ve=$(cat "$RUN/vpn.err"); rm -f "$RUN/vpn.conf" "$RUN/vpn.err"
+        case "$_ve" in file:*) fail bad_request "the config names files (${_ve#file: }); put them inline, like <ca>...</ca>" ;;
+                       *) fail bad_request "${_ve:-the config could not be read}" ;; esac; }
+    rm -f "$RUN/vpn.err"
+    grep -qE '^[[:space:]]*remote[[:space:]]' "$RUN/vpn.conf" || { rm -f "$RUN/vpn.conf"; fail bad_request "the config has no remote line"; }
+    cmp -s "$RUN/vpn.conf" "$VPN_DIR/source.conf" || { cp "$RUN/vpn.conf" "$VPN_DIR/source.conf.t" && mv "$VPN_DIR/source.conf.t" "$VPN_DIR/source.conf"; } ||
+      { rm -f "$RUN/vpn.conf"; fail error "could not write the config"; }
+    rm -f "$RUN/vpn.conf"
+  fi
+  if printf '%s' "$_vq" | jq -e 'has("username")' >/dev/null; then
+    _vu=$(printf '%s' "$_vq" | jq -r '.username')
+    if [ -z "$_vu" ]; then rm -f "$VPN_DIR/auth"
+    else
+      # no password sent: the saved one stays
+      _vw=$(printf '%s' "$_vq" | jq -r '.password // empty')
+      [ -n "$_vw" ] || _vw=$(sed -n 2p "$VPN_DIR/auth" 2>/dev/null)
+      [ -n "$_vw" ] || fail bad_request "a password is needed with the login"
+      printf '%s\n%s\n' "$_vu" "$_vw" > "$RUN/vpn.auth"
+      cmp -s "$RUN/vpn.auth" "$VPN_DIR/auth" || { cp "$RUN/vpn.auth" "$VPN_DIR/auth.t" && mv "$VPN_DIR/auth.t" "$VPN_DIR/auth"; } ||
+        { rm -f "$RUN/vpn.auth"; fail error "could not write the login"; }
+      rm -f "$RUN/vpn.auth"
+    fi
+  fi
+  [ -s "$VPN_DIR/source.conf" ] && vpn_build && _restart=1
+  if printf '%s' "$_vq" | jq -e 'has("enabled")' >/dev/null; then
+    if printf '%s' "$_vq" | jq -e '.enabled' >/dev/null; then
+      [ -s "$VPN_DIR/source.conf" ] || fail bad_request "import a config first"
+      vpn_installed || fail not_installed "OpenVPN is not installed on the router"
+      [ -f "$VPN_DIR/enabled" ] || { touch "$VPN_DIR/enabled"; _restart=1; event vpn '{"enabled":true}'; }
+    elif [ -f "$VPN_DIR/enabled" ]; then rm -f "$VPN_DIR/enabled"; _restart=1; event vpn '{"enabled":false}'; fi
+  fi
+  if [ "$_restart" = 1 ] && vpn_installed; then
+    vpn_init || fail error "could not write $VPN_INIT"
+    "$VPN_INIT" restart >/dev/null 2>&1 7>&- 8>&- 9>&-
+  fi
+  if printf '%s' "$_vq" | jq -e 'has("allow")' >/dev/null; then
+    printf '%s' "$_vq" | jq -cS '.allow | with_entries(.value |= unique) | with_entries(select(.value | length > 0))' > "$RUN/vpn.allow"
+    if [ "$(cat "$RUN/vpn.allow")" = '{}' ]; then
+      [ -f "$VPN_DIR/allow" ] && _allow=1 || _allow=0; rm -f "$VPN_DIR/allow" "$RUN/vpn.allow"
+    elif cmp -s "$RUN/vpn.allow" "$VPN_DIR/allow"; then _allow=0; rm -f "$RUN/vpn.allow"
+    else { cp "$RUN/vpn.allow" "$VPN_DIR/allow.t" && mv "$VPN_DIR/allow.t" "$VPN_DIR/allow"; } || fail error "could not write the devices"
+      rm -f "$RUN/vpn.allow"; _allow=1; fi
+    if [ "$_allow" = 1 ]; then
+      event vpn_allow "$(jq -nc --argjson a "$(vpn_allow_json)" '{allow: $a}')"
+      if [ -n "$(singbox_pid)" ]; then
+        exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+        _vh=$(hot_apply "devices of VPN rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_vh"; }
+        exec 9>&-
+      fi
+    fi
+  fi
+  reply "$(vpn_status)"
+}
+
+# vpn_proxy_up <port>: a sing-box of a server that answers now, as an HTTP
+# proxy on 127.0.0.1:<port> (the router's own traffic isn't routed by podkop,
+# and some providers cut the package servers off); its pid on stdout
+vpn_proxy_up() {
+  _fc=$(uci -q get podkop.settings.config_path); [ -n "$_fc" ] || _fc=/etc/sing-box/config.json
+  proxies > "$RUN/vpn-px.json" 2>/dev/null
+  jq -c --slurpfile p "$RUN/vpn-px.json" --argjson port "$1" '.outbounds as $all
+    | ([$all[] | select(.type == "urltest") | ($p[0].proxies[.tag].now // "") as $n
+        | select($n != "" and ((($p[0].proxies[$n].history // []) | last | (.delay // 0)) > 0)) | $n] | first) as $t
+    | [$t | recurse(. as $x | ($all[] | select(.tag == $x) | .detour) // empty)] as $chain
+    | {log: {disabled: true}, dns: {servers: [{type: "local", tag: "local"}]},
+       inbounds: [{type: "mixed", tag: "pkg-in", listen: "127.0.0.1", listen_port: $port}],
+       outbounds: [$all[] | select(.tag as $x | $chain | index($x)) | del(.domain_resolver)],
+       route: {final: $t, default_domain_resolver: "local"}}
+    | if (.outbounds | length) == 0 then error("no outbound") else . end' "$_fc" > "$RUN/vpn-px.cfg" 2>/dev/null ||
+    { rm -f "$RUN/vpn-px.json" "$RUN/vpn-px.cfg"; return 1; }
+  rm -f "$RUN/vpn-px.json"
+  sing-box run -c "$RUN/vpn-px.cfg" >/dev/null 2>&1 &
+  echo $!
+}
+
+# the packages, straight or through a server; kmod-tun needs no reboot
+run_vpn_install() {
+  _id=$1; _vl="$RUN/jobs/$_id.log"
+  job_set "$_id" '.state = "running"'
+  if command -v apk >/dev/null 2>&1; then _upd="apk update"; _add="apk add $VPN_PKGS"
+  else _upd="opkg update"; _add="opkg install $VPN_PKGS"; fi
+  # shellcheck disable=SC2086
+  if ! { $_upd && $_add; } > "$_vl" 2>&1; then
+    _port=$((20000 + $$ % 10000))
+    if _pp=$(vpn_proxy_up "$_port"); then
+      sleep 2
+      # shellcheck disable=SC2086
+      { http_proxy="http://127.0.0.1:$_port" https_proxy="http://127.0.0.1:$_port" sh -c "$_upd && $_add"; } >> "$_vl" 2>&1
+      kill "$_pp" 2>/dev/null; rm -f "$RUN/vpn-px.cfg"
+    fi
+  fi
+  if vpn_installed; then
+    vpn_init >/dev/null 2>&1
+    job_end "$_id" "done" "OpenVPN is installed"
+  else
+    _m=$(grep -iE 'error|unable|not found' "$_vl" | tail -n 1); [ -n "$_m" ] || _m=$(tail -n 1 "$_vl")
+    job_end "$_id" failed "${_m:-the packages could not be installed}"
+  fi
 }
 
 # --- commands ---------------------------------------------------------------------
@@ -1505,6 +1752,7 @@ case "$_cmd" in
   strict)        command -v cmd_strict >/dev/null || fail unsupported "reinstall agent for strict rules"; cmd_strict ;;
   resolve)       cmd_resolve ;;
   ipv6)          cmd_ipv6 "$@" ;;
+  vpn)           cmd_vpn "$@" ;;
   upgrade)       cmd_upgrade ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
@@ -1533,16 +1781,17 @@ case "$_cmd" in
     reply '{"uninstalling":true}' ;;
   version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" --argjson caps "$(capabilities)" \
                    '{version: $v, protocol: $p, capabilities: $caps}')" ;;
-  daemon|_run-apply|_run-probe|_run-upgrade)
+  daemon|_run-apply|_run-probe|_run-upgrade|_run-vpn-install)
     [ "$REMOTE" = 0 ] || fail forbidden "$_cmd can't be run over SSH"
     case "$_cmd" in
       daemon) daemon ;;
+      _run-vpn-install) run_vpn_install "$1" ;;
       _run-apply) run_apply "$1" ;;
       _run-probe) run_probe ;;
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict resolve ipv6 upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict resolve ipv6 vpn upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

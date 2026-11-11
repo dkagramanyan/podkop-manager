@@ -7,6 +7,7 @@ import asyncio
 import contextlib
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import re
@@ -507,6 +508,60 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         out = await rt.agent.call("strict", payload={"sections": sections}, timeout=60)
         await hub.refresh(rt)
         return out
+
+    @app.get("/api/routers/{rid}/vpn", dependencies=[api])
+    async def vpn_state(rid: int):
+        """The OpenVPN client on the router (agent 0.21): installed, on, up,
+        server, login (never the password), devices of VPN rules, log."""
+        return await router_or_404(rid).agent.call("vpn", "status", timeout=30)
+
+    @app.put("/api/routers/{rid}/vpn", dependencies=[api])
+    async def vpn_settings(rid: int, body: dict):
+        """Any of: config (.ovpn text), username + password (an empty password
+        keeps the saved one), enabled, allow {rule: [addresses]}. The password
+        goes to the router only; the manager keeps none of it."""
+        rt = router_or_404(rid)
+        out = {}
+        for k in ("config", "username", "password"):
+            if k in body:
+                if not isinstance(body[k], str) or len(body[k]) > (65536 if k == "config" else 256):
+                    raise HTTPException(400, f"{k} must be text")
+                if k != "config" and ("\n" in body[k] or "\r" in body[k]):
+                    raise HTTPException(400, f"{k} must be one line")
+                out[k] = body[k]
+        if "password" in out and "username" not in out:
+            raise HTTPException(400, "send the login with the password")
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise HTTPException(400, "enabled must be true or false")
+            out["enabled"] = body["enabled"]
+        if "allow" in body:
+            allow = body["allow"]
+            if not isinstance(allow, dict) or not all(isinstance(v, list) for v in allow.values()):
+                raise HTTPException(400, "allow must be {rule: [addresses]}")
+            out["allow"] = {}
+            for name, addrs in allow.items():
+                if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                    raise HTTPException(400, f"bad rule name {name!r}")
+                try:
+                    nets = [str(ipaddress.ip_network(str(a).strip(), strict=False)) for a in addrs if str(a).strip()]
+                except ValueError as e:
+                    raise HTTPException(400, f"{name}: {e}") from None
+                if nets:
+                    out["allow"][name] = sorted(set(nets))
+        if not out:
+            raise HTTPException(400, "nothing to change")
+        return await rt.agent.call("vpn", "set", payload=out, timeout=90)
+
+    @app.post("/api/routers/{rid}/vpn/install", dependencies=[api])
+    async def vpn_install(rid: int):
+        return await router_or_404(rid).agent.call("vpn", "install", timeout=30)
+
+    @app.get("/api/routers/{rid}/vpn/job/{job}", dependencies=[api])
+    async def vpn_job(rid: int, job: str):
+        if not re.fullmatch(r"[0-9]+-[0-9]+", job):
+            raise HTTPException(400, "bad job id")
+        return await router_or_404(rid).agent.call("job", job, timeout=30)
 
     @app.put("/api/routers/{rid}/ipv6", dependencies=[api])
     async def ipv6_block(rid: int, body: dict):

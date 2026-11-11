@@ -29,7 +29,7 @@ RELEASE="$REPO_URL/releases/latest/download"
 KEYS=/etc/dropbear/authorized_keys
 MARK=podkop-agent
 FWD_MARK=podkop-agent-forward
-KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/"
+KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn"
 
 set -u
 KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0
@@ -83,6 +83,8 @@ firewall_rules() {
 
 if [ "$UNINSTALL" = 1 ]; then
   /etc/init.d/podkop-agent stop 2>/dev/null; /etc/init.d/podkop-agent disable 2>/dev/null
+  # the OpenVPN client (VPN page); the openvpn package stays
+  [ -x /etc/init.d/podkop-vpn ] && { /etc/init.d/podkop-vpn stop 2>/dev/null; /etc/init.d/podkop-vpn disable 2>/dev/null; rm -f /etc/init.d/podkop-vpn; }
   rm -rf /usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent /tmp/podkop-agent /usr/share/podkop-agent
   [ -f "$KEYS" ] && sed -i "/ $MARK\$/d; / $FWD_MARK\$/d" "$KEYS"
   firewall_rules "" off

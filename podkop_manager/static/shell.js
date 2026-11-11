@@ -11,6 +11,7 @@ import { viewSettings } from "./settings.js";
 import { S } from "./state.js";
 import { ago, h, icon, plural, put, shortWhen, store } from "./ui.js";
 import { viewUsage } from "./usage.js";
+import { viewVpn } from "./vpn.js";
 
 // --- routers ------------------------------------------------------------------------
 
@@ -58,6 +59,7 @@ export const SECTIONS = {
   global: { title: "Global settings", view: (m, id) => viewGlobal(m, id) },
   configs: { title: "Configs", view: (m, id) => viewConfigs(m, id) },
   reliability: { title: "Connection health", view: (m, id) => viewReliability(m, id) },
+  vpn: { title: "VPN", view: (m, id) => viewVpn(m, id) },
   logs: { title: "Logs", view: (m, id) => viewLogs(m, id) },
   history: { title: "History", view: (m, id) => viewHistory(m, id) },
 };
@@ -151,6 +153,7 @@ export function drawSide() {
       h("a", { href: `#/r/${rt.id}/global`, class: "sub", "aria-current": cur("global") }, "Global settings"),
       h("a", { href: `#/r/${rt.id}/configs`, class: "sub", "aria-current": cur("configs") }, "Configs"),
       link("reliability", "Connection health", "probe"),
+      link("vpn", "VPN", "shield"),
       link("logs", "Logs", "logs"),
       link("history", "History", "history")) : null,
     h("div", { class: "nav nav-bottom" },
