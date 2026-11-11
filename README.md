@@ -299,9 +299,17 @@ VPN rules through it:
    (`/etc/podkop-agent/vpn/auth`, root-only); the manager keeps none of it.
 3. **Add a VPN rule** (connection type VPN, interface `pkvpn`), add its
    domains on the rule page and apply. Turn **VPN on**.
-4. **Devices**: addresses (one per line) that may use the rule. The others
-   go on as if the rule weren't there (to the next matching rule, or
-   direct). Empty: every device. Give those devices fixed DHCP leases.
+4. **Devices**: addresses (one per line) that may use the VPN rules. The
+   others go on as if the rules weren't there (to the next matching rule,
+   or direct). Empty: every device. Give those devices fixed DHCP leases.
+5. When the VPN offers its own DNS server, the page shows it: **Use it for
+   the VPN rules** makes the rules resolve their names through the tunnel
+   (needed for names that exist only inside that network).
+
+The agent watches the tunnel: "VPN is down" / "up again" alerts, a
+reconnect when the VPN's gateway stops answering, and no endless retries
+with a wrong password (OpenVPN stops after a few failed starts; after
+other fatal errors the agent starts it again every 5 minutes).
 
 The tunnel takes no routes from the server (`route-nopull`): only the sites
 of VPN rules use it. While it is off or not connected, those sites fail at

@@ -19,7 +19,7 @@ from podkop_manager.web import create_app
 playwright = pytest.importorskip("playwright.sync_api")
 ROOT = Path(__file__).resolve().parents[1]
 PAGES = ["#/settings", "#/r/1", "#/r/1/usage", "#/r/1/rules", "#/r/1/global", "#/r/1/configs",
-         "#/r/1/reliability", "#/r/1/logs", "#/r/1/history"]
+         "#/r/1/reliability", "#/r/1/vpn", "#/r/1/logs", "#/r/1/history"]
 
 
 class OfflineAgent:
@@ -183,6 +183,84 @@ def test_a_change_is_scheduled_from_the_apply_dialog(tmp_path):
             page.locator("text=Cancel").first.dispatch_event("click")
             page.wait_for_selector("text=cancelled")
             assert db.scheduled(1) == [] and errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)
+
+
+def test_vpn_page_shows_the_tunnel_sets_its_dns_and_saves_devices(tmp_path):
+    import copy
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+
+    calls = []
+
+    class VpnAgent(OnlineAgent):
+        config = copy.deepcopy(OnlineAgent.config)
+        config["sections"].append({"name": "vpn_1", "type": "section", "anonymous": False, "options": {
+            "connection_type": "vpn", "interface": "pkvpn", "user_domain_list_type": "dynamic", "user_domains": ["corp.example"]}})
+        state = {"installed": True, "configured": True, "enabled": True, "running": True, "up": True, "address": "10.9.0.2/24",
+                 "remote": "vpn.example:1194", "device": "pkvpn", "username": "me", "password_set": True, "allow": {"vpn_1": ["192.168.1.5/32"]},
+                 "log": ["Initialization Sequence Completed"], "dns": "10.9.0.1"}
+
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "vpn":
+                if args[0] == "set":
+                    calls.append(payload)
+                    self.state = dict(self.state, **{k: v for k, v in payload.items() if k in ("allow", "enabled")})
+                return self.state
+            return await super().call(name, *args, payload=payload, **kwargs)
+
+    class VpnHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = VpnAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    hub = VpnHub(db, tmp_path / "id_ed25519", ROOT)
+    app = create_app(db, hub, "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page(viewport={"width": 1280, "height": 1100})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/vpn")
+            page.wait_for_selector("text=Connected, 10.9.0.2/24")
+            # the list saved per rule by 1.48.0 is shown as the tunnel's
+            box = page.locator("textarea[aria-label='Devices allowed to use the VPN']")
+            assert box.input_value() == "192.168.1.5/32"
+            box.fill("192.168.1.5\n192.168.1.6")
+            page.click("text=Save devices")
+            page.wait_for_selector("text=Devices saved")
+            assert calls[-1] == {"allow": {"*": ["192.168.1.5/32", "192.168.1.6/32"]}}
+            page.click("text=Use it for the VPN rules")
+            page.wait_for_selector("text=The VPN rules resolve their names through it")
+            page.goto(f"{base}/#/r/1/rules/vpn_1")
+            page.wait_for_selector("text=Review and apply")           # the DNS went into the draft
+            assert not errors, errors
             browser.close()
     finally:
         srv.should_exit = True

@@ -29,6 +29,8 @@ TEXT = {
     "recovered": lambda d: f"watchdog: {d.get('action') or 'podkop restarted'}",
     "recovery_failed": lambda d: f"watchdog could not bring podkop back: {d.get('reason') or ''}",
     "recovery_gave_up": lambda d: "watchdog gave up after 3 tries in an hour",
+    "vpn_down": lambda d: "VPN is down" + (f": {d['last']}" if d.get("last") else "") + ("" if d.get("running") else " (OpenVPN is not running)"),
+    "vpn_up": lambda d: "VPN is up again",
     "clash_api_silent": lambda d: "sing-box runs but does not answer; podkop is restarted",
     "reverted": lambda d: f"a change was reverted: {d.get('reason') or d.get('message') or ''}",
     "revert_failed": lambda d: "a change failed and could not be reverted",

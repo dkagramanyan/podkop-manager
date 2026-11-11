@@ -649,7 +649,7 @@ _LEVEL_TAG = re.compile(r"^(?:\[(\w+)\]|(TRACE|DEBUG|INFO|WARN|ERROR|FATAL|PANIC
 LEVELS = {"trace": "debug", "debug": "debug", "info": "info", "notice": "info", "warn": "warn",
           "warning": "warn", "err": "error", "error": "error", "fatal": "error", "panic": "error",
           "crit": "error", "alert": "error", "emerg": "error"}
-LOG_SOURCES = ("podkop", "sing-box", "engine", "agent")
+LOG_SOURCES = ("podkop", "sing-box", "engine", "agent", "vpn")
 # failed reverse lookups (PTR in in-addr.arpa / ip6.arpa): devices ask them by themselves (Apple's
 # Bonjour asks lb._dns-sd._udp.<its network>) and some zones never answer; nothing breaks, so they
 # are "noise", which Logs hides unless asked
@@ -693,7 +693,7 @@ class RequestLogContext:
 
 
 def parse_log(line: str) -> dict:
-    """time (router's clock), source (podkop, sing-box, engine, agent), level
+    """time (router's clock), source (podkop, sing-box, engine, agent, vpn), level
     (debug, info, warn, error, or noise: see _NOISE) and the message of one syslog line."""
     m = _LOG.match(line)
     if not m:
@@ -714,6 +714,8 @@ def parse_log(line: str) -> dict:
         source = "engine"
     elif tag == "podkop-agent":
         source = "agent"
+    elif tag == "podkop-vpn":       # the OpenVPN client (VPN page)
+        source = "vpn"
     elif tag == "sing-box":
         source = "sing-box"
     elif low.startswith("podkop"):

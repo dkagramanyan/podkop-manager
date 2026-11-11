@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.21.0"
+AGENT_VERSION="0.21.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -861,6 +861,7 @@ daemon() {
       flock -n "$RUN/apply.lock" true && guard_sync
     fi
     [ "$_w" -lt 15 ] && continue     # woken by a service event: the guard only
+    vpn_watch
     [ -n "$(singbox_pid)" ] && traffic_poll
     if [ -f "$ETC/paused" ] || ! podkop_enabled; then _down=0; continue; fi
     # a change or a recovery holds the lock; podkop's own start takes a while
@@ -978,8 +979,9 @@ cmd_ipv6() {
 # podkop-vpn, runs it while $VPN_DIR/enabled is there. Routes from the server
 # are ignored (route-nopull), so only the rules' sites use the tunnel; while
 # it is down they fail (sing-box can't bind to a missing device), they never
-# go out direct. $VPN_DIR/allow: {rule: [addresses]}: only those LAN devices
-# use the rule (the others go on as if it weren't there).
+# go out direct. $VPN_DIR/allow: {"*": [addresses]}: only those LAN devices
+# use the rules of the tunnel (the others go on as if they weren't there);
+# a rule's own name instead of "*" limits that rule only.
 VPN_DIR=$ETC/vpn
 VPN_DEV=pkvpn
 VPN_INIT=/etc/init.d/podkop-vpn
@@ -1003,7 +1005,10 @@ start_service() {
   [ -f "$D/enabled" ] && [ -s "$D/client.conf" ] && [ -x /usr/sbin/openvpn ] || return 0
   procd_open_instance
   procd_set_param command /usr/sbin/openvpn --cd "$D" --config client.conf
-  procd_set_param respawn 3600 10 0
+  # openvpn waits out network trouble by itself and exits only on a fatal
+  # error (wrong password, bad config): a few tries, not for ever (account
+  # lockout); the agent's daemon starts it again later unless the login failed
+  procd_set_param respawn 300 10 3
   procd_close_instance
 }
 EOF
@@ -1034,10 +1039,14 @@ vpn_build() {
     echo "dev $VPN_DEV"
     echo "dev-type tun"
     echo "route-nopull"
+    # dropped before route-nopull refuses them one by one as "Options error"
     echo 'pull-filter ignore "redirect-gateway"'
+    echo 'pull-filter ignore "route"'
+    echo 'pull-filter ignore "dhcp-option"'
+    echo 'pull-filter ignore "block-outside-dns"'
     echo "script-security 1"
     echo "syslog podkop-vpn"
-    [ -s "$VPN_DIR/auth" ] && echo "auth-user-pass $VPN_DIR/auth"
+    if [ -s "$VPN_DIR/auth" ]; then echo "auth-user-pass $VPN_DIR/auth"; fi
   } > "$VPN_DIR/client.conf.t" || return 1
   if cmp -s "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"; then rm -f "$VPN_DIR/client.conf.t"; return 1; fi
   mv "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"
@@ -1061,28 +1070,88 @@ vpn_allow_json() { if [ -s "$VPN_DIR/allow" ]; then cat "$VPN_DIR/allow"; else e
 # their devices (podkop's own rules for "fully routed IPs" stay as they are)
 vpn_filter() {
   if [ ! -s "$VPN_DIR/allow" ]; then cp "$1" "$2"; return; fi
-  jq --argjson a "$(vpn_allow_json)" '
-    if (.route.rules | type) == "array" then .route.rules |= map(
-      ((.outbound // "") | if endswith("-out") then .[:-4] else "" end) as $s
-      | if $s != "" and .source_ip_cidr == null and (($a[$s] // []) | length) > 0
-        then . + {source_ip_cidr: $a[$s]} else . end) else . end' "$1" > "$2"
+  jq --argjson a "$(vpn_allow_json)" --arg dev "$VPN_DEV" '
+    [.outbounds[]? | select(.bind_interface == $dev) | .tag] as $vpn
+    | if (.route.rules | type) == "array" then .route.rules |= map(
+      (.outbound // "") as $o
+      | ($o | if endswith("-out") then .[:-4] else "" end) as $s
+      | (($a[$s] // []) + (if $vpn | index($o) then ($a["*"] // []) else [] end) | unique) as $ips
+      | if $s != "" and .source_ip_cidr == null and ($ips | length) > 0
+        then . + {source_ip_cidr: $ips} else . end) else . end' "$1" > "$2"
+}
+
+vpn_pid() { ubus call service list '{"name":"podkop-vpn"}' 2>/dev/null | jq -r '.["podkop-vpn"].instances[]?.pid // empty' | head -n 1; }
+
+# vpn_pushed <pid>: what the server offered this openvpn, from its log, kept
+# in $RUN/vpn.push (lines: pid, gateway, DNS); we take neither by ourselves
+vpn_pushed() {
+  [ -n "$1" ] || { rm -f "$RUN/vpn.push"; return; }
+  if [ "$(sed -n 1p "$RUN/vpn.push" 2>/dev/null)" = "$1" ] && [ -n "$(sed -n 2p "$RUN/vpn.push")" ]; then return; fi
+  logread -e podkop-vpn 2>/dev/null | grep -F "podkop-vpn[$1]" > "$RUN/vpn.push.log"
+  { echo "$1"
+    grep -o 'route-gateway [0-9.]*' "$RUN/vpn.push.log" | tail -n 1 | cut -d ' ' -f 2 | grep . || echo
+    grep -o 'dhcp-option DNS [0-9.]*' "$RUN/vpn.push.log" | tail -n 1 | cut -d ' ' -f 3 | grep . || echo
+  } > "$RUN/vpn.push"
+  rm -f "$RUN/vpn.push.log"
+}
+
+# vpn_watch, every daemon round (15 s): events when the tunnel goes down (a
+# minute without an address) and comes back; a tunnel whose gateway answered
+# and then is silent for 3 rounds is restarted at once (the server's own
+# timeout is often 2 minutes of hanging sites)
+_vdown=0; _valert=0; _vseen=""; _vstrike=0
+vpn_watch() {
+  if [ ! -f "$VPN_DIR/enabled" ]; then _vdown=0; _valert=0; _vseen=""; _vstrike=0; return 0; fi
+  _wp=$(vpn_pid)
+  _wa=$(ip -4 -o addr show dev "$VPN_DEV" 2>/dev/null | awk '{ print $4; exit }')
+  if [ -z "$_wa" ]; then
+    _vdown=$((_vdown + 1)); _vseen=""; _vstrike=0
+    if [ "$_vdown" = 4 ] && [ "$_valert" = 0 ]; then
+      _valert=1
+      event vpn_down "$(jq -nc --arg p "$_wp" --arg l "$(logread -e podkop-vpn 2>/dev/null | tail -n 1 | sed 's/^.*podkop-vpn[^:]*: //')" \
+        '{running: ($p != ""), last: $l}')"
+    fi
+    # procd gave up (a fatal error at start): again every 5 minutes, but never
+    # after a refused login
+    if [ -z "$_wp" ] && [ $((_vdown % 20)) = 0 ] && [ -x "$VPN_INIT" ] &&
+       ! logread -e podkop-vpn 2>/dev/null | tail -n 20 | grep -q AUTH_FAILED; then
+      logger -t podkop-agent "VPN: OpenVPN is not running, starting it again"
+      "$VPN_INIT" restart >/dev/null 2>&1 7>&- 8>&- 9>&-
+    fi
+    return 0
+  fi
+  [ "$_valert" = 1 ] && event vpn_up "$(jq -nc --arg a "$_wa" '{address: $a}')"
+  _vdown=0; _valert=0
+  vpn_pushed "$_wp"; _wg=$(sed -n 2p "$RUN/vpn.push" 2>/dev/null)
+  [ -n "$_wg" ] || return 0
+  if ping -c 1 -W 2 -I "$VPN_DEV" "$_wg" >/dev/null 2>&1; then _vseen=$_wp; _vstrike=0
+  elif [ -n "$_wp" ] && [ "$_vseen" = "$_wp" ]; then
+    _vstrike=$((_vstrike + 1))
+    if [ "$_vstrike" -ge 3 ]; then
+      _vstrike=0; _vseen=""
+      logger -t podkop-agent "VPN: gateway $_wg silent for 3 rounds, reconnecting"
+      kill -USR1 "$_wp" 2>/dev/null && event vpn_restart "$(jq -nc --arg g "$_wg" '{gateway: $g}')"
+    fi
+  fi
+  return 0
 }
 
 vpn_status() {
   _vu=""; _vr=""
   [ -s "$VPN_DIR/auth" ] && _vu=$(head -n 1 "$VPN_DIR/auth")
   [ -s "$VPN_DIR/source.conf" ] && _vr=$(awk '$1 == "remote" { print $2 ($3 != "" ? ":" $3 : "") ($4 != "" ? " " $4 : ""); exit }' "$VPN_DIR/source.conf")
-  _vp=$(ubus call service list '{"name":"podkop-vpn"}' 2>/dev/null | jq -r '.["podkop-vpn"].instances[]?.pid // empty' | head -n 1)
+  _vp=$(vpn_pid); vpn_pushed "$_vp"
   _va=$(ip -4 -o addr show dev "$VPN_DEV" 2>/dev/null | awk '{ print $4; exit }')
   _vl=$(logread -e podkop-vpn 2>/dev/null | tail -n 30 | jq -Rsc 'split("\n") | map(select(. != ""))')
   _vi=false; vpn_installed && _vi=true
   jq -nc --argjson inst "$_vi" --arg u "$_vu" --arg r "$_vr" --arg p "$_vp" --arg a "$_va" --arg dev "$VPN_DEV" \
     --argjson allow "$(vpn_allow_json)" --argjson log "${_vl:-[]}" \
     --arg conf "$([ -s "$VPN_DIR/source.conf" ] && echo 1)" --arg en "$([ -f "$VPN_DIR/enabled" ] && echo 1)" \
-    --arg pw "$(sed -n 2p "$VPN_DIR/auth" 2>/dev/null | grep -c .)" \
+    --arg pw "$(sed -n 2p "$VPN_DIR/auth" 2>/dev/null | grep -c .)" --arg dns "$(sed -n 3p "$RUN/vpn.push" 2>/dev/null)" \
     '{installed: $inst, configured: ($conf == "1"), enabled: ($en == "1"), running: ($p != ""), up: ($a != ""),
       address: (if $a == "" then null else $a end), remote: (if $r == "" then null else $r end), device: $dev,
-      username: $u, password_set: ($pw == "1"), allow: $allow, log: $log}'
+      username: $u, password_set: ($pw == "1"), allow: $allow, log: $log,
+      dns: (if $dns == "" then null else $dns end)}'
 }
 
 # vpn status | vpn set (stdin {config?, username?, password?, enabled?, allow?}) | vpn install (job)
@@ -1102,7 +1171,7 @@ cmd_vpn() {
     and ((.password // "") | type == "string" and length <= 256 and (contains("\n") | not))
     and ((.enabled // false) | type == "boolean")
     and ((.allow // {}) | type == "object" and length <= 100 and all(to_entries[];
-      (.key | length > 0 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
+      (.key | . == "*" or length > 0 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
       and (.value | type == "array" and length <= 256 and all(.[]; type == "string" and length > 0 and length <= 43
         and (explode | all(. == 46 or . == 47 or . == 58 or (. >= 48 and . <= 57) or (. >= 65 and . <= 70) or (. >= 97 and . <= 102)))))))' \
     >/dev/null 2>&1 || fail bad_request 'expected {"config", "username", "password", "enabled", "allow": {"rule": ["addresses"]}}'
@@ -1121,14 +1190,14 @@ cmd_vpn() {
   fi
   if printf '%s' "$_vq" | jq -e 'has("username")' >/dev/null; then
     _vu=$(printf '%s' "$_vq" | jq -r '.username')
-    if [ -z "$_vu" ]; then rm -f "$VPN_DIR/auth"
+    if [ -z "$_vu" ]; then [ ! -f "$VPN_DIR/auth" ] || { rm -f "$VPN_DIR/auth"; _restart=1; }
     else
       # no password sent: the saved one stays
       _vw=$(printf '%s' "$_vq" | jq -r '.password // empty')
       [ -n "$_vw" ] || _vw=$(sed -n 2p "$VPN_DIR/auth" 2>/dev/null)
       [ -n "$_vw" ] || fail bad_request "a password is needed with the login"
       printf '%s\n%s\n' "$_vu" "$_vw" > "$RUN/vpn.auth"
-      cmp -s "$RUN/vpn.auth" "$VPN_DIR/auth" || { cp "$RUN/vpn.auth" "$VPN_DIR/auth.t" && mv "$VPN_DIR/auth.t" "$VPN_DIR/auth"; } ||
+      cmp -s "$RUN/vpn.auth" "$VPN_DIR/auth" || { cp "$RUN/vpn.auth" "$VPN_DIR/auth.t" && mv "$VPN_DIR/auth.t" "$VPN_DIR/auth" && _restart=1; } ||
         { rm -f "$RUN/vpn.auth"; fail error "could not write the login"; }
       rm -f "$RUN/vpn.auth"
     fi

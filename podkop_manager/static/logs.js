@@ -6,7 +6,7 @@ import { api, h, hhmm, icon, put, toast } from "./ui.js";
 
 // --- logs ------------------------------------------------------------------------------------------
 
-export const LOG_SOURCES = [["podkop", "podkop"], ["sing-box", "sing-box"], ["engine", "engine"], ["agent", "agent"]];
+export const LOG_SOURCES = [["podkop", "podkop"], ["sing-box", "sing-box"], ["engine", "engine"], ["agent", "agent"], ["vpn", "vpn"]];
 export const LOG_LEVELS = { all: ["debug", "info", "warn", "error"], warn: ["warn", "error"], error: ["error"] };
 
 export async function viewLogs(main, id) {
