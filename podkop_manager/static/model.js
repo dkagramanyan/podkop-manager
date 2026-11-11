@@ -159,6 +159,11 @@ export const EVENT_TEXT = {
   router_offline: (d) => `The manager cannot reach the router: ${d.message || ""}`,
   router_online: () => "The router answers again",
   clash_api_silent: (d) => `sing-box runs but has not answered for ${d.seconds} s; podkop is restarted`,
+  vpn: (d) => (d.enabled ? "VPN turned on" : "VPN turned off"),
+  vpn_allow: (d) => { const n = Object.values(d.allow || {}).flat().length; return n ? `VPN limited to ${n} device address${n === 1 ? "" : "es"}` : "VPN open to every device"; },
+  vpn_down: (d) => `VPN is down${d.last ? `: ${d.last}` : ""}${d.running ? "" : " (OpenVPN is not running)"}`,
+  vpn_up: (d) => `VPN is up again${d.address ? `, ${d.address}` : ""}`,
+  vpn_restart: (d) => `VPN: gateway ${d.gateway} stopped answering, reconnecting`,
   strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
   strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
   strict_open: (d) => `${d.section}: kill switch open again`,
@@ -195,7 +200,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",

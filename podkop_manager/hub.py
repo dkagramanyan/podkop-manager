@@ -29,7 +29,7 @@ FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "fa
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
-                "probe_failed", "probe_not_started", "clash_api_silent")
+                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30
 TRAFFIC_SECONDS = 60     # the router's traffic per server
@@ -374,6 +374,8 @@ class Hub:
         if typ == "group_down":
             self._background(rt, self.heal(rt, data))
         elif typ == "group_recovered" and (rt.alert or {}).get("type") == "group_down":
+            rt.alert = None
+        elif typ == "vpn_up" and (rt.alert or {}).get("type") == "vpn_down":
             rt.alert = None
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])

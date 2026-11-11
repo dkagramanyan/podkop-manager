@@ -518,7 +518,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.put("/api/routers/{rid}/vpn", dependencies=[api])
     async def vpn_settings(rid: int, body: dict):
         """Any of: config (.ovpn text), username + password (an empty password
-        keeps the saved one), enabled, allow {rule: [addresses]}. The password
+        keeps the saved one), enabled, allow {"*" or rule: [addresses]}. The password
         goes to the router only; the manager keeps none of it."""
         rt = router_or_404(rid)
         out = {}
@@ -541,7 +541,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 raise HTTPException(400, "allow must be {rule: [addresses]}")
             out["allow"] = {}
             for name, addrs in allow.items():
-                if not re.fullmatch(r"[A-Za-z0-9_]+", name):
+                if name != "*" and not re.fullmatch(r"[A-Za-z0-9_]+", name):       # "*": every rule of the tunnel
                     raise HTTPException(400, f"bad rule name {name!r}")
                 try:
                     nets = [str(ipaddress.ip_network(str(a).strip(), strict=False)) for a in addrs if str(a).strip()]

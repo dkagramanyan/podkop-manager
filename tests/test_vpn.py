@@ -153,6 +153,9 @@ def test_api_checks_and_forwards(tmp_path, monkeypatch):
         assert r.status_code == 200
         assert agent.calls[-1] == (("vpn", "set"), {"username": "me", "password": "pw", "enabled": True,
                                                      "allow": {"vpn_1": ["192.168.1.20/32"]}})
+        assert put({"allow": {"*": ["192.168.1.7"]}}).status_code == 200
+        assert agent.calls[-1] == (("vpn", "set"), {"allow": {"*": ["192.168.1.7/32"]}})
+        assert put({"allow": {"a-b": ["192.168.1.7"]}}).status_code == 400
         assert c.get("/api/routers/1/vpn/job/1;reboot").status_code == 400
         assert c.get("/api/routers/1/vpn/job/20261111-42").status_code == 200
         assert agent.calls[-1] == (("job", "20261111-42"), None)
@@ -171,3 +174,86 @@ def test_openvpn_lines_have_their_own_log_source():
     from podkop_manager import podkop
     p = podkop.parse_log("Wed Nov 11 18:03:37 2026 daemon.notice podkop-vpn[22932]: Initialization Sequence Completed")
     assert p["source"] == "vpn" and p["level"] == "info" and p["msg"] == "Initialization Sequence Completed"
+
+
+def test_star_limits_every_rule_of_the_tunnel_whatever_its_name(tmp_path):
+    cfg = {"outbounds": [{"type": "direct", "tag": "renamed-out", "bind_interface": "pkvpn"},
+                         {"type": "direct", "tag": "wg-out", "bind_interface": "wg0"}],
+           "route": {"rules": [{"action": "route", "outbound": "renamed-out", "rule_set": ["a"]},
+                               {"action": "route", "outbound": "wg-out", "rule_set": ["b"]}]}}
+    (tmp_path / "in.json").write_text(json.dumps(cfg))
+    p = _sh(tmp_path, '\nmkdir -p "$VPN_DIR"; echo \'{"*":["192.168.1.20/32"],"wg":["10.0.0.1/32"]}\' > "$VPN_DIR/allow"'
+                      '\nvpn_filter "$RUN/in.json" "$RUN/out.json"')
+    assert p.returncode == 0, p.stderr
+    rules = json.loads((tmp_path / "out.json").read_text())["route"]["rules"]
+    assert rules[0]["source_ip_cidr"] == ["192.168.1.20/32"] and rules[1]["source_ip_cidr"] == ["10.0.0.1/32"]
+    p = _sh(tmp_path, "\ncmd_vpn set", json.dumps({"allow": {"*": ["192.168.1.9"]}}))
+    assert p.returncode == 0, p.stderr
+    assert json.loads((tmp_path / "etc/vpn/allow").read_text()) == {"*": ["192.168.1.9"]}
+
+
+RESTARTS = '\nvpn_installed() { :; }\nvpn_init() { echo restart >> "$RUN/calls"; }\nVPN_INIT=true\n'
+
+
+def test_a_new_password_alone_restarts_the_tunnel(tmp_path):
+    first = {"config": "remote a 1\n", "username": "me", "password": "one"}
+    assert _sh(tmp_path, RESTARTS + "cmd_vpn set", json.dumps(first)).returncode == 0
+    calls = tmp_path / "calls"
+    assert calls.read_text() == "restart\n"
+    assert _sh(tmp_path, RESTARTS + "cmd_vpn set", json.dumps(first)).returncode == 0       # nothing new: no restart
+    assert calls.read_text() == "restart\n"
+    assert _sh(tmp_path, RESTARTS + "cmd_vpn set", json.dumps({"username": "me", "password": "two"})).returncode == 0
+    assert calls.read_text() == "restart\nrestart\n"
+    assert (tmp_path / "etc/vpn/auth").read_text() == "me\ntwo\n"
+
+
+def test_service_gives_up_after_a_few_fatal_starts():
+    assert "procd_set_param respawn 300 10 3" in _vpn_code()
+
+
+def test_stopped_openvpn_is_started_again_later_but_not_after_a_refused_login(tmp_path):
+    base = WATCH + 'vpn_pid() { :; }\nprintf "#!/bin/sh\\necho start >> %s/starts\\n" "$RUN" > "$RUN/init"; chmod +x "$RUN/init"; VPN_INIT="$RUN/init"\n'
+    p = _sh(tmp_path, base + "rounds 45")
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "starts").read_text() == "start\nstart\n"        # rounds 20 and 40
+    (tmp_path / "starts").unlink()
+    p = _sh(tmp_path, base + 'logread() { echo "podkop-vpn[1]: AUTH: Received control message: AUTH_FAILED"; }\nrounds 45')
+    assert not (tmp_path / "starts").exists()
+
+
+WATCH = '''
+mkdir -p "$VPN_DIR"; touch "$VPN_DIR/enabled"
+vpn_pid() { echo 77; }
+vpn_pushed() { printf '77\\n10.9.0.1\\n\\n' > "$RUN/vpn.push"; }
+ip() { cat "$RUN/addr" 2>/dev/null; }
+ping() { [ -f "$RUN/gw-ok" ]; }
+kill() { echo "kill $*" >> "$RUN/events"; }
+logger() { :; }
+rounds() { _n=$1; while [ "$_n" -gt 0 ]; do vpn_watch; _n=$((_n - 1)); done; }
+'''
+
+
+def test_watch_reports_down_and_up_once_and_restarts_a_silent_tunnel(tmp_path):
+    ev = tmp_path / "events"
+    addr = "9: pkvpn    inet 10.9.0.2/24 scope global pkvpn"
+    # a minute without an address: one vpn_down; the address back: one vpn_up
+    p = _sh(tmp_path, WATCH + 'rounds 6; echo "' + addr + '" > "$RUN/addr"; touch "$RUN/gw-ok"; rounds 3')
+    assert p.returncode == 0, p.stderr
+    assert ev.read_text().split() == ["vpn_down", "vpn_up"]
+    # the gateway never answered (no ICMP there): never restarted
+    ev.unlink()
+    p = _sh(tmp_path, WATCH + 'rm -f "$RUN/gw-ok"; rounds 8')
+    assert not ev.exists()
+    # it answered and then went silent for 3 rounds: reconnect, once
+    p = _sh(tmp_path, WATCH + 'touch "$RUN/gw-ok"; rounds 2; rm "$RUN/gw-ok"; rounds 5')
+    assert ev.read_text().splitlines() == ["kill -USR1 77", "vpn_restart"]
+    # VPN off: nothing at all
+    ev.unlink()
+    p = _sh(tmp_path, WATCH + 'rm "$VPN_DIR/enabled" "$RUN/addr"; rounds 8')
+    assert not ev.exists()
+
+
+def test_alerts_have_texts():
+    from podkop_manager import notify
+    assert "wrong password" in notify.text("home", "vpn_down", {"running": False, "last": "wrong password"})
+    assert notify.text("home", "vpn_up", {}) and notify.text("home", "vpn_restart", {}) is None

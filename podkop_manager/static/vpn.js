@@ -53,7 +53,7 @@ export async function viewVpn(main, id) {
     : !st.configured ? h("span", { class: "pill warn" }, "No config")
       : !st.enabled ? h("span", { class: "pill" }, "Off")
         : st.up ? h("span", { class: "pill ok" }, `Connected, ${st.address}`)
-          : h("span", { class: "pill bad" }, st.running ? "Connecting…" : "Not running");
+          : h("span", { class: "pill bad" }, st.running ? "Connecting…" : "Stopped after errors");
 
   const vpnRules = () => rulesOf(w.config).filter((s) => (s.options || {}).connection_type === "vpn" && (s.options || {}).interface === VPN_DEV);
 
@@ -66,20 +66,37 @@ export async function viewVpn(main, id) {
     location.hash = `#/r/${id}/rules/vpn_${k}`;
   };
 
-  const devicesEditor = (rule) => {
-    const cur = (st.allow || {})[rule.name] || [];
+  // one list for the tunnel ("*"): it follows the rules through renames; lists
+  // saved per rule by 1.48.0 are shown here and become the tunnel's on Save
+  const devicesEditor = () => {
+    const cur = [...new Set(Object.values(st.allow || {}).flat())];
     const ta = h("textarea", { class: "input mono", rows: 3, spellcheck: "false", placeholder: "192.168.1.20\n192.168.1.32/30",
-      "aria-label": `Devices allowed to use ${rule.name}` }, cur.join("\n"));
+      "aria-label": "Devices allowed to use the VPN" }, cur.join("\n"));
     return h("div", { class: "field" },
-      h("span", { class: "label" }, h("b", { class: "mono" }, rule.name)),
+      h("span", { class: "label" }, "Devices allowed to use the VPN"),
       ta,
       h("div", { class: "row" },
         h("button", { type: "button", class: "btn", onclick: busyClick(async () => {
-          const allow = { ...(st.allow || {}), [rule.name]: ta.value.split(/[\s,]+/).filter(Boolean) };
-          await save({ allow }, `Devices of ${rule.name} saved`);
+          await save({ allow: { "*": ta.value.split(/[\s,]+/).filter(Boolean) } }, "Devices saved");
         }) }, "Save devices"),
-        h("span", { class: "xs muted" }, cur.length ? `Only these devices use ${rule.name}; the others go on as if it weren't there`
-          : "Empty: every device uses this rule")));
+        h("span", { class: "xs muted" }, cur.length ? "Only these addresses use the VPN rules; other devices go on as if the rules weren't there. Give them fixed DHCP leases."
+          : "Empty: every device uses the VPN rules")));
+  };
+
+  // the DNS server the VPN offers, as the resolver of every VPN rule (in the draft)
+  const useDns = () => {
+    for (const r of vpnRules()) Object.assign(r.options, { domain_resolver_enabled: "1", domain_resolver_dns_type: "udp", domain_resolver_dns_server: st.dns });
+    touch(w);
+    toast("Set in the draft: review and apply on the Rules page");
+    draw();
+  };
+  const dnsHint = (rules) => {
+    if (!st.dns || !rules.length) return null;
+    const done = rules.every((r) => r.options.domain_resolver_enabled === "1" && r.options.domain_resolver_dns_server === st.dns);
+    return h("div", { class: "row" },
+      h("span", { class: "small" }, `The VPN offers its own DNS server, ${st.dns}. `, done ? "The VPN rules resolve their names through it."
+        : "Names that exist only inside that network open only when the rules resolve through it."),
+      done ? null : h("button", { type: "button", class: "btn", onclick: useDns }, "Use it for the VPN rules"));
   };
 
   const draw = () => {
@@ -98,6 +115,8 @@ export async function viewVpn(main, id) {
         card("Tunnel", null,
           h("div", { class: "stack", style: "gap: 12px" },
             h("div", { class: "row" }, statePill(), st.remote ? h("span", { class: "small muted mono" }, st.remote) : null),
+            st.installed && st.configured && st.enabled && !st.up && !st.running ? h("p", { class: "small bad-text" },
+              "OpenVPN stopped after repeated failed starts (see the log below). After a refused login it stays stopped until you save a new login or turn the VPN off and on; after other errors the router tries again every 5 minutes.") : null,
             !st.installed ? h("div", { class: "stack", style: "gap: 8px" },
               h("p", { class: "small muted" }, "The router needs the openvpn-openssl and kmod-tun packages (about 1 MB of flash). If the package server is cut off, they come through a working server."),
               h("div", {}, h("button", { type: "button", class: "btn primary", onclick: install }, "Install OpenVPN"))) : null,
@@ -125,8 +144,9 @@ export async function viewVpn(main, id) {
             if (await save(body, "VPN config saved")) Object.assign(form, { file: null, fileName: "", username: null, password: "" });
           }) }, "Save")))),
       card("Rules and devices", "Rules with connection type VPN and interface pkvpn",
-        rules.length ? h("div", { class: "stack", style: "gap: 14px" }, rules.map(devicesEditor))
-          : h("p", { class: "small muted" }, "No rule uses the VPN yet."),
+        rules.length ? h("p", { class: "small" }, rules.map((r) => r.name).join(", ")) : h("p", { class: "small muted" }, "No rule uses the VPN yet."),
+        dnsHint(rules),
+        devicesEditor(),
         h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: addRule }, "Add a VPN rule"),
           h("span", { class: "xs muted" }, "Then add its domains on the rule page and apply"))),
       card("Log", "OpenVPN's last lines on the router",

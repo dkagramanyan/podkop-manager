@@ -13,6 +13,23 @@ VPN fixes (manager 0.35.1, agent 0.21.1).
   dozens of "Options error: option 'route' cannot be used" lines at every
   connect (they were harmless; the routing table is the same).
 - Logs: OpenVPN's lines have their own source, **vpn**, not "podkop".
+- A new password alone did not restart the tunnel: it went on with the old
+  one.
+- A wrong password was tried again every 10 s for ever (an account lockout
+  on a company VPN): OpenVPN now stops after a few failed starts and the
+  VPN page says so. After other fatal errors the agent starts it again
+  every 5 minutes.
+- **Devices** are one list for the tunnel, not per rule: renaming a rule
+  dropped its limit. Lists saved per rule still work and become the
+  tunnel's at the next Save.
+- **Alerts**: "VPN is down" after a minute without the tunnel and "VPN is up
+  again" (events, the router's line, Telegram/webhook).
+- A tunnel whose gateway answered and then is silent for 45 s reconnects at
+  once, not after the server's own timeout (often 2 minutes of hanging
+  sites).
+- The VPN page shows the DNS server the VPN offers and sets it as the
+  resolver of the VPN rules in one click (names that exist only inside that
+  network).
 
 ## 1.48.0 — 2026-11-11
 
