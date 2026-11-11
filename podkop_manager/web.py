@@ -553,6 +553,21 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, "nothing to change")
         return await rt.agent.call("vpn", "set", payload=out, timeout=90)
 
+    @app.post("/api/routers/{rid}/vpn/test", dependencies=[api])
+    async def vpn_test(rid: int, body: dict):
+        """Does https://<host> open through the tunnel, its name resolved by
+        that DNS server (through the tunnel) or, without one, as a rule
+        without its own DNS server resolves it? Changes nothing (agent 0.22)."""
+        host, dns = str(body.get("host") or "").strip().lower(), str(body.get("dns") or "").strip()
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?", host):
+            raise HTTPException(400, "a host name like git.example.com is expected")
+        if dns:
+            try:
+                dns = str(ipaddress.IPv4Address(dns))
+            except ValueError:
+                raise HTTPException(400, "dns must be an IPv4 address") from None
+        return await router_or_404(rid).agent.call("vpn", "test", payload={"host": host, "dns": dns}, timeout=30)
+
     @app.post("/api/routers/{rid}/vpn/install", dependencies=[api])
     async def vpn_install(rid: int):
         return await router_or_404(rid).agent.call("vpn", "install", timeout=30)

@@ -3,6 +3,22 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.48.2 — 2026-11-11
+
+VPN rules without a podkop restart, checked before apply (manager 0.36.0,
+agent 0.22.0).
+
+- **No podkop restart** for a rule that matches by its own domains only:
+  adding it, removing it, its VPN interface and its DNS server now reload
+  sing-box in place (before, every such change stopped everything for
+  20-60 s).
+- **Checked before apply**: the VPN page tries each VPN rule's first domain
+  through the tunnel on the router, with the settings of your draft: "opens
+  through the VPN", or why not (the name is not found, no answer). When the
+  VPN's own DNS server would fix it, the page says so.
+- A new VPN rule takes the VPN's DNS server at once when the VPN offers
+  one.
+
 ## 1.48.1 — 2026-11-11
 
 VPN fixes (manager 0.35.1, agent 0.21.1).

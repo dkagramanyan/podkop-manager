@@ -306,6 +306,11 @@ VPN rules through it:
    the VPN rules** makes the rules resolve their names through the tunnel
    (needed for names that exist only inside that network).
 
+The page tries each VPN rule's first domain through the tunnel with the
+settings of your draft, so you see whether a rule works before you apply
+it. Rules that match by their own domains only are added, changed and
+removed without a podkop restart.
+
 The agent watches the tunnel: "VPN is down" / "up again" alerts, a
 reconnect when the VPN's gateway stops answering, and no endless retries
 with a wrong password (OpenVPN stops after a few failed starts; after
