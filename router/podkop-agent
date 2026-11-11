@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.21.1"
+AGENT_VERSION="0.22.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -349,22 +349,34 @@ restart_podkop() {
 # the options that only say which servers a rule uses
 SERVER_OPTS='["urltest_proxy_links","urltest_fallback_links","selector_proxy_links","proxy_string"]'
 # ... and the ones that change nothing but sing-box's config either: a rule's
-# own domains (its local rule-set file, in RAM) and its URLTest settings.
-# Subnets, community and local or remote list files feed podkop's nft sets,
-# so they still need podkop's start.
+# own domains (its local rule-set file, in RAM), its URLTest settings, a VPN
+# rule's interface and DNS server. Subnets, community and local or remote
+# list files feed podkop's nft sets, so they still need podkop's start. A
+# rule added or removed is taken the same way when it matches by its own
+# domains only (no lists, subnets, devices or local proxy port).
 SINGBOX_OPTS='["urltest_proxy_links","urltest_fallback_links","selector_proxy_links","proxy_string",
   "user_domain_list_type","user_domains","user_domains_text",
-  "urltest_testing_url","urltest_check_interval","urltest_tolerance","outbound_json"]'
+  "urltest_testing_url","urltest_check_interval","urltest_tolerance","outbound_json",
+  "interface","domain_resolver_enabled","domain_resolver_dns_type","domain_resolver_dns_server"]'
 
-# options_only <options json> <old config> <new config> (JSON files): they differ only in those
+# options_only <options json> <old config> <new config> [light] (JSON files):
+# they differ only in those; with "light", also in domain-only rules that
+# are in one of them only
 options_only() {
-  jq -n --slurpfile a "$2" --slurpfile b "$3" --argjson o "$1" '
-    def strip: ((.sections[] | select(.name == "settings") | .options) |= del(.shutdown_correctly))
+  jq -n --slurpfile a "$2" --slurpfile b "$3" --argjson o "$1" --arg light "${4:-}" '
+    def n: if type == "array" then length elif . == null or . == "" then 0 else 1 end;
+    def light: .type == "section" and ((.options.connection_type // "") | IN("proxy", "vpn"))
+      and ((.options.user_subnet_list_type // "disabled") == "disabled") and ((.options.mixed_proxy_enabled // "0") != "1")
+      and ([.options | .community_lists, .local_domain_lists, .local_subnet_lists, .remote_domain_lists,
+            .remote_subnet_lists, .fully_routed_ips | n] | add) == 0;
+    def strip($other): ((.sections[] | select(.name == "settings") | .options) |= del(.shutdown_correctly))
+      | [$other.sections[].name] as $names
+      | .sections |= map(select($light == "" or (light | not) or (.name as $x | $names | index($x))))
       | .sections |= map(.options |= with_entries(select(.key | IN($o[]) | not)));
-    ($a[0] | strip) == ($b[0] | strip)' 2>/dev/null | grep -qx true
+    ($a[0] | strip($b[0])) == ($b[0] | strip($a[0]))' 2>/dev/null | grep -qx true
 }
 servers_only() { options_only "$SERVER_OPTS" "$1" "$2"; }
-singbox_only() { options_only "$SINGBOX_OPTS" "$1" "$2"; }
+singbox_only() { options_only "$SINGBOX_OPTS" "$1" "$2" light; }
 
 # domain_sections <old config> <new config>: the sections whose own domain
 # list changed (or that are new); podkop fills a rule-set file only when it
@@ -660,7 +672,7 @@ run_apply() {
   # them without a podkop restart
   _hk=""
   if servers_only "$RUN/jobs/$_id.old" "$_new"; then _hk="only servers changed"
-  elif singbox_only "$RUN/jobs/$_id.old" "$_new"; then _hk="only servers and domain lists changed"; fi
+  elif singbox_only "$RUN/jobs/$_id.old" "$_new"; then _hk="only servers, domain lists and domain-only rules changed"; fi
   if [ -n "$_hk" ]; then
     job_set "$_id" '.state = "reloading"'
     _rd=$(rulesets_dir); rm -rf "$RUN/rulesets.bak"; mkdir -p "$RUN/rulesets.bak"
@@ -1154,15 +1166,47 @@ vpn_status() {
       dns: (if $dns == "" then null else $dns end)}'
 }
 
-# vpn status | vpn set (stdin {config?, username?, password?, enabled?, allow?}) | vpn install (job)
+# vpn test: stdin {"host": name, "dns": address or ""}: does https://<host>
+# open through the tunnel, its name resolved by that DNS server through the
+# tunnel (or, without one, by podkop's bootstrap server, as a rule without
+# its own DNS server does)? A sing-box of its own, nothing of podkop changes
+# -> {ok, reason: "" | "dns" | "timeout" | "connect" | "down", error}
+vpn_test() {
+  _tq=$(head -c 4096)
+  _th=$(printf '%s' "$_tq" | jq -r '.host // ""' 2>/dev/null); _td=$(printf '%s' "$_tq" | jq -r '.dns // ""' 2>/dev/null)
+  case "$_th" in ""|*[!A-Za-z0-9.-]*) fail bad_request "host name expected" ;; esac
+  case "$_td" in *[!0-9.]*) fail bad_request "dns must be an IPv4 address" ;; esac
+  [ -n "$(ip -4 -o addr show dev "$VPN_DEV" 2>/dev/null)" ] ||
+    reply '{"ok":false,"reason":"down","error":"the VPN is not connected"}'
+  _tf="$RUN/vpn-test.$$"
+  if [ -n "$_td" ]; then _ts=$(jq -nc --arg d "$_td" '{type: "udp", tag: "d", server: $d, detour: "vpn"}')
+  else _tb=$(uci -q get podkop.settings.bootstrap_dns_server); _ts=$(jq -nc --arg d "${_tb:-77.88.8.8}" '{type: "udp", tag: "d", server: $d}'); fi
+  jq -nc --arg dev "$VPN_DEV" --argjson s "$_ts" '{log: {disabled: true}, dns: {servers: [$s]},
+    outbounds: [{type: "direct", tag: "vpn", bind_interface: $dev, domain_resolver: "d"}],
+    route: {final: "vpn", default_domain_resolver: "d"}}' > "$_tf.json"
+  sing-box tools fetch -c "$_tf.json" "https://$_th/" > /dev/null 2> "$_tf.err" &
+  _tp=$!; _tw=0
+  while kill -0 "$_tp" 2>/dev/null && [ "$_tw" -lt 10 ]; do sleep 1; _tw=$((_tw + 1)); done
+  if kill "$_tp" 2>/dev/null; then wait "$_tp" 2>/dev/null; _tr=124; else wait "$_tp" 2>/dev/null; _tr=$?; fi
+  _te=$(tail -n 1 "$_tf.err" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g; s/^FATAL\[[0-9]*\] //' | cut -c 1-300)
+  rm -f "$_tf.json" "$_tf.err"
+  # the site answered with a certificate we don't know (a company's own CA): it is reachable
+  case "$_te" in *x509*|*certificate*) _tr=0 ;; esac
+  if [ "$_tr" = 0 ]; then reply '{"ok":true,"reason":"","error":""}'; fi
+  case "$_tr:$_te" in 124:*) _tn=timeout; _te="no answer in 10 s" ;; *lookup*) _tn=dns ;; *) _tn=connect ;; esac
+  reply "$(jq -nc --arg r "$_tn" --arg e "$_te" '{ok: false, reason: $r, error: $e}')"
+}
+
+# vpn status | vpn set (stdin {config?, username?, password?, enabled?, allow?}) | vpn install (job) | vpn test
 cmd_vpn() {
   case "${1:-status}" in
     status) reply "$(vpn_status)" ;;
+    test) vpn_test ;;
     install)
       _id=$(job_new vpn-install); spawn _run-vpn-install "$_id"
       reply "$(jq -nc --arg id "$_id" '{job: $id}')" ;;
     set) ;;
-    *) fail bad_request "usage: vpn status|set|install" ;;
+    *) fail bad_request "usage: vpn status|set|install|test" ;;
   esac
   _vq=$(head -c 131072)
   printf '%s' "$_vq" | jq -e 'type == "object"

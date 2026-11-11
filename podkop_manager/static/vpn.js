@@ -3,7 +3,7 @@
 import { touch, workFor } from "./draft.js";
 import { rulesOf } from "./model.js";
 import { pageHead } from "./shell.js";
-import { api, h, put, toast } from "./ui.js";
+import { api, asList, h, put, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 
 // --- OpenVPN client on the router (agent 0.21) ----------------------------------------------
@@ -61,7 +61,8 @@ export async function viewVpn(main, id) {
     let k = 1;
     while (rulesOf(w.config).some((s) => s.name === `vpn_${k}`)) k++;
     w.config.sections.push({ name: `vpn_${k}`, type: "section", anonymous: false,
-      options: { connection_type: "vpn", interface: VPN_DEV, user_domain_list_type: "dynamic" } });
+      options: { connection_type: "vpn", interface: VPN_DEV, user_domain_list_type: "dynamic",
+        ...(st.dns ? { domain_resolver_enabled: "1", domain_resolver_dns_type: "udp", domain_resolver_dns_server: st.dns } : {}) } });
     touch(w);
     location.hash = `#/r/${id}/rules/vpn_${k}`;
   };
@@ -97,6 +98,34 @@ export async function viewVpn(main, id) {
       h("span", { class: "small" }, `The VPN offers its own DNS server, ${st.dns}. `, done ? "The VPN rules resolve their names through it."
         : "Names that exist only inside that network open only when the rules resolve through it."),
       done ? null : h("button", { type: "button", class: "btn", onclick: useDns }, "Use it for the VPN rules"));
+  };
+
+  // --- does a rule work? Checked on the router with the draft's settings, before anything is applied ---
+  const firstDomain = (r) => asList(r.options.user_domain_list_type === "text" ? String(r.options.user_domains_text || "").split(/[\s,]+/) : r.options.user_domains)
+    .map((d) => d.trim()).filter((d) => /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/i.test(d) && d.includes("."))[0];
+  const ruleDns = (r) => (r.options.domain_resolver_enabled === "1" && /^[0-9.]+$/.test(r.options.domain_resolver_dns_server || "") ? r.options.domain_resolver_dns_server : "");
+  const checks = new Map();       // "host|dns" -> {ok, reason, error} or a promise of it
+  const check = (host, dns) => {
+    const key = `${host}|${dns}`;
+    if (!checks.has(key)) {
+      checks.set(key, api("POST", `/api/routers/${id}/vpn/test`, { host, dns }).catch((e) => ({ ok: false, reason: "error", error: e.message }))
+        .then((res) => { checks.set(key, res); if (page.isConnected) draw(); return res; }));
+    }
+    return checks.get(key);
+  };
+  const ruleCheck = (r) => {
+    const host = firstDomain(r), dns = ruleDns(r);
+    if (!st.up || !host) return null;
+    const res = check(host, dns);
+    if (res instanceof Promise) return h("span", { class: "small muted" }, `checking ${host} through the VPN…`);
+    if (res.ok) return h("span", { class: "pill ok" }, `${host} opens through the VPN`);
+    // would the VPN's own DNS server fix it?
+    const alt = res.reason === "dns" && st.dns && dns !== st.dns ? check(host, st.dns) : null;
+    return h("span", { class: "col", style: "gap: 4px" },
+      h("span", { class: "pill bad" }, res.reason === "dns" ? `${host}: the name is not found${dns ? ` by ${dns}` : " by podkop's DNS"}`
+        : res.reason === "timeout" ? `${host}: no answer through the VPN in 10 s` : `${host} does not open through the VPN`),
+      alt && !(alt instanceof Promise) && alt.ok ? h("span", { class: "small" }, `It opens when the name is resolved by the VPN's DNS server, ${st.dns}: use the button below, then apply.`) : null,
+      res.reason !== "dns" && res.error ? h("span", { class: "xs muted mono" }, res.error) : null);
   };
 
   const draw = () => {
@@ -144,7 +173,11 @@ export async function viewVpn(main, id) {
             if (await save(body, "VPN config saved")) Object.assign(form, { file: null, fileName: "", username: null, password: "" });
           }) }, "Save")))),
       card("Rules and devices", "Rules with connection type VPN and interface pkvpn",
-        rules.length ? h("p", { class: "small" }, rules.map((r) => r.name).join(", ")) : h("p", { class: "small muted" }, "No rule uses the VPN yet."),
+        rules.length ? h("div", { class: "stack", style: "gap: 8px" }, rules.map((r) => h("div", { class: "row" },
+          h("a", { class: "mono", href: `#/r/${id}/rules/${r.name}` }, r.name), ruleCheck(r))),
+        st.up ? h("div", { class: "row" }, h("button", { type: "button", class: "btn ghost", onclick: () => { checks.clear(); draw(); } }, "Check again"),
+          h("span", { class: "xs muted" }, "Each rule's first domain is tried on the router with the settings of your draft, before you apply them")) : null)
+          : h("p", { class: "small muted" }, "No rule uses the VPN yet."),
         dnsHint(rules),
         devicesEditor(),
         h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: addRule }, "Add a VPN rule"),

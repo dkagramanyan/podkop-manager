@@ -156,3 +156,20 @@ def test_domain_list_edits_take_the_hot_path_but_subnets_do_not(tmp_path):
     added["sections"].append({"name": "news", "type": "section", "options": {"connection_type": "proxy", "proxy_config_type": "outbound",
                                                                                "user_domain_list_type": "text", "user_domains_text": "n.com"}})
     assert _agent_fn(tmp_path, "domain_sections", base, added)[1] == ["main", "news"]
+
+
+def test_domain_only_rules_and_vpn_dns_take_the_hot_path(tmp_path):
+    base = _c(main={"connection_type": "proxy", "proxy_config_type": "urltest", "community_lists": ["meta"]})
+    vpn = {"connection_type": "vpn", "interface": "pkvpn", "user_domain_list_type": "text", "user_domains_text": "corp.example"}
+    added = _c(main=base["sections"][1]["options"], vpn_1=vpn)
+    assert _agent_fn(tmp_path, "singbox_only", base, added)[0] == 0          # a new domain-only rule
+    assert _agent_fn(tmp_path, "singbox_only", added, base)[0] == 0          # ... and its removal
+    assert _agent_fn(tmp_path, "domain_sections", base, added)[1] == ["vpn_1"]
+    dns = _c(main=base["sections"][1]["options"], vpn_1=dict(vpn, domain_resolver_enabled="1", domain_resolver_dns_type="udp",
+                                                             domain_resolver_dns_server="10.9.0.1"))
+    assert _agent_fn(tmp_path, "singbox_only", added, dns)[0] == 0           # the rule's DNS server
+    for heavy in ({"community_lists": ["meta"]}, {"user_subnet_list_type": "text", "user_subnets_text": "1.2.3.0/24"},
+                  {"fully_routed_ips": ["192.168.1.5"]}, {"mixed_proxy_enabled": "1"}, {"connection_type": "block"}):
+        assert _agent_fn(tmp_path, "singbox_only", base, _c(main=base["sections"][1]["options"], vpn_1=dict(vpn, **heavy)))[0] == 1, heavy
+    # a rule that stays but changes its kind still needs podkop's start
+    assert _agent_fn(tmp_path, "singbox_only", added, _c(main=base["sections"][1]["options"], vpn_1=dict(vpn, connection_type="proxy")))[0] == 1

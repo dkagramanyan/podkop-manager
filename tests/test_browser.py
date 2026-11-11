@@ -194,7 +194,7 @@ def test_vpn_page_shows_the_tunnel_sets_its_dns_and_saves_devices(tmp_path):
     import uvicorn
     from playwright.sync_api import sync_playwright
 
-    calls = []
+    calls, tests = [], []
 
     class VpnAgent(OnlineAgent):
         config = copy.deepcopy(OnlineAgent.config)
@@ -206,6 +206,10 @@ def test_vpn_page_shows_the_tunnel_sets_its_dns_and_saves_devices(tmp_path):
 
         async def call(self, name, *args, payload=None, **kwargs):
             if name == "vpn":
+                if args[0] == "test":       # the name exists only in the VPN's DNS
+                    tests.append(payload)
+                    return {"ok": True, "reason": "", "error": ""} if payload["dns"] == "10.9.0.1" else \
+                        {"ok": False, "reason": "dns", "error": "lookup corp.example: empty result"}
                 if args[0] == "set":
                     calls.append(payload)
                     self.state = dict(self.state, **{k: v for k, v in payload.items() if k in ("allow", "enabled")})
@@ -256,8 +260,13 @@ def test_vpn_page_shows_the_tunnel_sets_its_dns_and_saves_devices(tmp_path):
             page.click("text=Save devices")
             page.wait_for_selector("text=Devices saved")
             assert calls[-1] == {"allow": {"*": ["192.168.1.5/32", "192.168.1.6/32"]}}
+            # checked with the draft's settings before anything is applied: not found, but the VPN's DNS knows it
+            page.wait_for_selector("text=corp.example: the name is not found by podkop's DNS")
+            page.wait_for_selector("text=It opens when the name is resolved by the VPN's DNS server, 10.9.0.1")
             page.click("text=Use it for the VPN rules")
             page.wait_for_selector("text=The VPN rules resolve their names through it")
+            page.wait_for_selector("text=corp.example opens through the VPN")
+            assert {"host": "corp.example", "dns": ""} in tests and {"host": "corp.example", "dns": "10.9.0.1"} in tests
             page.goto(f"{base}/#/r/1/rules/vpn_1")
             page.wait_for_selector("text=Review and apply")           # the DNS went into the draft
             assert not errors, errors

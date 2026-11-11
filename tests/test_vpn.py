@@ -156,6 +156,10 @@ def test_api_checks_and_forwards(tmp_path, monkeypatch):
         assert put({"allow": {"*": ["192.168.1.7"]}}).status_code == 200
         assert agent.calls[-1] == (("vpn", "set"), {"allow": {"*": ["192.168.1.7/32"]}})
         assert put({"allow": {"a-b": ["192.168.1.7"]}}).status_code == 400
+        test = lambda body: c.post("/api/routers/1/vpn/test", json=body, headers=H)
+        assert test({"host": "a;b"}).status_code == 400 and test({"host": "git.example.com", "dns": "x"}).status_code == 400
+        assert test({"host": "Git.Example.com", "dns": "10.9.0.1"}).status_code == 200
+        assert agent.calls[-1] == (("vpn", "test"), {"host": "git.example.com", "dns": "10.9.0.1"})
         assert c.get("/api/routers/1/vpn/job/1;reboot").status_code == 400
         assert c.get("/api/routers/1/vpn/job/20261111-42").status_code == 200
         assert agent.calls[-1] == (("job", "20261111-42"), None)
@@ -257,3 +261,33 @@ def test_alerts_have_texts():
     from podkop_manager import notify
     assert "wrong password" in notify.text("home", "vpn_down", {"running": False, "last": "wrong password"})
     assert notify.text("home", "vpn_up", {}) and notify.text("home", "vpn_restart", {}) is None
+
+
+TESTER = '''
+ip() { cat "$RUN/addr" 2>/dev/null; }
+uci() { :; }
+mkdir -p "$RUN/bin"; printf '#!/bin/sh\\ncat "$4" > "%s/cfg"; cat "%s/fetch.err" >&2 2>/dev/null; exit $(cat "%s/fetch.rc")\\n' "$RUN" "$RUN" "$RUN" > "$RUN/bin/sing-box"
+chmod +x "$RUN/bin/sing-box"; PATH="$RUN/bin:$PATH"
+vpn_test
+'''
+
+
+def test_site_check_goes_through_the_tunnel_with_the_given_dns(tmp_path):
+    run = lambda req: _sh(tmp_path, TESTER, json.dumps(req))
+    assert json.loads(run({"host": "git.corp.example"}).stdout) == {"ok": False, "reason": "down", "error": "the VPN is not connected"}
+    (tmp_path / "addr").write_text("9: pkvpn    inet 10.9.0.2/24\n")
+    (tmp_path / "fetch.rc").write_text("0")
+    assert json.loads(run({"host": "git.corp.example", "dns": "10.9.0.1"}).stdout)["ok"] is True
+    cfg = json.loads((tmp_path / "cfg").read_text())
+    assert cfg["outbounds"] == [{"type": "direct", "tag": "vpn", "bind_interface": "pkvpn", "domain_resolver": "d"}]
+    assert cfg["dns"]["servers"] == [{"type": "udp", "tag": "d", "server": "10.9.0.1", "detour": "vpn"}]
+    run({"host": "git.corp.example"})        # no DNS server of its own: podkop's bootstrap server, not through the tunnel
+    assert json.loads((tmp_path / "cfg").read_text())["dns"]["servers"] == [{"type": "udp", "tag": "d", "server": "77.88.8.8"}]
+    (tmp_path / "fetch.rc").write_text("1")
+    (tmp_path / "fetch.err").write_text('FATAL[0000] Get "https://x/": lookup git.corp.example: empty result\n')
+    assert json.loads(run({"host": "git.corp.example"}).stdout)["reason"] == "dns"
+    (tmp_path / "fetch.err").write_text('FATAL[0000] Get "https://x/": tls: failed to verify certificate: x509: certificate signed by unknown authority\n')
+    assert json.loads(run({"host": "git.corp.example"}).stdout)["ok"] is True          # a company's own CA: reachable
+    (tmp_path / "fetch.err").write_text('FATAL[0000] Get "https://x/": dial tcp 10.1.1.1:443: connect: connection refused\n')
+    assert json.loads(run({"host": "git.corp.example"}).stdout)["reason"] == "connect"
+    assert run({"host": "a;b"}).returncode == 1 and run({"host": "a.b", "dns": "1.1.1.1;x"}).returncode == 1
