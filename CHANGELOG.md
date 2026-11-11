@@ -3,6 +3,19 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.48.0 — 2026-11-11
+
+OpenVPN for some sites (manager 0.35.0, agent 0.21.0).
+
+- **VPN page**: install OpenVPN on the router (through a working server when
+  the package server is cut off), import a `.ovpn` config with login and
+  password (the password is kept on the router only), turn the tunnel on and
+  off, see its state and log.
+- VPN rules (interface `pkvpn`) can be limited to some devices; the others
+  go on as if the rule weren't there.
+- The tunnel takes no routes from the server; while it is down the rules'
+  sites fail instead of going out direct.
+
 ## 1.47.0 — 2026-11-11
 
 Web interface and login (manager 0.34.0).

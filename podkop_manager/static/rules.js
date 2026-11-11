@@ -8,6 +8,7 @@ import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
 import { EUROPE, busyClick, countriesText, countryName, hasEurope } from "./usage.js";
+import { VPN_DEV } from "./vpn.js";
 
 // --- routing rules -----------------------------------------------------------------------------------------
 
@@ -272,7 +273,7 @@ export function ruleEditor(w, s, { onRename }) {
     ct === "vpn" ? h("div", { class: "form-grid" },
       lbl(b, "interface", "VPN interface", "vpn-if"),
       h("div", { class: "ctl" }, h("select", { id: "vpn-if", class: "input mid mono", "data-k": "interface", onchange: (e) => b.set("interface", e.target.value, true) },
-        h("option", { value: "" }, "—"), [...new Set([...w.ctx.devices, ...(o.interface ? [o.interface] : [])])].map((d) => h("option", { value: d, selected: d === o.interface }, d))),
+        h("option", { value: "" }, "—"), [...new Set([...w.ctx.devices, VPN_DEV, ...(o.interface ? [o.interface] : [])])].map((d) => h("option", { value: d, selected: d === o.interface }, d === VPN_DEV ? `${d} (VPN page)` : d))),
       b.was("interface"), b.problemEls("interface"))) : null,
     ct === "vpn" ? flagField(b, "domain_resolver_enabled", "Resolve this rule's domains through its own DNS server") : null,
     ct === "vpn" && b.val("domain_resolver_enabled") === "1" ? h("div", { class: "form-grid" },
