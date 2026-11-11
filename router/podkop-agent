@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.21.0"
+AGENT_VERSION="0.21.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -1034,10 +1034,14 @@ vpn_build() {
     echo "dev $VPN_DEV"
     echo "dev-type tun"
     echo "route-nopull"
+    # dropped before route-nopull refuses them one by one as "Options error"
     echo 'pull-filter ignore "redirect-gateway"'
+    echo 'pull-filter ignore "route"'
+    echo 'pull-filter ignore "dhcp-option"'
+    echo 'pull-filter ignore "block-outside-dns"'
     echo "script-security 1"
     echo "syslog podkop-vpn"
-    [ -s "$VPN_DIR/auth" ] && echo "auth-user-pass $VPN_DIR/auth"
+    if [ -s "$VPN_DIR/auth" ]; then echo "auth-user-pass $VPN_DIR/auth"; fi
   } > "$VPN_DIR/client.conf.t" || return 1
   if cmp -s "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"; then rm -f "$VPN_DIR/client.conf.t"; return 1; fi
   mv "$VPN_DIR/client.conf.t" "$VPN_DIR/client.conf"

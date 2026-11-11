@@ -156,3 +156,18 @@ def test_api_checks_and_forwards(tmp_path, monkeypatch):
         assert c.get("/api/routers/1/vpn/job/1;reboot").status_code == 400
         assert c.get("/api/routers/1/vpn/job/20261111-42").status_code == 200
         assert agent.calls[-1] == (("job", "20261111-42"), None)
+
+
+def test_config_without_a_login_is_built(tmp_path):
+    p = _sh(tmp_path, "\ncmd_vpn set", json.dumps({"config": "client\nremote a 1\n"}))
+    assert p.returncode == 0, p.stderr
+    conf = (tmp_path / "etc/vpn/client.conf").read_text().splitlines()
+    assert "remote a 1" in conf and "dev pkvpn" in conf and 'pull-filter ignore "route"' in conf
+    assert not any(l.startswith("auth-user-pass") for l in conf)
+    assert not (tmp_path / "etc/vpn/client.conf.t").exists()
+
+
+def test_openvpn_lines_have_their_own_log_source():
+    from podkop_manager import podkop
+    p = podkop.parse_log("Wed Nov 11 18:03:37 2026 daemon.notice podkop-vpn[22932]: Initialization Sequence Completed")
+    assert p["source"] == "vpn" and p["level"] == "info" and p["msg"] == "Initialization Sequence Completed"

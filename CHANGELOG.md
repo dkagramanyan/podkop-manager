@@ -3,6 +3,17 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.48.1 — 2026-11-11
+
+VPN fixes (manager 0.35.1, agent 0.21.1).
+
+- A config without a login was never written to the router (the tunnel
+  could not start).
+- Routes and DNS options the server pushes are dropped quietly: no more
+  dozens of "Options error: option 'route' cannot be used" lines at every
+  connect (they were harmless; the routing table is the same).
+- Logs: OpenVPN's lines have their own source, **vpn**, not "podkop".
+
 ## 1.48.0 — 2026-11-11
 
 OpenVPN for some sites (manager 0.35.0, agent 0.21.0).
