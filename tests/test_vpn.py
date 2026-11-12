@@ -291,3 +291,47 @@ def test_site_check_goes_through_the_tunnel_with_the_given_dns(tmp_path):
     (tmp_path / "fetch.err").write_text('FATAL[0000] Get "https://x/": dial tcp 10.1.1.1:443: connect: connection refused\n')
     assert json.loads(run({"host": "git.corp.example"}).stdout)["reason"] == "connect"
     assert run({"host": "a;b"}).returncode == 1 and run({"host": "a.b", "dns": "1.1.1.1;x"}).returncode == 1
+
+
+def _agent_code(start, end):
+    return subprocess.run(["sed", "-n", f"/^{start}/,/^{end}/p", str(AGENT)],
+                          capture_output=True, text=True, check=True).stdout
+
+
+def test_settings_are_read_again_only_after_their_file_changed(tmp_path):
+    """The daemon and "status" look every 15-30 s; reading podkop's settings
+    through ubus each time was a tenth of a second of the router's CPU."""
+    code = _agent_code("# seen_json, seen_fp", "# config_fp:")
+    cfg = tmp_path / "podkop"
+    cfg.write_text("x")
+    script = f'''
+RUN="{tmp_path}/run"; CFG="{cfg}"
+config_json() {{ echo read >> "{tmp_path}/reads"; cat "{tmp_path}/now.json"; }}
+fingerprint() {{ md5sum | cut -c 1-32; }}
+{code}
+echo '{{"a":1}}' > "{tmp_path}/now.json"
+s() {{ seen_json && echo; }}
+sleep 1.1; s; s; a=$(seen_fp)
+echo '{{"a":2}}' > "{tmp_path}/now.json"; s          # the file did not change: the copy in RAM
+sleep 1.1; touch "$CFG"; sleep 1.1; s; b=$(seen_fp)
+[ "$a" != "$b" ] && echo differ
+rm "{tmp_path}/now.json"; touch "$CFG"; s || echo unreadable
+'''
+    out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.stdout.split() == ['{"a":1}', '{"a":1}', '{"a":1}', '{"a":2}', "differ", "unreadable"], out.stderr
+    assert (tmp_path / "reads").read_text().count("read") == 3
+
+
+def test_podkop_enabled_looks_at_the_start_links_without_running_a_script(tmp_path):
+    code = _agent_code("# .what ..etc.init.d.podkop enabled", "# the sing-box procd runs")
+    assert "podkop_enabled()" in code
+    rc = tmp_path / "rc.d"
+    rc.mkdir()
+    code = code.replace("/etc/rc.d", str(rc))
+    run = lambda: subprocess.run(["sh", "-c", code + "\npodkop_enabled && echo yes || echo no"],  # noqa: E731
+                                 capture_output=True, text=True).stdout.strip()
+    (rc / "S99podkop-agent").write_text("")
+    (rc / "S95podkop-engine").write_text("")
+    assert run() == "no"
+    (rc / "S99podkop").write_text("")
+    assert run() == "yes"

@@ -241,3 +241,30 @@ def test_a_watchdog_that_stands_still_on_the_router_is_reported_once(tmp_path):
     rt.status = {"uptime": 9000}                                  # an older agent says nothing
     hub._check_daemon(rt)
     assert types().count("agent_stuck") == 1
+
+
+def test_status_is_asked_less_often_while_nobody_looks(tmp_path):
+    from podkop_manager import hub as hubmod
+    db, hub, rt, rid = _hub(tmp_path)
+    assert hub.poll_seconds() == hubmod.POLL_IDLE_SECONDS
+    rt.checked = 0
+
+    async def go():
+        q = hub.subscribe()
+        assert rt.wake.is_set() and hub.poll_seconds() == hubmod.POLL_SECONDS      # the first viewer: fresh at once
+        hub.unsubscribe(q)
+        assert hub.poll_seconds() == hubmod.POLL_IDLE_SECONDS
+    asyncio.run(go())
+
+
+def test_connection_checks_slow_down_only_while_nothing_is_wrong():
+    from podkop_manager import reliability
+    ok = [{"target": "a", "exit": 0, "code": 204}, {"target": "b", "exit": 0, "code": 204}]
+    bad = [{"target": "a", "exit": 28, "code": 0}, {"target": "b", "exit": 28, "code": 0}]
+    report = {"nodes": {"main-1-out": ok}, "direct": ok, "router_dns": True, "primary_dns": {"ok": True}, "payload": {}}
+    assert reliability.calm(report)
+    assert not reliability.calm(dict(report, nodes={"main-1-out": ok, "main-2-out": bad}))
+    assert not reliability.calm(dict(report, router_dns=False))
+    assert not reliability.calm(dict(report, direct=bad))
+    assert not reliability.calm(dict(report, banned=["main-2-out"]))
+    assert not reliability.calm(dict(report, nodes={}))

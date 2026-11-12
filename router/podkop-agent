@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.22.1"
+AGENT_VERSION="0.23.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -89,6 +89,23 @@ config_json() {
   _cj=$(ubus call uci get '{"config":"podkop"}' 2>/dev/null) && [ -n "$_cj" ] || return 1
   printf '%s' "$_cj" | jq -c "$UBUS2CONF"
 }
+
+# seen_json, seen_fp: the same for the rounds that only look (the daemon
+# every 15 s, "status" every 30 s): kept in RAM and read again only after
+# podkop's settings file changed (or a change waits uncommitted). The stamp
+# is made before the read, so a change during it is seen the next time. An
+# apply and its checks always read afresh (config_json, config_fp).
+config_seen() {
+  if [ -s "$RUN/seen.json" ] && [ "$RUN/seen.stamp" -nt "$CFG" ] &&
+     { [ ! -e /tmp/.uci/podkop ] || [ "$RUN/seen.stamp" -nt /tmp/.uci/podkop ]; }; then return 0; fi
+  mkdir -p "$RUN"; : > "$RUN/seen.stamp.$$"
+  if _sn=$(config_json) && [ -n "$_sn" ] && printf '%s' "$_sn" > "$RUN/seen.json.$$" &&
+     printf '%s' "$_sn" | fingerprint > "$RUN/seen.fp.$$"; then
+    mv "$RUN/seen.json.$$" "$RUN/seen.json" && mv "$RUN/seen.fp.$$" "$RUN/seen.fp" && mv "$RUN/seen.stamp.$$" "$RUN/seen.stamp"
+  else rm -f "$RUN/seen.json.$$" "$RUN/seen.fp.$$" "$RUN/seen.stamp.$$"; return 1; fi
+}
+seen_json() { config_seen && cat "$RUN/seen.json"; }
+seen_fp() { config_seen && cat "$RUN/seen.fp"; }
 
 # config_fp: the fingerprint of podkop's settings now; fails like config_json
 config_fp() { _cf=$(config_json) && [ -n "$_cf" ] || return 1; printf '%s' "$_cf" | fingerprint; }
@@ -230,14 +247,24 @@ failsafe_recent() {
   find /etc/sing-box/failsafe.last -mmin -10 2>/dev/null | grep -q . && tail -n 1 /etc/sing-box/failsafe.last
 }
 
-podkop_enabled() { /etc/init.d/podkop enabled 2>/dev/null; }
+# (what "/etc/init.d/podkop enabled" looks at, without starting a script:
+# the daemon asks every round)
+podkop_enabled() {
+  for _pe in /etc/rc.d/S[0-9][0-9]podkop; do [ -e "$_pe" ] && return 0; done
+  return 1
+}
 # the sing-box procd runs: `sing-box check`, the exit-IP check and the probe
 # run sing-box processes too
 singbox_pid() {
   ubus call service list '{"name":"sing-box"}' 2>/dev/null |
     jq -r '[.["sing-box"].instances[]? | select(.running) | .pid] | first // empty'
 }
-proxies() { podkop clash_api get_proxies 2>/dev/null; }
+# straight from sing-box's API (one curl); podkop's own command, a script
+# that starts for every call, only without our helper
+proxies() {
+  if command -v clash_get >/dev/null 2>&1; then clash_get /proxies 2>/dev/null
+  else podkop clash_api get_proxies 2>/dev/null; fi
+}
 
 # proxies_json: the groups and servers of the Clash API, as "proxies" answers
 # them; nothing on stdout when the API does not answer
@@ -800,9 +827,9 @@ traffic_poll() {
   else _c=$(curl -s --max-time 5 "http://$_addr/connections"); fi
   [ -n "$_c" ] || return 0
   # tag -> "<section><TAB><link>", named like tag_link does (and "<section>-out" for a url section)
-  _tl=$(ubus call uci get '{"config":"podkop"}' 2>/dev/null | jq -c '
+  _tl=$(seen_json | jq -c '
     def lst: if . == null then [] elif type == "array" then . else [.] end;
-    '"$UBUS2CONF"' | [.sections[] | select(.options.connection_type == "proxy") | .name as $s | .options as $o
+    [.sections[] | select(.options.connection_type == "proxy") | .name as $s | .options as $o
     | if $o.proxy_config_type == "urltest" then
         ($o.urltest_proxy_links | lst | to_entries[] | {key: "\($s)-\(.key + 1)-out", value: "\($s)\t\(.value)"}),
         ($o.urltest_fallback_links | lst | to_entries[] | {key: "\($s)-fallback-\(.key + 1)-out", value: "\($s)\t\(.value)"})
@@ -851,7 +878,7 @@ guard_watch() {
 # kill_children <pid>: its children (the watcher's ubus and read loop), then it
 kill_children() {
   for _p in /proc/[0-9]*; do
-    read -r _ _ _ _pp _ < "$_p/stat" 2>/dev/null || continue
+    { read -r _ _ _ _pp _ < "$_p/stat"; } 2>/dev/null || continue     # (a process that just ended)
     [ "$_pp" = "$1" ] && kill "${_p#/proc/}" 2>/dev/null
   done
   kill "$1" 2>/dev/null
@@ -862,7 +889,7 @@ kill_children() {
 # gone (20 MB each), and the folders of checks and exit-IP lookups
 tidy() {
   for _p in /proc/[0-9]*; do
-    read -r _ _ _ _pp _ < "$_p/stat" 2>/dev/null || continue
+    { read -r _ _ _ _pp _ < "$_p/stat"; } 2>/dev/null || continue     # (a process that just ended)
     [ "$_pp" = 1 ] || continue
     case "$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null)" in
       "sing-box run -c $RUN/check."*) kill "${_p#/proc/}" 2>/dev/null && logger -t podkop-agent "ended a leftover connection check" ;;
@@ -1346,7 +1373,7 @@ run_vpn_install() {
 # --- commands ---------------------------------------------------------------------
 
 cmd_status() {
-  _fp=$(config_fp)
+  _fp=$(seen_fp)
   _st=$(podkop_start_state)
   _probe=$(cat "$RUN/probe/state" 2>/dev/null || echo none)
   _pins='[]'
@@ -1559,8 +1586,13 @@ cmd_watch() {
   printf '{"type":"hello","boot":"%s","agent":"%s"}\n' "$BOOT" "$AGENT_VERSION"
   (
     _n=$_from
+    _q=""
     while :; do
-      if [ -f "$EVENTS" ]; then
+      # (the events' counter is read without starting anything: awk runs
+      # only after an event, not every second)
+      _qn=""; [ -f "$RUN/seq" ] && read -r _qn < "$RUN/seq"
+      if [ -f "$EVENTS" ] && [ "$_qn" != "$_q" ]; then
+        _q=$_qn
         _o=$(awk -v n="$_n" '{ s = $0; sub(/^\{"id":"[^:]*:/, "", s); sub(/".*/, "", s) } s + 0 > n' "$EVENTS")
         if [ -n "$_o" ]; then
           printf '%s\n' "$_o"

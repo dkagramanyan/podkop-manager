@@ -15,7 +15,7 @@ export function healthPath(rows = []) {
 
 export function healthVerdict(data, router = {}, now = Date.now() / 1000) {
   const last = data.checks[0], report = last?.report || {};
-  const stale = !last || now - last.t > Math.max(180, data.settings.interval * 3);
+  const stale = !last || now - last.t > Math.max(180, Math.max(data.settings.interval, 300) * 3);
   const selected = Object.values(report.selected || {});
   const nodes = Object.values(report.nodes || {}).map(healthPath);
   const tips = [];
@@ -102,7 +102,7 @@ export async function viewReliability(main, id) {
     reset.hidden = !dirty;
     reset.disabled = saving;
     settingsNote.textContent = dirty ? "Unsaved changes" : data.settings.enabled
-      ? `Monitoring every ${data.settings.interval} seconds · automatic recovery ${data.settings.auto_recover ? "on" : "off"}`
+      ? `Monitoring every ${data.settings.interval} seconds (${Math.min(data.settings.interval * 5, Math.max(data.settings.interval, 300))} while nothing is wrong) · automatic recovery ${data.settings.auto_recover ? "on" : "off"}`
       : "Monitoring is off. You can still run checks manually.";
   };
   const resetSettings = () => {

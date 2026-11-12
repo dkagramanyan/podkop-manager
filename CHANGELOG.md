@@ -3,6 +3,28 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.49.0 — 2026-11-12
+
+Less load on the router (manager 0.37.0, agent 0.23.0). Measured on a
+dual-core router; what it does stays the same.
+
+- **Status**: one call costs 0.43 s of the router's CPU instead of 0.73 s,
+  and the manager asks every 2 minutes while nobody has the web interface
+  open (every 30 s while someone does; events still arrive at once).
+- **Connection checks** (each runs a sing-box of its own on the router, 3-6 s
+  of its CPU): while a check finds nothing wrong the next one comes 5 times
+  later (at most every 5 minutes); after any failure, at the set interval
+  again.
+- **The daemon**: podkop's settings are read again only after their file
+  changed (not every 15 s), sing-box's API is asked directly (0.02 s
+  instead of 0.14 s through podkop's script), "is podkop enabled" starts
+  nothing, a round of server tests reads the groups from a small copy
+  (0.78 s instead of 1.3 s with two groups down). Together: the daemon took
+  4.2% of one core with two groups down, now 2.8%.
+- The event stream starts a program only after an event, not every second.
+- **Fixed**: Connection health always reported a DNS-over-HTTPS resolver as
+  failing: the check of its answer used `od`, which OpenWrt does not have.
+
 ## 1.48.3 — 2026-11-12
 
 The router's watchdog stood still (manager 0.36.1, agent 0.22.1).

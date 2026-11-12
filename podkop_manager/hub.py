@@ -31,7 +31,9 @@ OK_JOB_STATES = {"applied", "saved", "unchanged"}
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
                 "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
-POLL_SECONDS = 30
+POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
+POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
+CALM_CHECKS = 5          # connection checks that found nothing wrong run this many times less often
 STUCK_SECONDS = 300      # the router's watchdog (podkop-agent daemon) gave no sign of life for this long
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
@@ -224,8 +226,17 @@ class Hub:
     # --- live updates -----------------------------------------------------------------
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=500)
+        if not self.subscribers:            # the first viewer: what is shown is fresh at once
+            for rt in self.routers.values():
+                if time.time() - rt.checked >= POLL_SECONDS:
+                    rt.wake.set()
         self.subscribers.add(q)
         return q
+
+    def poll_seconds(self) -> int:
+        """Every status call starts a dozen programs on the router: often only
+        while a page shows it."""
+        return POLL_SECONDS if self.subscribers else POLL_IDLE_SECONDS
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self.subscribers.discard(q)
@@ -352,7 +363,7 @@ class Hub:
             except Exception:  # noqa: BLE001 - polling must go on whatever happens
                 log.exception("poll %s", rt.row["host"])
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(rt.wake.wait(), timeout=POLL_SECONDS)
+                await asyncio.wait_for(rt.wake.wait(), timeout=self.poll_seconds())
 
     async def _watch_loop(self, rt: RouterRuntime) -> None:
         delay = 5
@@ -427,7 +438,10 @@ class Hub:
                 opts = self.db.get_setting(f"reliability:{rt.id}", reliability.DEFAULTS)
                 interval = opts["interval"]
                 if opts["enabled"] and rt.online:
-                    await self.check_connections(rt.id)
+                    # a check runs a sing-box of its own on the router (seconds of
+                    # its CPU): while nothing is wrong, less often
+                    if reliability.calm(await self.check_connections(rt.id)):
+                        interval = min(interval * CALM_CHECKS, max(interval, 300))
             except AgentError as e:
                 if e.code != "busy":        # a probe or an apply runs: the last result stays
                     rt.connection_check = {"checked": time.time(), "error": e.message, "code": e.code}
