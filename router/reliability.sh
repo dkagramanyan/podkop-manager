@@ -537,25 +537,60 @@ guard_build_locked() {
     [ -n "$_ge" ] && printf '    elements = { %s }\n' "$_ge"
     echo "  }"
     echo "  chain forward { type filter hook forward priority -5; policy accept;"
-    echo "    iifname { $_gi } ip daddr @strict4 meta l4proto tcp reject with tcp reset"
-    echo "    iifname { $_gi } ip daddr @strict4 reject"
-    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 meta l4proto tcp reject with tcp reset"
-    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 reject"
+    echo "    iifname { $_gi } ip daddr @strict4 meta l4proto tcp counter reject with tcp reset"
+    echo "    iifname { $_gi } ip daddr @strict4 counter reject"
+    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 meta l4proto tcp counter reject with tcp reset"
+    echo "    iifname { $_gi } ip daddr 198.18.0.0/15 counter reject"
     echo "  }"
     echo "}"
   } > "$RUN/guard/nft.conf"
   printf '%s' "$_gk" > "$RUN/guard/key"
   rm -f "$RUN/guard/nft.applied"
+  guard_boot_save "$_gc" "$_gs"
   logger -t podkop-agent "strict guard: $(wc -l < "$RUN/guard/domains") domains, $(wc -l < "$RUN/guard/subnets") subnets, $(wc -l 2>/dev/null < "$RUN/guard/resolved" || echo 0) resolved addresses"
+}
+
+# guard_boot_save <podkop's settings> <strict sections>: a copy of the two
+# files on flash, for the minute after a boot: forwarding works from the
+# firewall's start, podkop and this daemon start last, and until then a
+# kill-switch rule's traffic would go out direct. /etc/init.d/podkop-guard
+# (see install.sh) loads the copy before the firewall and dnsmasq start.
+# Written only when the rules' settings or the sizes of their lists change,
+# not when addresses are resolved again every hour (flash); a build made
+# before the lists are back (just booted) does not replace a fuller copy.
+guard_boot_save() {
+  _bk=$(printf '%s%s%s %s' "$(printf '%s' "$1" | jq -cS "${FP_JQ:-.}" 2>/dev/null)" "$2" \
+    "$(wc -l < "$RUN/guard/subnets")" "$(wc -l < "$RUN/guard/domains")" | md5sum | cut -c 1-32)
+  [ "$(cat "$ETC/guard.key" 2>/dev/null)" = "$_bk" ] && [ -s "$ETC/guard.nft" ] && return 0
+  if [ -s "$ETC/guard.nft" ] && [ -s "$RUN/guard/want" ]; then
+    while IFS="$TAB" read -r _ _bf; do
+      case "$_bf" in *.srs) _bf="${_bf%.srs}.json" ;; esac
+      [ -s "$_bf" ] || return 0
+    done < "$RUN/guard/want"
+  fi
+  { cp "$RUN/guard/nft.conf" "$ETC/guard.nft.t" && mv "$ETC/guard.nft.t" "$ETC/guard.nft" &&
+    cp "$RUN/guard/dnsmasq.conf" "$ETC/guard.dnsmasq.t" && mv "$ETC/guard.dnsmasq.t" "$ETC/guard.dnsmasq" &&
+    printf '%s' "$_bk" > "$ETC/guard.key"; } 2>/dev/null ||
+    logger -t podkop-agent "strict guard: could not keep a copy for the next boot"
 }
 
 # guard_wanted: strict sections exist and podkop is meant to run
 guard_wanted() { [ -s "$ETC/strict" ] && [ ! -f "$ETC/paused" ] && podkop_enabled; }
 
+guard_sum() { sed 's/counter packets [0-9]* bytes [0-9]*/counter/' | md5sum | cut -c 1-32; }
 guard_nft_sync() {
   if guard_wanted && [ -s "$RUN/guard/nft.conf" ]; then
-    if [ "$(cat "$RUN/guard/nft.applied" 2>/dev/null)" = "$(cat "$RUN/guard/key")" ] && guard_nft list table inet "$GUARD_TABLE" >/dev/null; then return 0; fi
-    if guard_nft -f "$RUN/guard/nft.conf"; then cp "$RUN/guard/key" "$RUN/guard/nft.applied"; rm -f "$RUN/guard/nft.refused"
+    # in place and as we loaded it: its listing (without the counters) is
+    # compared with the one taken right after the load, so a table that
+    # something else emptied or changed is put back, not only one that is gone
+    if [ "$(cat "$RUN/guard/nft.applied" 2>/dev/null)" = "$(cat "$RUN/guard/key")" ]; then
+      if _gl=$(guard_nft list table inet "$GUARD_TABLE") && [ "$(printf '%s' "$_gl" | guard_sum)" = "$(cat "$RUN/guard/nft.sum" 2>/dev/null)" ]; then return 0; fi
+      logger -t podkop-agent "strict guard: the firewall table was gone or changed; put back"
+      event strict_guard '{"restored":true}'
+    fi
+    if guard_nft -f "$RUN/guard/nft.conf"; then
+      cp "$RUN/guard/key" "$RUN/guard/nft.applied"; rm -f "$RUN/guard/nft.refused"
+      _gl=$(guard_nft list table inet "$GUARD_TABLE"); printf '%s' "$_gl" | guard_sum > "$RUN/guard/nft.sum"
     elif ! cmp -s "$RUN/guard/key" "$RUN/guard/nft.refused"; then     # once per build, not every 15 s
       logger -t podkop-agent "strict guard: nft refused the table"; cp "$RUN/guard/key" "$RUN/guard/nft.refused"
       event strict_guard '{"nft":false}'
@@ -586,6 +621,8 @@ guard_dns_off() {
 # sing-box or podkop service event
 guard_sync() {
   if ! guard_wanted; then
+    # (no kill-switch rule any more: no copy for the next boot either)
+    if [ ! -s "$ETC/strict" ] && [ -e "$ETC/guard.key" ]; then rm -f "$ETC/guard.nft" "$ETC/guard.dnsmasq" "$ETC/guard.key"; fi
     guard_nft_sync; guard_dns_off; return 0
   fi
   guard_build || return 0
@@ -593,12 +630,20 @@ guard_sync() {
   if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then guard_dns_on restart; else guard_dns_off; fi
 }
 
+# flow offloading moves forwarded connections past the firewall's chains:
+# a connection that began while the table was away would not be cut
+guard_offload() {
+  [ "$(uci -q get 'firewall.@defaults[0].flow_offloading')" = 1 ] && echo 1
+}
 guard_status() {
   _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
   jq -nc --arg d "$(wc -l 2>/dev/null < "$RUN/guard/domains" || echo 0)" --arg s "$(wc -l 2>/dev/null < "$RUN/guard/subnets" || echo 0)" \
     --arg r "$(wc -l 2>/dev/null < "$RUN/guard/resolved" || echo 0)" \
     --arg nft "$([ -f "$RUN/guard/nft.applied" ] && echo 1)" --arg dns "$([ -f "$_gf" ] && echo 1)" \
-    '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), resolved: ($r | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1")}'
+    --arg blk "$([ -f "$RUN/guard/nft.applied" ] && guard_nft list table inet "$GUARD_TABLE" | sed -n 's/.*counter packets \([0-9]*\) .*/\1/p' | awk '{ n += $1 } END { print n + 0 }')" \
+    --arg off "$(guard_offload)" --arg boot "$([ -s "$ETC/guard.nft" ] && echo 1)" \
+    '{domains: ($d | tonumber? // 0), subnets: ($s | tonumber? // 0), resolved: ($r | tonumber? // 0), nft: ($nft == "1"), dns: ($dns == "1"),
+      blocked: ($blk | tonumber? // null), offload: ($off == "1"), boot: ($boot == "1")}'
 }
 
 # strict_enforce <proxies file> <sing-box config> [fingerprint]: each strict section's

@@ -3,6 +3,33 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.51.0 — 2026-11-12
+
+Kill switch: the first minute after a boot, and proof that it blocks
+(manager 0.39.0, agent 0.25.0).
+
+- **From the first second after a boot**: forwarding works as soon as the
+  firewall starts, podkop and the agent start about a minute later, and
+  until then a kill-switch rule's traffic went out direct. The agent now
+  keeps a copy of the block list on the router and a small boot script
+  (podkop-guard) loads it before the firewall and dnsmasq start. The copy
+  is written only when the rules' settings or the sizes of their lists
+  change, not at every hourly resolve (flash).
+- **Counters**: Connection health shows how many packets the block list
+  refused since it was last loaded.
+- **Put back when changed**: the table was only checked for being there;
+  now its contents are compared with what was loaded every 15 s, and a
+  table that something emptied or changed is loaded again (an event says so).
+- A warning when flow offloading is on in the router's firewall (offloaded
+  connections go past the firewall's chains).
+
+Looked at and left out: blocking the router's own traffic to those
+addresses (RouteGuard does): with podkop the router's DNS and list
+downloads go out direct on purpose, and a kill switch on a rule with a CDN
+list would cut the router's own DNS. A leak test from the router: the block
+is on forwarded traffic, which the router cannot send to itself without an
+extra kernel module; the counters show real blocks instead.
+
 ## 1.50.0 — 2026-11-12
 
 A rule that keeps working when the agent does not: protected rules, safe

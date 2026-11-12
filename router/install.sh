@@ -29,7 +29,7 @@ RELEASE="$REPO_URL/releases/latest/download"
 KEYS=/etc/dropbear/authorized_keys
 MARK=podkop-agent
 FWD_MARK=podkop-agent-forward
-KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel"
+KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /etc/init.d/podkop-guard"
 
 set -u
 KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0; PRINT_SENTINEL=0
@@ -44,6 +44,7 @@ while [ $# -gt 0 ]; do
     --uninstall) UNINSTALL=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
     --print-sentinel) PRINT_SENTINEL=1; shift ;;
+    --print-guard) PRINT_SENTINEL=2; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -240,6 +241,38 @@ start_service() {
 }
 SENTINEL
 }
+# podkop-guard: at boot, before the firewall and dnsmasq start, the copy of
+# the kill switch's block list that the agent keeps on flash (guard_boot_save
+# in reliability.sh) goes in: until podkop and the agent are up, about a
+# minute later, a kill-switch rule's sites are refused instead of going out
+# direct. The agent's daemon takes over from there.
+guard_init_text() {
+  cat <<'GUARD'
+#!/bin/sh /etc/rc.common
+# podkop-guard: the kill switch's block list from the first second after a boot
+# (written by podkop-agent's install.sh)
+# shellcheck disable=SC2034
+START=18
+boot() {
+  E=/etc/podkop-agent
+  [ -s "$E/strict" ] && [ -s "$E/guard.nft" ] && [ ! -f "$E/paused" ] || return 0
+  _on=0; for _f in /etc/rc.d/S[0-9][0-9]podkop; do [ -e "$_f" ] && _on=1; done
+  [ "$_on" = 1 ] || return 0
+  nft -f "$E/guard.nft" 2>/dev/null && logger -t podkop-agent "strict guard: block list loaded at boot"
+  # the names (NXDOMAIN) only when the daemon will take them out again
+  if [ -f "$E/safe-mode" ] || [ ! -s "$E/guard.dnsmasq" ]; then return 0; fi
+  _c=$(uci -X show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([^.=]*\)=dnsmasq$/\1/p' | head -n 1)
+  _d=$(uci -q get "dhcp.$_c.confdir" | cut -d , -f 1); [ -n "$_d" ] || _d="/tmp/dnsmasq${_c:+.$_c}.d"
+  mkdir -p "$_d" && cp "$E/guard.dnsmasq" "$_d/podkop-agent-strict.conf"
+}
+GUARD
+}
+guard_init_install() {
+  guard_init_text > "$TMP/podkop-guard.init" && sh -n "$TMP/podkop-guard.init" 2>/dev/null || return 0
+  put "$TMP/podkop-guard.init" /etc/init.d/podkop-guard
+  /etc/init.d/podkop-guard enabled 2>/dev/null || /etc/init.d/podkop-guard enable 2>/dev/null
+}
+
 # sentinel_install: written only when its text changed (flash), started then
 sentinel_install() {
   sentinel_text > "$TMP/podkop-sentinel" && sentinel_init_text > "$TMP/podkop-sentinel.init" &&
@@ -256,6 +289,7 @@ sentinel_install() {
 }
 
 if [ "$PRINT_SENTINEL" = 1 ]; then sentinel_text; exit 0; fi
+if [ "$PRINT_SENTINEL" = 2 ]; then guard_init_text; exit 0; fi
 
 if [ "$UPGRADE" = 1 ] && { [ "$PAIRING" = 1 ] || [ "$UNINSTALL" = 1 ]; }; then
   die "--upgrade cannot be combined with key, firewall or uninstall options"
@@ -292,6 +326,8 @@ firewall_rules() {
 if [ "$UNINSTALL" = 1 ]; then
   [ -x /etc/init.d/podkop-sentinel ] && { /etc/init.d/podkop-sentinel stop 2>/dev/null; /etc/init.d/podkop-sentinel disable 2>/dev/null; }
   rm -rf /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /tmp/podkop-sentinel
+  [ -x /etc/init.d/podkop-guard ] && /etc/init.d/podkop-guard disable 2>/dev/null
+  rm -f /etc/init.d/podkop-guard
   /etc/init.d/podkop-agent stop 2>/dev/null; /etc/init.d/podkop-agent disable 2>/dev/null
   # the OpenVPN client (VPN page); the openvpn package stays
   [ -x /etc/init.d/podkop-vpn ] && { /etc/init.d/podkop-vpn stop 2>/dev/null; /etc/init.d/podkop-vpn disable 2>/dev/null; rm -f /etc/init.d/podkop-vpn; }
@@ -438,7 +474,7 @@ if [ "$UPGRADE" = 1 ]; then
     fi
   fi
   ROLLBACK=0
-  sentinel_install
+  sentinel_install; guard_init_install
   for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
   echo "podkop-agent $(jq -r '.data.version' "$TMP/version.json") upgraded; keys, firewall and Podkop settings preserved"
   exit 0
@@ -474,7 +510,7 @@ fi
 for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
 
 /etc/init.d/podkop-agent enable && /etc/init.d/podkop-agent restart 2>/dev/null || die "could not start podkop-agent"
-sentinel_install
+sentinel_install; guard_init_install
 echo "podkop-agent $(sed -n 's/^AGENT_VERSION="\(.*\)"/\1/p' /usr/bin/podkop-agent) installed"
 
 # the line for podkop-manager: LAN address, SSH port and host key (ed25519
