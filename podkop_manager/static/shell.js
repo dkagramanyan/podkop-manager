@@ -32,6 +32,7 @@ export const alertText = (a) => (a.type === "group_down" ? `a rule's servers sto
   : a.type === "change_not_applied" ? `a change was not applied ${ago(a.t)}`
   : a.type === "probe_failed" ? `the nightly probe failed ${ago(a.t)}`
   : a.type === "probe_not_started" ? `the nightly probe did not start ${ago(a.t)}`
+  : a.type === "agent_stuck" ? `the router's watchdog stands still since ${ago(a.t)}`
   : a.type === "vpn_down" ? `the VPN went down ${ago(a.t)}`
   : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
 export const draftChanges = (rt) => (rt.draft && rt.draft.changes) || 0;

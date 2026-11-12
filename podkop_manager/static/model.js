@@ -173,6 +173,8 @@ export const EVENT_TEXT = {
   pin_cleared: (d) => `${d.section}: back to automatic`,
   pin_restored: (d) => `${d.section}: pin ${serverName(d.section, d.server)} set again`,
   pin_dropped: (d) => `${d.section}: pin removed, ${d.reason}`,
+  agent_stuck: () => "podkop-agent's watchdog on the router stands still: no restart of podkop, no self-heal, no kill switch updates (restart it: /etc/init.d/podkop-agent restart)",
+  agent_ok: () => "podkop-agent's watchdog runs again",
   agent_started: (d) => `podkop-agent ${d.version} started`,
   agent_upgraded: (d) => `podkop-agent updated to ${d.version} from the manager`,
   agent_upgrade_failed: (d) => `Agent update failed: ${d.message}`,
@@ -200,7 +202,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", agent_stuck: "bad", agent_ok: "ok", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",

@@ -221,3 +221,23 @@ def test_prune_keeps_scheduled_changes(tmp_path):
     db.prune(versions=2)
     assert db.version(vid)["state"] == "scheduled" and len(db.versions(1)) == 3
     assert db.version(vid)["base_config"] == BASE
+
+
+def test_a_watchdog_that_stands_still_on_the_router_is_reported_once(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path)
+    types = lambda: [e["type"] for e in db.events(rid, 10)]  # noqa: E731
+    rt.status = {"uptime": 9000, "daemon": {"beat": 20}}
+    hub._check_daemon(rt)
+    assert rt.alert is None and "agent_stuck" not in types()
+    rt.status = {"uptime": 9000, "daemon": {"beat": 86000}}
+    hub._check_daemon(rt)
+    hub._check_daemon(rt)
+    assert rt.alert["type"] == "agent_stuck" and types().count("agent_stuck") == 1
+    rt.status = {"uptime": 9000, "daemon": {"beat": 3}}
+    hub._check_daemon(rt)
+    assert rt.alert is None and "agent_ok" in types()
+    rt.status = {"uptime": 60, "daemon": {"beat": None}}          # just booted: the daemon has not started yet
+    hub._check_daemon(rt)
+    rt.status = {"uptime": 9000}                                  # an older agent says nothing
+    hub._check_daemon(rt)
+    assert types().count("agent_stuck") == 1

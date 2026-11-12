@@ -29,9 +29,10 @@ FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "fa
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
-                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down")
+                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30
+STUCK_SECONDS = 300      # the router's watchdog (podkop-agent daemon) gave no sign of life for this long
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
 EXIT_RETRY_SECONDS = 600     # ... or this long after the lookup failed
@@ -113,6 +114,7 @@ class RouterRuntime:
         self.config: dict | None = None    # the last config-get
         self.draft: dict | None = None     # summary of the unapplied draft
         self.alert: dict | None = None     # the last change undone on the router
+        self.stuck_told = False            # "agent_stuck" was reported
         self.usage: dict = {"pct": None, "alerts": []}   # daily limits, for the menu and Overview
         self.online = False
         self.error = ""
@@ -239,6 +241,7 @@ class Hub:
             old = (rt.status or {}).get("agent")
             rt.status = await rt.agent.call("status", timeout=30)
             self._clear_heal_alert(rt)
+            self._check_daemon(rt)
             if rt.status.get("agent") != old:
                 rt.exit_ip = True                 # a new agent may have exit-ip
                 if (rt.connection_check.get("code") == "agent_upgrade"
@@ -267,6 +270,23 @@ class Hub:
             rt.down_since = rt.down_since or time.time()
         rt.checked = time.time()
         self.publish({"type": "router", "router": rt.snapshot()})
+
+    def _check_daemon(self, rt: RouterRuntime) -> None:
+        """The agent's daemon is the router's watchdog, self-heal and kill
+        switch; when it stands still nothing on the router says so."""
+        d = rt.status.get("daemon")
+        if not isinstance(d, dict):          # an agent before 0.22.1
+            return
+        beat = d.get("beat")
+        stuck = (beat is None or beat > STUCK_SECONDS) and (rt.status.get("uptime") or 0) > STUCK_SECONDS
+        if stuck and not rt.stuck_told:
+            rt.stuck_told = True
+            self._event(rt, "agent_stuck", {"seconds": beat})
+        elif not stuck and rt.stuck_told:
+            rt.stuck_told = False
+            if (rt.alert or {}).get("type") == "agent_stuck":
+                rt.alert = None
+            self._event(rt, "agent_ok", {})
 
     def _clear_heal_alert(self, rt: RouterRuntime) -> None:
         """A "group down" alert goes once the router has no group down (its

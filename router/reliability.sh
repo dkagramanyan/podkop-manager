@@ -762,12 +762,16 @@ heal_test() {
     .outbounds[]? | select(.type == "urltest" and (.tag | endswith("-urltest-out")))
     | select(.tag[:-12] as $s | ($watch | index($s)) or (($off | index("*") or ($off | index($s))) | not))
     | [.tag, ($p[0].proxies[.tag].now // ""), (.url // "https://www.gstatic.com/generate_204")] | @tsv' "$1" > "$_ht/groups"
+  _hj=""
   while IFS="$TAB" read -r _hg _hn _hu; do
     case "$_hn" in ""|*[!A-Za-z0-9_-]*) echo "$_hg" > "$_ht/$_hg.failed"; continue ;; esac
     ( clash_get "/proxies/$_hn/delay" --data-urlencode "url=$_hu" --data "timeout=$HEAL_TIMEOUT" > "$_ht/$_hg.now"
       jq -e '(.delay // 0) > 0' "$_ht/$_hg.now" >/dev/null 2>&1 || echo "$_hg" > "$_ht/$_hg.failed" ) &
+    _hj="$_hj $!"
   done < "$_ht/groups"
-  wait
+  # these tests only: a bare "wait" would also wait for the daemon's service
+  # watcher, which never ends (the daemon stood still at its first check)
+  for _hp in $_hj; do wait "$_hp"; done
   proxies > "$2.t" 2>/dev/null && jq -e .proxies "$2.t" >/dev/null 2>&1 && mv "$2.t" "$2"
   jq -r --slurpfile p "$2" --slurpfile st "$RUN/heal/state.json" '
     def alive($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0)) > 0;

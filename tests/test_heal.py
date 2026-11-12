@@ -738,3 +738,11 @@ def test_cached_settings_and_database_copy(tmp_path):
         pass
     db.copy_to(tmp_path / "copy.db")
     assert DB(tmp_path / "copy.db").q("SELECT line FROM logs") == [{"line": "a line"}]
+
+
+def test_the_tests_do_not_wait_for_the_daemons_watcher(tmp_path):
+    """The daemon keeps a background child for good (its service watcher): a
+    bare "wait" in the round stood still at the first check, on every router."""
+    r = Router(tmp_path)
+    r.alive(["main-1-out"])
+    r.sh("sleep 600 & _bg=$!; heal_check; kill $_bg")       # Router.sh gives it 30 s
