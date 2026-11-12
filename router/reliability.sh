@@ -487,7 +487,11 @@ guard_build_locked() {
   _gk=$(printf '%s%s%s%s' "$(printf '%s' "$_gc" | jq -cS "${FP_JQ:-.}" 2>/dev/null)" "$_gs" "$(cat "$RUN/guard/resolved" 2>/dev/null)" \
     "$(cat "$RUN/guard/lists.rev" 2>/dev/null)" | md5sum | cut -c 1-32)
   guard_resolve_start
-  if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ]; then guard_lists_start; return 0; fi
+  if [ "$(cat "$RUN/guard/key" 2>/dev/null)" = "$_gk" ] && [ -s "$RUN/guard/nft.conf" ]; then
+    # (a kill switch switched off and on again: the copy for the next boot went with it)
+    [ -s "$ETC/guard.nft" ] || guard_boot_save "$_gc" "$_gs"
+    guard_lists_start; return 0
+  fi
   _srs=$(. "$PODKOP_LIB/constants.sh" 2>/dev/null; printf '%s' "${SRS_MAIN_URL:-https://github.com/itdoginfo/allow-domains/releases/latest/download}")
   : > "$RUN/guard/domains.t"; : > "$RUN/guard/subnets.t"; : > "$RUN/guard/own.t"; : > "$RUN/guard/want.t"
   printf '%s' "$_gc" | jq -r --argjson strict "$_gs" "$GUARD_LISTS_JQ" 2>/dev/null | while IFS= read -r _gl; do

@@ -804,3 +804,7 @@ uci() { [ -f "$D/offload" ] && echo 1; }
     (etc / "strict").unlink()
     sh("guard_sync")
     assert not (etc / "guard.nft").exists() and not (etc / "guard.key").exists() and not (tmp_path / "nft-table").exists()
+    # switched on again with nothing else changed: the copy is back
+    (etc / "strict").write_text("main\n")
+    sh("guard_sync")
+    assert (etc / "guard.nft").exists() and (tmp_path / "nft-table").exists()
