@@ -79,8 +79,10 @@ reliability_filter() {
      [ "$(jq -r .fingerprint "$RUN/eligibility.json")" = "$(config_fp)" ]; then
     _rf=$(jq -c .banned "$RUN/eligibility.json")
   fi
-  jq --argjson banned "$_rf" '
-    (.outbounds[] | select(.type == "urltest")) |= (
+  # (a protected rule keeps all its servers)
+  _rp='[]'; [ ! -s "$ETC/protected" ] || _rp=$(jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/protected")
+  jq --argjson banned "$_rf" --argjson prot "$_rp" '
+    (.outbounds[] | select(.type == "urltest" and (.tag as $t | any($prot[]; . as $s | $t | startswith($s + "-")) | not))) |= (
       .outbounds as $original | (.fallbacks // []) as $fallback
       | .outbounds |= map(select(. as $t | $banned | index($t) | not))
       | .fallbacks = ($fallback | map(select(. as $t | $banned | index($t) | not)))
@@ -280,8 +282,9 @@ HEAL_MIN_HOLD=300    # s a group keeps its borrowed servers at least (no reload 
 HEAL_TIMEOUT=5000    # ms for a test request through a server
 HEAL_SILENT=4        # checks in a row without an answer of sing-box's API before podkop is restarted
 
+# (protected rules are off as well: nothing is borrowed into them)
 heal_off_json() {
-  if [ -s "$ETC/heal-off" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/heal-off"; else echo '[]'; fi
+  cat "$ETC/heal-off" "$ETC/protected" 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != "")) | unique'
 }
 
 # --- strict rules -----------------------------------------------------------------

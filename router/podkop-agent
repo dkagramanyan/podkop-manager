@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.23.0"
+AGENT_VERSION="0.24.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -456,25 +456,28 @@ hot_apply() {
   if ! podkop_build "$_hb" || [ -s "$_hb.err" ] || ! jq -e '.outbounds' "$_hb" >/dev/null 2>&1; then
     echo "podkop could not build the config: $(head -n 1 "$_hb.err" 2>/dev/null)"; rm -f "$_hb" "$_hb.err"; return 1
   fi
+  cp "$_hb" "$_hb.base"            # podkop's own build, for protect_ok
   if command -v heal_filter >/dev/null 2>&1; then
     if ! { heal_filter "$_hb" "$_hb.s" && mv "$_hb.s" "$_hb"; }; then
-      rm -f "$_hb" "$_hb.s" "$_hb.err"; echo "invalid self-heal state"; return 1
+      rm -f "$_hb" "$_hb.s" "$_hb.base" "$_hb.err"; echo "invalid self-heal state"; return 1
     fi
   fi
   if ! { jq "$HEALTH_JQ" "$_hb" > "$_hb.i" && mv "$_hb.i" "$_hb"; }; then
-    rm -f "$_hb" "$_hb.i" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
+    rm -f "$_hb" "$_hb.i" "$_hb.base" "$_hb.err"; echo "could not add gRPC pings and connection preservation"; return 1
   fi
   if [ -s "$VPN_DIR/allow" ]; then
     if ! { vpn_filter "$_hb" "$_hb.v" && mv "$_hb.v" "$_hb" && sing-box check -c "$_hb" >/dev/null 2>&1; }; then
-      rm -f "$_hb" "$_hb.v" "$_hb.err"; echo "invalid devices of VPN rules"; return 1
+      rm -f "$_hb" "$_hb.v" "$_hb.base" "$_hb.err"; echo "invalid devices of VPN rules"; return 1
     fi
   fi
   if command -v reliability_filter >/dev/null 2>&1; then
     if ! { reliability_filter "$_hb" "$_hb.r" && mv "$_hb.r" "$_hb"; }; then
-      rm -f "$_hb" "$_hb.r"; echo "invalid eligibility policy"; return 1
+      rm -f "$_hb" "$_hb.r" "$_hb.base"; echo "invalid eligibility policy"; return 1
     fi
-    sing-box check -c "$_hb" >/dev/null 2>&1 || { rm -f "$_hb"; echo "invalid filtered config"; return 1; }
+    sing-box check -c "$_hb" >/dev/null 2>&1 || { rm -f "$_hb" "$_hb.base"; echo "invalid filtered config"; return 1; }
   fi
+  if ! protect_ok "$_hb.base" "$_hb"; then rm -f "$_hb" "$_hb.base" "$_hb.err"; echo "the change would alter a protected rule"; return 1; fi
+  rm -f "$_hb.base"
   logger -t podkop-agent "$1"
   if ! cmp -s "$_hb" "$_cp"; then
     if ! { cp "$_hb" "$_cp.agent-new" && mv "$_cp.agent-new" "$_cp"; }; then
@@ -540,7 +543,7 @@ health_on() {
     reliability_filter "$RUN/health.json" "$RUN/health.filtered" && mv "$RUN/health.filtered" "$RUN/health.json" || return 0
   fi
   if [ "$(jq -c . "$RUN/health.json")" = "$(jq -c . "$_ic")" ]; then rm -f "$RUN/health.json"; return 0; fi
-  if ! { sing-box check -c "$RUN/health.json" >/dev/null 2>&1 &&
+  if ! { protect_ok "$_ic" "$RUN/health.json" && sing-box check -c "$RUN/health.json" >/dev/null 2>&1 &&
          cp "$RUN/health.json" "$_ic.agent-new" && mv "$_ic.agent-new" "$_ic"; }; then
     rm -f "$RUN/health.json" "$_ic.agent-new"; echo "$_ip" > "$RUN/health.failed"
     logger -t podkop-agent "could not add gRPC pings and connection preservation to sing-box's config"
@@ -768,6 +771,110 @@ undo_interrupted() {
   exec 9>&-
 }
 
+# --- safe mode and protected rules ---------------------------------------------------
+#
+# Safe mode ($ETC/safe-mode: "<time><TAB><reason>"): the router runs plain
+# podkop. The daemon idles, and nothing here restarts podkop, reloads
+# sing-box or changes its config; reading, logs, an agent update and podkop's
+# own start and stop still work. podkop-sentinel (a script of its own, see
+# install.sh) switches it on when a protected rule stops working and plain
+# podkop makes it work again; "safe-mode on|off" does it by hand.
+#
+# Protected rules ($ETC/protected, one section per line): the agent never
+# changes how they work at run time. They are not healed (no borrowed
+# servers), none of their servers is kept out of its group, and a sing-box
+# config in which their outbounds or their routing differ from what podkop
+# built is not written (protect_ok), whatever asked for it.
+safe_mode() { [ -f "$ETC/safe-mode" ]; }
+safe_json() {
+  if safe_mode; then
+    IFS="$TAB" read -r _sm_t _sm_r < "$ETC/safe-mode"
+    jq -nc --arg t "$_sm_t" --arg r "$_sm_r" --arg trial "$([ -f /tmp/podkop-sentinel/trial ] && echo 1)" \
+      '{on: true, since: ($t | tonumber? // null), reason: $r, trial: ($trial == "1")}'
+  else echo '{"on":false}'; fi
+}
+sentinel_json() {
+  jq -nc --arg v "$([ -x /usr/bin/podkop-sentinel ] && /usr/bin/podkop-sentinel version 2>/dev/null)" \
+    --arg run "$(ubus call service list '{"name":"podkop-sentinel"}' 2>/dev/null | jq -r '[.["podkop-sentinel"].instances[]? | select(.running)] | length')" \
+    '{version: ($v | tonumber? // null), running: (($run | tonumber? // 0) > 0)}'
+}
+protected_json() {
+  if [ -s "$ETC/protected" ]; then jq -Rsc 'split("\n") | map(select(. != ""))' "$ETC/protected"; else echo '[]'; fi
+}
+
+# protect_ok <podkop's build> <the config to write>: for every protected
+# section the outbounds named after it and the route rules that send to it
+# are the same in both (but for the two options of "dead servers" below),
+# and so are the final route and DNS. A kill switch's refusing member and a
+# VPN rule's device list are additions of ours that leave the rule as it is.
+PROTECT_JQ='
+def norm: del(.interrupt_exist_connections)
+  | if (.transport.type? // "") == "grpc" then .transport |= del(.idle_timeout, .ping_timeout) else . end
+  | if .type == "selector" then .outbounds |= map(select(endswith("-strict-out") | not)) else . end;
+def view($c): {
+  outbounds: [$c.outbounds[]? | select(.tag as $t | ($t | endswith("-strict-out") | not)
+                 and any($prot[]; . as $s | $t | startswith($s + "-"))) | norm] | sort_by(.tag),
+  rules: [$c.route.rules[]? | select((.outbound // "") as $o | any($prot[]; . + "-out" == $o)) | del(.source_ip_cidr)],
+  final: ($c.route.final // null), dns: ($c.dns // null)};
+view($a[0]) == view($b[0])'
+protect_ok() {
+  [ -s "$ETC/protected" ] || return 0
+  jq -ne --slurpfile a "$1" --slurpfile b "$2" --argjson prot "$(protected_json)" "$PROTECT_JQ" >/dev/null 2>&1 && return 0
+  logger -t podkop-agent "protected rules: a config that changes them was not written"
+  event protect_refused "$(jq -nc --argjson p "$(protected_json)" '{sections: $p}')"
+  return 1
+}
+
+# safe-mode [on|off]: -> {on, since, reason, trial}
+cmd_safe_mode() {
+  case "${1:-}" in
+    "") ;;
+    on)
+      [ -x /usr/bin/podkop-sentinel ] || fail unsupported "podkop-sentinel is not installed (update the agent)"
+      safe_mode || { flock -n "$RUN/apply.lock" true || fail busy "an apply or a recovery is running"
+        env -u SSH_ORIGINAL_COMMAND -u SSH_CONNECTION -u SSH_CLIENT setsid /usr/bin/podkop-sentinel enter "switched on in podkop-manager" </dev/null >/dev/null 2>&1 &
+        _i=0; while ! safe_mode && [ "$_i" -lt 10 ]; do sleep 1; _i=$((_i + 1)); done; } ;;
+    off)
+      if safe_mode; then
+        [ -x /usr/bin/podkop-sentinel ] || fail unsupported "podkop-sentinel is not installed (update the agent)"
+        env -u SSH_ORIGINAL_COMMAND -u SSH_CONNECTION -u SSH_CLIENT setsid /usr/bin/podkop-sentinel leave "switched off in podkop-manager" </dev/null >/dev/null 2>&1 &
+        _i=0; while safe_mode && [ "$_i" -lt 10 ]; do sleep 1; _i=$((_i + 1)); done
+      fi ;;
+    *) fail bad_request "usage: safe-mode [on|off]" ;;
+  esac
+  reply "$(safe_json)"
+}
+
+# protect: stdin {"sections": [names]} -> {protected: [...]}; sing-box reloads
+# in place when the set changes (borrowed servers leave a rule protected now)
+cmd_protect() {
+  _pr=$(head -c 65536)
+  printf '%s' "$_pr" | jq -e '(.sections | type == "array" and length <= 100)
+    and all(.sections[]; type == "string" and length > 0 and (explode | all(. == 95
+      or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"sections": [section names]}'
+  printf '%s' "$_pr" | jq -r '.sections | unique | .[]' > "$RUN/protected.t"
+  _changed=1
+  if [ -s "$RUN/protected.t" ]; then
+    if cmp -s "$RUN/protected.t" "$ETC/protected" 2>/dev/null; then _changed=0
+    else { cp "$RUN/protected.t" "$ETC/protected.t" && mv "$ETC/protected.t" "$ETC/protected"; } ||
+      { rm -f "$RUN/protected.t"; fail error "could not write $ETC/protected"; }; fi
+  else
+    [ -f "$ETC/protected" ] || _changed=0
+    rm -f "$ETC/protected"
+  fi
+  rm -f "$RUN/protected.t"
+  if [ "$_changed" = 1 ]; then
+    event protected "$(jq -nc --argjson s "$(protected_json)" '{sections: $s}')"
+    if [ -n "$(singbox_pid)" ] && ! safe_mode; then
+      exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+      _pw=$(hot_apply "protected rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_pw"; }
+      exec 9>&-
+    fi
+  fi
+  reply "$(jq -nc --argjson p "$(protected_json)" '{protected: $p}')"
+}
+
 # --- watchdog -------------------------------------------------------------------
 
 # recover: podkop is enabled but sing-box is gone (failsafe, crash, reboot);
@@ -915,6 +1022,8 @@ daemon() {
     _w=0
     while [ "$_w" -lt 15 ] && [ ! -f "$RUN/guard/poke" ]; do sleep 1; _w=$((_w + 1)); done
     rm -f "$RUN/guard/poke"
+    # safe mode: plain podkop, the daemon only shows that it is alive
+    if safe_mode; then _last=""; _down=0; continue; fi
     if command -v guard_sync >/dev/null 2>&1; then
       # not while an apply or a recovery restarts podkop: they raise it themselves
       flock -n "$RUN/apply.lock" true && guard_sync
@@ -1397,6 +1506,7 @@ cmd_status() {
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" \
+    --argjson safe "$(safe_json)" --argjson prot "$(protected_json)" --argjson sent "$(sentinel_json)" \
     --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
@@ -1405,7 +1515,7 @@ cmd_status() {
       singbox: {version: $fixed.singbox, features: $fixed.features},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
       engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6,
-      daemon: {beat: ($beat | tonumber? // null)},
+      daemon: {beat: ($beat | tonumber? // null)}, safe_mode: $safe, protected: $prot, sentinel: $sent,
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')
   rm -f "$RUN/status.$$.px"
   reply "$_sr"
@@ -1910,6 +2020,10 @@ if [ -n "${SSH_CONNECTION:-}" ]; then
 fi
 
 _cmd=${1:-help}; [ $# -gt 0 ] && shift
+# safe mode: nothing that restarts podkop, reloads sing-box or changes its config
+case "$_cmd" in apply|pin|eligibility|heal-links|probe-start|strict)
+  ! safe_mode || fail safe_mode "safe mode: the router runs plain podkop; leave safe mode first" ;;
+esac
 case "$_cmd" in
   diagnostics)   command -v cmd_diagnostics >/dev/null || fail unsupported "reinstall agent for diagnostics"; cmd_diagnostics ;;
   eligibility)   command -v cmd_eligibility >/dev/null || fail unsupported "reinstall agent for eligibility"; cmd_eligibility ;;
@@ -1921,6 +2035,8 @@ case "$_cmd" in
   ipv6)          cmd_ipv6 "$@" ;;
   vpn)           cmd_vpn "$@" ;;
   upgrade)       cmd_upgrade ;;
+  safe-mode)     cmd_safe_mode "$@" ;;
+  protect)       cmd_protect ;;
   status)        cmd_status ;;
   config-get)    cmd_config_get ;;
   validate)      cmd_validate ;;
@@ -1948,17 +2064,18 @@ case "$_cmd" in
     reply '{"uninstalling":true}' ;;
   version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" --argjson caps "$(capabilities)" \
                    '{version: $v, protocol: $p, capabilities: $caps}')" ;;
-  daemon|_run-apply|_run-probe|_run-upgrade|_run-vpn-install)
+  daemon|_event|_run-apply|_run-probe|_run-upgrade|_run-vpn-install)
     [ "$REMOTE" = 0 ] || fail forbidden "$_cmd can't be run over SSH"
     case "$_cmd" in
       daemon) daemon ;;
+      _event) event "${1:-}" "${2:-}" ;;        # podkop-sentinel's
       _run-vpn-install) run_vpn_install "$1" ;;
       _run-apply) run_apply "$1" ;;
       _run-probe) run_probe ;;
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict resolve ipv6 vpn upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict protect safe-mode resolve ipv6 vpn upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

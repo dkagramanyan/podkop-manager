@@ -3,6 +3,36 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.50.0 — 2026-11-12
+
+A rule that keeps working when the agent does not: protected rules, safe
+mode, podkop-sentinel (manager 0.38.0, agent 0.24.0).
+
+- **Protected** (a switch on a rule, e.g. main): podkop-agent leaves the
+  rule exactly as podkop builds it. Nothing is borrowed into it, none of
+  its servers is kept out, and a sing-box config in which its servers, its
+  routing, the final route or DNS differ from podkop's own build is not
+  written, whatever part of the agent asked for it.
+- **podkop-sentinel**: a small watcher of its own on the router, apart from
+  the agent (an agent update replaces it only when its text changes). It
+  restarts an agent daemon that gives no sign of life for 10 minutes (at
+  most 3 times an hour). When a protected rule does not answer for 5 checks
+  in a row while the provider's line is up, it tries **safe mode**.
+- **Safe mode**: the router runs plain podkop. What the agent added at run
+  time is taken out, podkop is restarted once, the agent's daemon idles
+  and refuses applies, pins and probes; reading, logs, podkop's start and
+  stop and an agent update still work. Safe mode entered by the sentinel
+  stays only if the protected rules work with it within 6 minutes;
+  otherwise the agent is back and the next try comes 6 hours later.
+  Overview shows it with a "Leave safe mode" button; an alert and a
+  notification are sent. While it is on, a kill switch does not close on
+  dead servers and its DNS block is not raised (its firewall table stays).
+- **An agent update is watched**: the installer waits 90 s after the
+  restart; a daemon that stopped giving its sign of life, or a sing-box
+  that stopped, puts the old files back.
+- The update dialog says whether another router has run this agent version
+  for a day without trouble.
+
 ## 1.49.0 — 2026-11-12
 
 Less load on the router (manager 0.37.0, agent 0.23.0). Measured on a

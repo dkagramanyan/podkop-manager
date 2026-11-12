@@ -41,6 +41,12 @@ TEXT = {
     "probe_not_started": lambda d: f"the nightly probe did not start: {d.get('message') or ''}",
     "probe_apply_failed": lambda d: f"the probe's servers were not applied: {d.get('message') or ''}",
     "heal_probe_failed": lambda d: f"the self-heal probe failed: {d.get('message') or ''}",
+    "safe_mode": lambda d: f"safe mode: plain podkop without the agent's additions ({d.get('reason') or ''})"
+                           + (", kept only if it helps" if d.get("trial") else ""),
+    "safe_mode_confirmed": lambda d: "safe mode stays: the protected rules work with plain podkop; look at the agent before leaving it",
+    "safe_mode_off": lambda d: f"safe mode off: {d.get('reason') or ''}",
+    "protect_refused": lambda d: f"a change of a protected rule ({', '.join(d.get('sections') or [])}) by the agent was refused",
+    "sentinel_restart": lambda d: "podkop-agent's daemon stood still and was restarted by podkop-sentinel",
     "agent_stuck": lambda d: "podkop-agent's watchdog on the router stands still (no restart of podkop, no kill switch updates); "
                              "restart it: /etc/init.d/podkop-agent restart",
     "agent_ok": lambda d: "podkop-agent's watchdog runs again",

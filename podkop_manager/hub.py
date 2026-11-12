@@ -13,6 +13,7 @@ import hashlib
 import io
 import os
 import platform
+import re
 import shutil
 import tarfile
 import time
@@ -29,7 +30,7 @@ FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "fa
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
-                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck")
+                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
@@ -282,6 +283,28 @@ class Hub:
         rt.checked = time.time()
         self.publish({"type": "router", "router": rt.snapshot()})
 
+    def agent_tried(self, rid: int) -> dict:
+        """Before a router gets this manager's agent: has another router run
+        that version, and for how long without trouble? -> {version, routers:
+        [{name, hours, trouble}]} (a new agent is best tried on a spare router
+        first: a bad one stops podkop for everyone behind this one)."""
+        m = re.search(r'^AGENT_VERSION="([^"]+)"', (self.src / "router" / "podkop-agent").read_text(), re.M)
+        version = m.group(1) if m else ""
+        out = []
+        for other in self.routers.values():
+            if other.id == rid or ((other.status or {}).get("agent") or {}).get("version") != version:
+                continue
+            since, trouble = None, False
+            for e in self.db.events(other.id, 500):          # newest first
+                if e["type"] == "agent_started" and (e["data"] or {}).get("version") == version:
+                    since = e["t"]
+                    break
+                if e["type"] in ("agent_stuck", "recovery_failed", "recovery_gave_up", "safe_mode", "sentinel_restart"):
+                    trouble = True
+            out.append({"name": other.row["name"], "hours": round((time.time() - since) / 3600, 1) if since else None,
+                        "trouble": trouble})
+        return {"version": version, "routers": out}
+
     def _check_daemon(self, rt: RouterRuntime) -> None:
         """The agent's daemon is the router's watchdog, self-heal and kill
         switch; when it stands still nothing on the router says so."""
@@ -407,6 +430,8 @@ class Hub:
         elif typ == "group_recovered" and (rt.alert or {}).get("type") == "group_down":
             rt.alert = None
         elif typ == "vpn_up" and (rt.alert or {}).get("type") == "vpn_down":
+            rt.alert = None
+        elif typ == "safe_mode_off" and (rt.alert or {}).get("type") == "safe_mode":
             rt.alert = None
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])
