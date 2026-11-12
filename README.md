@@ -137,6 +137,10 @@ that already runs there are taken into **Keys and usage** and the rules.
   are blocked at all times, which also catches a device with its own DNS.
   It works with self-heal off too: the rule's servers (or those of the rule
   it sends through) are still watched, only nothing is borrowed.
+  After a reboot the block list is in place before the firewall starts
+  (a copy kept on the router, agent 0.25), so nothing goes out direct in
+  the minute before podkop is up; Connection health shows how many packets
+  it refused, and a table that something changed is put back.
 - **Protected** (a switch on a rule, agent 0.24): podkop-agent leaves the
   rule exactly as podkop builds it (nothing borrowed into it, none of its
   servers kept out; a sing-box config that changes it is not written).
