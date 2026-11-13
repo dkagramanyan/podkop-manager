@@ -278,6 +278,7 @@ guard_init_install() {
 # clock_hook_install: NTP's hotplug event leaves a mark in RAM once the clock
 # is set; the agent and the sentinel judge no server before that
 clock_hook_install() {
+  # shellcheck disable=SC2016
   printf '%s\n' '#!/bin/sh' "# podkop-agent: NTP has set the clock (written by podkop-agent's install.sh)" \
     '[ "$ACTION" = unsync ] || : > /tmp/podkop-clock' > "$TMP/clock-hook"
   mkdir -p /etc/hotplug.d/ntp && put "$TMP/clock-hook" /etc/hotplug.d/ntp/90-podkop-agent

@@ -46,7 +46,7 @@ class Box:
         self.tmp = tmp
         (tmp / "wan").write_text("")
         self.up("main")
-        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", PODKOP_SENTINEL_BOOT="0",
+        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", PODKOP_SENTINEL_BOOT="0", PODKOP_SENTINEL_CLOCK="0",
                         PODKOP_SENTINEL_SETTLE="0", PODKOP_SENTINEL_TRIAL="0", PODKOP_SENTINEL_RETRY="0")
 
     @staticmethod
