@@ -281,6 +281,8 @@ HEAL_RECOVER=4       # checks in a row with an answering server before it is up 
 HEAL_MIN_HOLD=300    # s a group keeps its borrowed servers at least (no reload churn)
 HEAL_TIMEOUT=5000    # ms for a test request through a server
 HEAL_SILENT=4        # checks in a row without an answer of sing-box's API before podkop is restarted
+HEAL_STUCK=4         # checks in a row a group keeps a dead server while another answers before sing-box is asked to test it;
+                     # after twice as many podkop is restarted
 
 # (protected rules are off as well: nothing is borrowed into them)
 heal_off_json() {
@@ -913,6 +915,40 @@ heal_slim() {
   return 1
 }
 
+# heal_stuck <groups> <proxies>: a group that keeps a server that does not
+# answer while another of its servers does. sing-box picks again only after
+# a test round of the group, and a round that never ends (a known sing-box
+# fault) keeps the dead choice for hours. After HEAL_STUCK rounds sing-box is
+# asked to test the group; if the choice is still the dead server HEAL_STUCK
+# rounds later, podkop is restarted, once -> 1 when it was restarted
+heal_stuck() {
+  jq -r --slurpfile p "$2" '
+    def delay($t): ((($p[0].proxies[$t].history) // []) | last | (.delay // 0));
+    .outbounds[]? | select(.type == "urltest" and (.tag | endswith("-urltest-out"))) | .tag as $g
+    | ($p[0].proxies[$g].now // "") as $n
+    | select($n != "" and delay($n) == 0 and any(((.outbounds // []) + (.fallbacks // []))[]; delay(.) > 0))
+    | [$g, $n, (.url // "")] | @tsv' "$1" > "$RUN/heal/stuck.now" 2>/dev/null
+  if [ ! -s "$RUN/heal/stuck.now" ]; then rm -f "$RUN/heal/stuck" "$RUN/heal/stuck.now"; return 0; fi
+  _sr=""; : > "$RUN/heal/stuck.t"
+  while IFS="$TAB" read -r _sg _sn _su; do
+    case "$_sg" in ""|*[!A-Za-z0-9_-]*) continue ;; esac
+    _sc=$(awk -F "$TAB" -v g="$_sg" '$1 == g { print $2 }' "$RUN/heal/stuck" 2>/dev/null)
+    _sc=$(( ${_sc:-0} + 1 ))
+    if [ "$_sc" = "$HEAL_STUCK" ]; then
+      clash_get "/group/$_sg/delay" --data-urlencode "url=${_su:-https://www.gstatic.com/generate_204}" \
+        --data "timeout=$HEAL_TIMEOUT" >/dev/null 2>&1
+    elif [ "$_sc" = "$((HEAL_STUCK * 2))" ]; then
+      event group_stuck "$(jq -nc --arg s "${_sg%-urltest-out}" --arg n "$_sn" '{section: $s, server: $n}')"
+      _sr=1
+    fi
+    printf '%s\t%s\n' "$_sg" "$_sc" >> "$RUN/heal/stuck.t"
+  done < "$RUN/heal/stuck.now"
+  mv "$RUN/heal/stuck.t" "$RUN/heal/stuck"; rm -f "$RUN/heal/stuck.now"
+  [ -n "$_sr" ] || return 0
+  if command -v recover >/dev/null 2>&1; then recover; fi
+  return 1
+}
+
 # heal_check: one round (the daemon runs it every 30 s)
 heal_check() {
   mkdir -p "$RUN/heal"
@@ -938,6 +974,7 @@ heal_check() {
   # them, not from sing-box's whole config (hundreds of kB with many servers)
   heal_slim "$_hc" && _hc="$RUN/heal/slim.json"
   heal_test "$_hc" "$RUN/heal/proxies.json"
+  heal_stuck "$_hc" "$RUN/heal/proxies.json" || return 0
   # the state is read and written under the apply lock: "heal-links" of the
   # manager changes it too, and a write of a plan made before would drop
   # the servers it lent

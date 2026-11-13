@@ -46,7 +46,7 @@ class Box:
         self.tmp = tmp
         (tmp / "wan").write_text("")
         self.up("main")
-        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", PODKOP_SENTINEL_BOOT="0",
+        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", PODKOP_SENTINEL_BOOT="0", PODKOP_SENTINEL_CLOCK="0",
                         PODKOP_SENTINEL_SETTLE="0", PODKOP_SENTINEL_TRIAL="0", PODKOP_SENTINEL_RETRY="0")
 
     @staticmethod
@@ -102,6 +102,20 @@ def test_nothing_is_judged_while_podkop_is_off_or_an_apply_runs(box):
     for _ in range(7):
         box.run()
     assert box.calls() == [] and not box.mark.exists()
+
+
+def test_nothing_is_judged_before_ntp_has_set_the_clock(box, tmp_path):
+    box.beat()
+    box.protect("main")
+    box.up()
+    mark = tmp_path / "clock"
+    for _ in range(7):                                        # after a power cut: TLS fails until the clock is right
+        box.run(PODKOP_CLOCK_MARK=str(mark), PODKOP_SENTINEL_CLOCK="999999999")
+    assert box.calls() == [] and not box.mark.exists()
+    mark.write_text("")
+    for _ in range(5):
+        box.run(PODKOP_CLOCK_MARK=str(mark), PODKOP_SENTINEL_CLOCK="999999999")
+    assert box.mark.exists()
 
 
 def test_safe_mode_when_a_protected_rule_fails_and_plain_podkop_helps(box):

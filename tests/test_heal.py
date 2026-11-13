@@ -297,6 +297,37 @@ def test_kill_switch_refused_while_the_router_is_busy_saves_nothing(tmp_path):
     assert (tmp_path / "applies").read_text().splitlines() == ["strict rules changed"]
 
 
+def test_a_group_that_keeps_a_dead_server_is_tested_then_podkop_is_restarted_once(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/pins").write_text("")
+    stub = 'recover() { echo restart >> "$D/recovered"; }\n'
+    r.alive(["main-2-out", "youtube-1-out", "youtube-2-out", "anthropic_am-1-out"])
+    px = json.loads((tmp_path / "proxies.json").read_text())
+    px["proxies"]["main-urltest-out"] = {"now": "main-1-out"}            # the choice is the dead one
+    px["proxies"]["youtube-urltest-out"] = {"now": "youtube-1-out"}
+    (tmp_path / "proxies.json").write_text(json.dumps(px))
+    for i in range(3):
+        r.now(1000 + 30 * i); r.sh(stub + "heal_check")
+    asked = lambda: "/group/" in (tmp_path / "tests").read_text() if (tmp_path / "tests").exists() else False  # noqa: E731
+    assert not asked() and (tmp_path / "run/heal/stuck").read_text() == "main-urltest-out\t3\n"
+    r.now(1090); r.sh(stub + "heal_check")                               # 4th round: sing-box is asked to test the group
+    assert "/group/main-urltest-out/delay" in (tmp_path / "tests").read_text()
+    for i in range(3):
+        r.now(1120 + 30 * i); r.sh(stub + "heal_check")
+    assert not (tmp_path / "recovered").exists()
+    r.now(1210); r.sh(stub + "heal_check")                               # 8th: still the dead server
+    assert (tmp_path / "recovered").read_text() == "restart\n"
+    assert r.events()[-1] == ("group_stuck", {"section": "main", "server": "main-1-out"})
+    for i in range(4):
+        r.now(1240 + 30 * i); r.sh(stub + "heal_check")
+    assert (tmp_path / "recovered").read_text() == "restart\n"          # once
+    px["proxies"]["main-urltest-out"] = {"now": "main-2-out"}            # it moved: the count starts again
+    (tmp_path / "proxies.json").write_text(json.dumps(px))
+    r.now(1400); r.sh(stub + "heal_check")
+    assert not (tmp_path / "run/heal/stuck").exists()
+
+
 GUARD_STUBS = '''
 PODKOP_LIB="$D/nolib"
 config_json() { cat "$D/podkop.json"; }

@@ -179,6 +179,8 @@ export const EVENT_TEXT = {
   safe_mode_off: (d) => `Safe mode off: ${d.reason || ""}`,
   protected: (d) => ((d.sections || []).length ? `Protected: ${d.sections.join(", ")}` : "No rule is protected"),
   protect_refused: (d) => `A change of a protected rule (${(d.sections || []).join(", ")}) by the agent was refused`,
+  group_stuck: (d) => `${d.section}: sing-box kept ${serverName(d.section, d.server)}, which does not answer, although another server did; podkop was restarted`,
+  dns_guard: (d) => (d.on ? "Devices' own DNS is closed: plain DNS goes to the router, DNS over TLS and the known DNS over HTTPS resolvers are refused" : "Devices may use their own DNS again"),
   sentinel_restart: () => "podkop-agent's daemon stood still and was restarted by podkop-sentinel",
   agent_stuck: () => "podkop-agent's watchdog on the router stands still: no restart of podkop, no self-heal, no kill switch updates (restart it: /etc/init.d/podkop-agent restart)",
   agent_ok: () => "podkop-agent's watchdog runs again",
@@ -209,7 +211,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", agent_stuck: "bad", agent_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",

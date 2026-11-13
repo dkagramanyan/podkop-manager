@@ -3,6 +3,46 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.52.0 — 2026-11-13
+
+A rule stuck on a dead server, devices with their own DNS, the clock after
+a power cut, and a watch over the manager itself (manager 0.40.0, agent
+0.26.0).
+
+- **A rule that keeps a dead server**: sing-box picks a server again only
+  after a test round of the group, and a round that never ends (a known
+  sing-box fault, podkop issue 428) keeps the dead choice for hours while a
+  working server is there. When a group's choice does not answer and another
+  of its servers does for 2 minutes, the agent asks sing-box to test the
+  group; if the choice is still the dead server 2 minutes later, podkop is
+  restarted, once, with an alert (at most 3 restarts an hour, as before).
+- **Devices' own DNS** (Connection health, off by default): a rule by domain
+  works through the router's DNS, and a device that asks another DNS server
+  reaches the site directly, past the rule and its kill switch. The option
+  writes three firewall sections: plain DNS from the LAN is answered by the
+  router, DNS over TLS is refused, DNS over HTTPS to the well-known public
+  resolvers is refused. IPv4, the lan zone; a resolver that is not in the
+  list still gets through, and a phone with a fixed Private DNS name loses
+  its internet until that is put back to automatic.
+- **The clock after a power cut**: a router has no battery clock, and until
+  NTP answers TLS to the servers fails and every rule looks dead. The agent
+  and podkop-sentinel judge no server before NTP has set the clock (a small
+  hotplug script leaves a mark in RAM), or 15 minutes after the boot where
+  there is no NTP. The overview warns when the router's clock is more than 5
+  minutes off this server's.
+- **The manager watches itself**: a hung manager sent no alerts and nothing
+  noticed. A stalled event loop now ends the process after 3 minutes and
+  Docker starts it again (`PODKOP_MANAGER_WATCHDOG=0` switches that off);
+  after a start a notification says for how long the manager was not
+  running; `PODKOP_MANAGER_HEARTBEAT_URL` is requested every minute, for an
+  uptime monitor that raises the alarm when the requests stop (the only one
+  of the three that covers a server that is off).
+
+Looked at in NetShift and vpnpool and left out: a QUIC block (not wanted);
+leaving a pinned server that is dead (a pin is the user's choice here); a
+support report with secrets removed, a "where does this request go" check
+and per-server unlock tests (features of their own, not reliability).
+
 ## 1.51.0 — 2026-11-12
 
 Kill switch: the first minute after a boot, and proof that it blocks

@@ -49,6 +49,9 @@ class FakeHub:
     def local_probe_missing(self):
         return "sing-box not found"
 
+    async def refresh(self, rt):
+        pass
+
     async def config(self, rid):
         return {"fingerprint": "fp1", "config": {"sections": [
             {"name": "settings", "type": "settings", "options": {"shutdown_correctly": "1"}},

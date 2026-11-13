@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.25.0"
+AGENT_VERSION="0.26.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn","safe"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe","dns"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -1011,6 +1011,13 @@ tidy() {
     -exec rm -rf {} + 2>/dev/null
 }
 
+# clock_ok: NTP has set the clock since the boot (install.sh's hotplug script
+# leaves the mark), or the router has been up for 15 minutes (no NTP here).
+# A router has no battery clock: after a power cut it starts with an old
+# date, TLS to the servers fails until NTP answers, and every group looks dead.
+CLOCK_MARK=/tmp/podkop-clock
+clock_ok() { [ -f "$CLOCK_MARK" ] || [ "$(cut -d . -f 1 /proc/uptime)" -ge 900 ]; }
+
 daemon() {
   mkdir -p "$RUN/jobs" "$RUN/guard" "$ETC"
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
@@ -1047,7 +1054,7 @@ daemon() {
       if command -v reliability_expire >/dev/null 2>&1; then reliability_expire; fi
       # dead groups, every 30 s
       _heal=$(( (_heal + 1) % 2 ))
-      if [ "$_heal" = 0 ] && command -v heal_check >/dev/null 2>&1; then heal_check; fi
+      if [ "$_heal" = 0 ] && command -v heal_check >/dev/null 2>&1 && clock_ok; then heal_check; fi
       [ "$_down" -ge 2 ] && event podkop_up
       _down=0
       # tried every round until the Clash API answers and the pins are back;
@@ -1143,6 +1150,64 @@ cmd_ipv6() {
     event ipv6_block '{"blocked":false}'
   fi
   reply "$(ipv6_json)"
+}
+
+# --- the router's DNS for every device ------------------------------------------------
+
+# podkop's rules by domain work through the router's DNS (it answers with
+# addresses that lead into sing-box). A device that asks another DNS server
+# gets the real addresses and goes around those rules. dns-guard on|off:
+# three firewall sections (written only when they change):
+#   plain DNS (port 53) from the LAN to anywhere is answered by the router,
+#   DNS over TLS (port 853) is refused,
+#   DNS over HTTPS to the well-known public resolvers (port 443) is refused.
+# IPv4; over IPv6 the "ipv6" block covers it. A list of resolvers is never
+# complete: a resolver that is not in it still gets through.
+DNS_RULES="podkop_agent_dns_redirect podkop_agent_dns_dot podkop_agent_dns_doh"
+DNS_DOH="1.1.1.1 1.0.0.1 1.1.1.2 1.0.0.2 1.1.1.3 1.0.0.3 8.8.8.8 8.8.4.4 9.9.9.9 149.112.112.112 9.9.9.10 149.112.112.10
+ 9.9.9.11 149.112.112.11 94.140.14.14 94.140.15.15 94.140.14.15 94.140.15.16 94.140.14.140 94.140.14.141
+ 208.67.222.222 208.67.220.220 208.67.222.123 208.67.220.123 77.88.8.8 77.88.8.1 77.88.8.88 77.88.8.2 77.88.8.7 77.88.8.3
+ 194.242.2.2 185.222.222.222 45.11.45.11 45.90.28.0/24 45.90.30.0/24 185.228.168.9 185.228.169.9 185.228.168.168"
+dns_json() {
+  _dn=0; for _dr in $DNS_RULES; do uci -q get "firewall.$_dr" >/dev/null && _dn=$((_dn + 1)); done
+  jq -nc --arg n "$_dn" '{guard: ($n == "3")}'
+}
+cmd_dns_guard() {
+  case "${1:-}" in on|off) ;; *) fail bad_request "usage: dns-guard on|off" ;; esac
+  _have=$(dns_json | jq -r .guard)
+  if [ "$1" = on ] && [ "$_have" = false ]; then
+    for _dr in $DNS_RULES; do uci -q delete "firewall.$_dr"; done
+    uci set firewall.podkop_agent_dns_redirect=redirect
+    uci set firewall.podkop_agent_dns_redirect.name="podkop-agent: the LAN's DNS goes to the router"
+    uci set firewall.podkop_agent_dns_redirect.family=ipv4
+    uci set firewall.podkop_agent_dns_redirect.src=lan
+    uci set firewall.podkop_agent_dns_redirect.src_dport=53
+    uci set firewall.podkop_agent_dns_redirect.proto='tcp udp'
+    uci set firewall.podkop_agent_dns_redirect.target=DNAT
+    uci set firewall.podkop_agent_dns_dot=rule
+    uci set firewall.podkop_agent_dns_dot.name="podkop-agent: no DNS over TLS from the LAN"
+    uci set firewall.podkop_agent_dns_dot.src=lan
+    uci set firewall.podkop_agent_dns_dot.dest=wan
+    uci set firewall.podkop_agent_dns_dot.dest_port=853
+    uci set firewall.podkop_agent_dns_dot.proto='tcp udp'
+    uci set firewall.podkop_agent_dns_dot.target=REJECT
+    uci set firewall.podkop_agent_dns_doh=rule
+    uci set firewall.podkop_agent_dns_doh.name="podkop-agent: no DNS over HTTPS to public resolvers from the LAN"
+    uci set firewall.podkop_agent_dns_doh.family=ipv4
+    uci set firewall.podkop_agent_dns_doh.src=lan
+    uci set firewall.podkop_agent_dns_doh.dest=wan
+    uci set firewall.podkop_agent_dns_doh.dest_port=443
+    uci set firewall.podkop_agent_dns_doh.proto='tcp udp'
+    uci set firewall.podkop_agent_dns_doh.target=REJECT
+    for _da in $DNS_DOH; do uci add_list firewall.podkop_agent_dns_doh.dest_ip="$_da"; done
+    if ! { uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; }; then fail error "could not write the firewall rules"; fi
+    event dns_guard '{"on":true}'
+  elif [ "$1" = off ] && [ "$(for _dr in $DNS_RULES; do uci -q get "firewall.$_dr"; done)" != "" ]; then
+    for _dr in $DNS_RULES; do uci -q delete "firewall.$_dr"; done
+    if ! { uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1; }; then fail error "could not remove the firewall rules"; fi
+    event dns_guard '{"on":false}'
+  fi
+  reply "$(dns_json)"
 }
 
 # --- OpenVPN client -----------------------------------------------------------------
@@ -1510,10 +1575,12 @@ cmd_status() {
     --arg pcron "$(probe_cron)" --arg tz "$(date +%z)" \
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
-    --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" \
+    --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" --argjson dns "$(dns_json)" \
+    --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" \
     --argjson safe "$(safe_json)" --argjson prot "$(protected_json)" --argjson sent "$(sentinel_json)" \
     --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
+      time: ($now | tonumber? // null), clock_set: ($clk == "1"), dns: $dns,
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
@@ -2038,6 +2105,7 @@ case "$_cmd" in
   strict)        command -v cmd_strict >/dev/null || fail unsupported "reinstall agent for strict rules"; cmd_strict ;;
   resolve)       cmd_resolve ;;
   ipv6)          cmd_ipv6 "$@" ;;
+  dns-guard)     cmd_dns_guard "$@" ;;
   vpn)           cmd_vpn "$@" ;;
   upgrade)       cmd_upgrade ;;
   safe-mode)     cmd_safe_mode "$@" ;;

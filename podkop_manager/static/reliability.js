@@ -69,7 +69,7 @@ export async function viewReliability(main, id) {
   let dirty = false, checking = false, saving = false, settingsForm;
   let enabled, automatic, interval, cooldown, save, reset, settingsNote;
   let query = "", source = "all", kind = "all";
-  let heal = null, healDraft = null, healSaving = false, ipv6Saving = false;
+  let heal = null, healDraft = null, healSaving = false, ipv6Saving = false, dnsSaving = false;
   const opened = new Set();
   const endpoint = `/api/routers/${id}/reliability`;
   const table = (headers, rows) => h("div", { class: "scroll-x" }, h("table", {},
@@ -190,6 +190,26 @@ export async function viewReliability(main, id) {
     return h("section", { class: "card pad stack", "aria-label": "IPv6" },
       h("div", { class: "col" }, h("h2", {}, "IPv6"),
         h("p", { class: "small muted" }, "podkop routes IPv4 only. Rules by domain hold because the router's DNS answers no IPv6 addresses, but a device with its own DNS, or an address list, goes around them over IPv6.")),
+      body);
+  };
+  // podkop's rules by domain work through the router's DNS; a device that
+  // asks another DNS server gets the real addresses and goes around them
+  const dnsCard = () => {
+    const dns = (getRouter(id).status || {}).dns;
+    const body = dns === undefined
+      ? [h("p", { class: "small muted" }, "Needs podkop-agent 0.26.0 or newer on the router."),
+        h("div", { class: "row" }, h("button", { class: "btn", onclick: () => updateAgent(id, load) }, "Update agent"))]
+      : [h("label", { class: "check" }, h("input", { type: "checkbox", checked: dns.guard, disabled: dnsSaving, onchange: async e => {
+        const on = e.target.checked;
+        dnsSaving = true; draw();
+        try { await api("PUT", `/api/routers/${id}/dns-guard`, { on }); toast(on ? "Devices now use the router's DNS" : "Devices may use their own DNS again"); }
+        catch (err) { toast(err.message, true); }
+        finally { dnsSaving = false; if (!left) draw(); }
+      } }), "Make the LAN's devices use the router's DNS (firewall rules)"),
+      h("p", { class: "small muted" }, "Plain DNS (port 53) to any server is answered by the router; DNS over TLS (port 853) and DNS over HTTPS to the well-known public resolvers (Cloudflare, Google, Quad9, AdGuard, OpenDNS, Yandex, NextDNS and a few more) are refused, so browsers fall back to the router's DNS. IPv4 from the lan zone; a resolver that is not in the list still gets through. A phone with a fixed Private DNS server name shows \"no internet\" until that setting is put back to automatic.")];
+    return h("section", { class: "card pad stack", "aria-label": "Devices' DNS" },
+      h("div", { class: "col" }, h("h2", {}, "Devices' own DNS"),
+        h("p", { class: "small muted" }, "A rule by domain works because the router's DNS answers with an address that leads into podkop. A device that asks another DNS server (a browser's secure DNS, a fixed 8.8.8.8) gets the site's real address and reaches it directly, past the rule and its kill switch.")),
       body);
   };
   // Self-heal: a URLTest group whose own servers all fail borrows working
@@ -354,7 +374,7 @@ export async function viewReliability(main, id) {
               h("div", { class: "col" }, labels[o.data.kind] || o.data.kind, o.data.scope), h("span", { class: "health-message" }, o.data.message)]))
               : h("p", { class: "empty" }, "No observations in this window.")], String(data.observations.length))));
     drawActivity();
-    put(page, content, healCard(), ipv6Card(),
+    put(page, content, healCard(), ipv6Card(), dnsCard(),
       h("section", { class: "card pad stack" }, disclose("settings", "Monitoring and recovery settings", settingsForm)),
       h("section", { class: "card pad stack" }, disclose("kuma", "Uptime Kuma integration", [
         h("p", {}, "Use a Kuma Webhook notification with its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),
