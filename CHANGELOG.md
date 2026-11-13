@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.48.3 — 2026-11-12
+
+The router's watchdog stood still (manager 0.36.1, agent 0.22.1).
+
+- **Fixed: podkop-agent's daemon stopped about 35 s after every start**, on
+  every router, since 1.38.0: its first check of the servers waited for the
+  daemon's own service watcher, which never ends. Until its next restart
+  nothing restarted podkop after a crash, no group was healed, a kill
+  switch was not closed when its servers died, DNS was not blocked while
+  podkop was down, and traffic per server was not counted. (The kill
+  switch's block table stayed in place.) Update the agent on every router.
+- **The manager says so** when a router's daemon gives no sign of life for
+  5 minutes: an alert on the router, and a notification.
+- Leftovers of killed commands are removed at the daemon's start and every
+  hour: sing-box processes of connection checks (20 MB of RAM each) and the
+  folders of checks and exit-IP lookups.
+
 ## 1.48.2 — 2026-11-11
 
 VPN rules without a podkop restart, checked before apply (manager 0.36.0,

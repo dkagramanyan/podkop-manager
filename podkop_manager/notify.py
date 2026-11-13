@@ -41,6 +41,9 @@ TEXT = {
     "probe_not_started": lambda d: f"the nightly probe did not start: {d.get('message') or ''}",
     "probe_apply_failed": lambda d: f"the probe's servers were not applied: {d.get('message') or ''}",
     "heal_probe_failed": lambda d: f"the self-heal probe failed: {d.get('message') or ''}",
+    "agent_stuck": lambda d: "podkop-agent's watchdog on the router stands still (no restart of podkop, no kill switch updates); "
+                             "restart it: /etc/init.d/podkop-agent restart",
+    "agent_ok": lambda d: "podkop-agent's watchdog runs again",
     "router_offline": lambda d: f"the manager cannot reach the router: {d.get('message') or ''}",
     "router_online": lambda d: "the router answers again",
 }

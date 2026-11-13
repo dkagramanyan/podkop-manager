@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.22.0"
+AGENT_VERSION="0.22.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -857,6 +857,21 @@ kill_children() {
   kill "$1" 2>/dev/null
 }
 
+# tidy: what killed commands left in RAM (at the daemon's start and about
+# once an hour): sing-box processes of connection checks whose command is
+# gone (20 MB each), and the folders of checks and exit-IP lookups
+tidy() {
+  for _p in /proc/[0-9]*; do
+    read -r _ _ _ _pp _ < "$_p/stat" 2>/dev/null || continue
+    [ "$_pp" = 1 ] || continue
+    case "$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null)" in
+      "sing-box run -c $RUN/check."*) kill "${_p#/proc/}" 2>/dev/null && logger -t podkop-agent "ended a leftover connection check" ;;
+    esac
+  done
+  find "$RUN" -maxdepth 1 \( -name 'exits.*' -o -name 'check.*' -o -name 'hot.*' -o -name 'status.*' \) -mmin +30 \
+    -exec rm -rf {} + 2>/dev/null
+}
+
 daemon() {
   mkdir -p "$RUN/jobs" "$RUN/guard" "$ETC"
   event agent_started "$(jq -nc --arg v "$AGENT_VERSION" '{version: $v}')"
@@ -864,7 +879,12 @@ daemon() {
   _last=""; _down=0; _heal=0; _pintry=0
   guard_watch $$ & _gw=$!
   trap 'kill_children "$_gw"; exit 0' TERM INT
+  _tidy=0
   while :; do
+    # the daemon's sign of life (RAM): "status" says how old it is
+    : > "$RUN/beat"
+    [ "$_tidy" = 0 ] && tidy
+    _tidy=$(( (_tidy + 1) % 240 ))
     _w=0
     while [ "$_w" -lt 15 ] && [ ! -f "$RUN/guard/poke" ]; do sleep 1; _w=$((_w + 1)); done
     rm -f "$RUN/guard/poke"
@@ -1350,6 +1370,7 @@ cmd_status() {
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" \
+    --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
@@ -1357,6 +1378,7 @@ cmd_status() {
       singbox: {version: $fixed.singbox, features: $fixed.features},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
       engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6,
+      daemon: {beat: ($beat | tonumber? // null)},
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')
   rm -f "$RUN/status.$$.px"
   reply "$_sr"
