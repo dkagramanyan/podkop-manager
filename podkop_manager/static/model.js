@@ -167,7 +167,8 @@ export const EVENT_TEXT = {
   strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
   strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
   strict_open: (d) => `${d.section}: kill switch open again`,
-  strict_guard: (d) => (d.nft === false ? "Kill switch: the firewall refused the block list"
+  strict_guard: (d) => (d.restored ? "Kill switch: the block list in the firewall was gone or changed and was put back"
+    : d.nft === false ? "Kill switch: the firewall refused the block list"
     : d.dns ? "Kill switch: its sites are blocked on the router while podkop is down" : "Kill switch: podkop is up, the router's block is lifted"),
   pinned: (d) => `${d.section}: pinned ${serverName(d.section, d.server)}`,
   pin_cleared: (d) => `${d.section}: back to automatic`,

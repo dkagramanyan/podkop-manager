@@ -233,7 +233,11 @@ export async function viewReliability(main, id) {
         onchange: e => toggle("*", e.target.checked) }), "Self-heal on this router"),
       heal.guard && (heal.strict || []).length ? h("p", { class: "small muted" }, `Kill switch guard: ${heal.guard.domains} domains of the kill-switch rules answer NXDOMAIN while podkop is down or restarting${
         heal.guard.dns ? " (active now: podkop is not running)" : ""}; ${heal.guard.subnets} subnets${heal.guard.resolved != null ? ` and ${heal.guard.resolved} addresses the rules' own domains resolve to (for devices with their own DNS, refreshed hourly)` : ""} are ${
-        heal.guard.nft ? "blocked on the router at all times" : "not blocked (podkop is stopped on purpose)"}.`) : null,
+        heal.guard.nft ? "blocked on the router at all times" : "not blocked (podkop is stopped on purpose)"}.${
+        heal.guard.blocked != null ? ` Refused since the list was last loaded: ${heal.guard.blocked} packets.` : ""}${
+        heal.guard.boot ? " A copy on the router goes in at boot, before podkop starts." : ""}`) : null,
+      heal.guard && heal.guard.offload && (heal.strict || []).length ? h("p", { class: "small bad-text" },
+        "Flow offloading is on in the router's firewall: offloaded connections go past the firewall's chains, so the kill switch cannot cut a connection that is already open. Switch it off (Network → Firewall) for a kill switch you can rely on.") : null,
       heal.sections.length ? table(["Rule", "Self-heal", "Now"], heal.sections.map(name => [h("b", {}, name),
         h("label", { class: "check" }, h("input", { type: "checkbox", checked: !allOff && !off.has(name), disabled: allOff || healSaving,
           onchange: e => toggle(name, e.target.checked) }), allOff || off.has(name) ? "Off" : "On"),

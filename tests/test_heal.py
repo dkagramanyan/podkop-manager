@@ -1,6 +1,8 @@
 """Self-heal of dead URLTest groups on the router (router/reliability.sh)."""
+import fcntl
 import json
 import subprocess
+import time
 from pathlib import Path
 
 HELPER = Path(__file__).resolve().parents[1] / "router/reliability.sh"
@@ -280,6 +282,21 @@ def test_kill_switch_works_with_self_heal_off(tmp_path):
     assert r.events()[-1][0] == "strict_closed" and r.events()[-1][1]["via"] is True
 
 
+def test_kill_switch_refused_while_the_router_is_busy_saves_nothing(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/pins").write_text("")
+    with open(tmp_path / "run/apply.lock", "w") as busy:
+        fcntl.flock(busy, fcntl.LOCK_EX)
+        p = subprocess.run(["sh", "-c", STUBS + "cmd_strict", "sh", str(HELPER), str(tmp_path)],
+                           input=json.dumps({"sections": ["main"]}), capture_output=True, text=True, timeout=30)
+        assert p.returncode == 1 and "busy" in p.stderr
+        assert not (tmp_path / "etc/strict").exists() and not (tmp_path / "events").exists()
+    r.sh("cmd_strict", json.dumps({"sections": ["main"]}))      # the next try saves and loads it
+    assert (tmp_path / "etc/strict").read_text() == "main\n"
+    assert (tmp_path / "applies").read_text().splitlines() == ["strict rules changed"]
+
+
 GUARD_STUBS = '''
 PODKOP_LIB="$D/nolib"
 config_json() { cat "$D/podkop.json"; }
@@ -337,9 +354,10 @@ def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_pat
     assert (g / "own-domains").read_text().splitlines() == ["bad", "domain", "fast.com", "netflix.com", "nflxvideo.net"]
     assert set((tmp_path / "resolved-names").read_text().split()) == {"bad", "domain", "fast.com", "netflix.com", "nflxvideo.net"}
     assert "198.18.0.0/15" in nft and "delete table inet podkop_agent_guard" in nft
-    assert (tmp_path / "nft").read_text().splitlines()[-1] == f"-f {g}/nft.conf"     # the table is in while podkop runs
+    assert (tmp_path / "nft").read_text().splitlines()[-2:] == [f"-f {g}/nft.conf", "list table inet podkop_agent_guard"]     # the table is in while podkop runs
     assert not (tmp_path / "dnsmasq.d/podkop-agent-strict.conf").exists()               # the DNS part is not
-    assert json.loads(sh("guard_status")) == {"domains": 8, "subnets": 3, "resolved": 2, "nft": True, "dns": False}
+    assert json.loads(sh("guard_status")) == {"domains": 8, "subnets": 3, "resolved": 2, "nft": True, "dns": False,
+                                              "blocked": 0, "offload": False, "boot": True}
     sh("guard_sync")                                   # nothing changed: nothing fetched, resolved or applied again
     assert (tmp_path / "fetched").read_text().count("\n") == 1 and (tmp_path / "nft").read_text().splitlines()[-1].startswith("list ")
     assert (tmp_path / "resolved-names").read_text().count("\n") == 5
@@ -398,7 +416,6 @@ def test_heal_off_command_validates_and_writes_only_on_change(tmp_path):
 # --- manager ----------------------------------------------------------------------------------
 
 import asyncio  # noqa: E402
-import time  # noqa: E402
 
 from podkop_manager import podkop  # noqa: E402
 from podkop_manager.db import DB  # noqa: E402
@@ -748,3 +765,62 @@ def test_the_tests_do_not_wait_for_the_daemons_watcher(tmp_path):
     r = Router(tmp_path)
     r.alive(["main-1-out"])
     r.sh("sleep 600 & _bg=$!; heal_check; kill $_bg")       # Router.sh gives it 30 s
+
+
+def test_kill_switch_block_list_is_kept_for_the_next_boot_and_put_back_when_changed(tmp_path):
+    r = Router(tmp_path)
+    etc = tmp_path / "etc"
+    etc.mkdir(exist_ok=True)
+    (etc / "strict").write_text("main\n")
+    (tmp_path / "podkop.json").write_text(json.dumps(PODKOP))
+    (tmp_path / "pid").write_text("123")
+    # the table's listing: what was loaded, with counters that move
+    stubs = GUARD_STUBS + '''
+guard_nft() { echo "$*" >> "$D/nft"; case "$1" in
+  -f) cp "$2" "$D/nft-table" ;; delete) rm -f "$D/nft-table" ;;
+  list) [ -f "$D/nft-table" ] && sed "s/counter/counter packets $(cat "$D/packets" 2>/dev/null || echo 0) bytes 99/" "$D/nft-table" ;; esac; }
+uci() { [ -f "$D/offload" ] && echo 1; }
+'''
+    sh = lambda c: r.sh(stubs + c)       # noqa: E731
+    g = tmp_path / "run/guard"
+    (tmp_path / "fetch-fails").write_text("")
+    sh("guard_sync; wait")
+    first = (etc / "guard.nft").read_text()                 # the first copy: the rule's own subnets, lists not there yet
+    assert "1.2.3.0/24" in first and "5.6.7.0/24" not in first and "counter reject" in first
+    assert "address=/netflix.com/" in (etc / "guard.dnsmasq").read_text()
+    (tmp_path / "fetch-fails").unlink(); (g / "fetch.stamp").unlink()
+    sh("guard_sync; wait"); sh("guard_sync")
+    full = (etc / "guard.nft").read_text()
+    assert "5.6.7.0/24" in full                               # the list came: a fuller copy
+    stamp = (etc / "guard.nft").stat().st_mtime_ns
+    # addresses resolved again (another address, the same number of lists' lines): flash is not written
+    (g / "resolved").write_text("45.57.40.9\n")
+    sh("guard_sync")
+    assert "45.57.40.9" in (g / "nft.conf").read_text() and (etc / "guard.nft").stat().st_mtime_ns == stamp
+    # after a boot the lists are not back yet: the thin build does not replace the copy
+    for f in (g / "lists").iterdir():
+        f.unlink()
+    (g / "key").unlink(); (tmp_path / "fetch-fails").write_text("")
+    sh("guard_sync; wait")
+    assert "5.6.7.0/24" not in (g / "nft.conf").read_text() and (etc / "guard.nft").read_text() == full
+    # counters move: the table is still ours
+    (tmp_path / "packets").write_text("7")
+    n = (tmp_path / "nft").read_text().count("-f ")
+    sh("guard_sync")
+    assert (tmp_path / "nft").read_text().count("-f ") == n
+    status = json.loads(sh("guard_status"))
+    assert status["blocked"] == 28 and status["boot"] is True and status["offload"] is False
+    (tmp_path / "offload").write_text("")
+    assert json.loads(sh("guard_status"))["offload"] is True
+    # something else emptied it: put back, and said so
+    (tmp_path / "nft-table").write_text("table inet podkop_agent_guard {\n}\n")
+    sh("guard_sync")
+    assert (tmp_path / "nft").read_text().count("-f ") == n + 1 and ("strict_guard", {"restored": True}) in r.events()
+    # no kill-switch rule any more: no copy for the next boot
+    (etc / "strict").unlink()
+    sh("guard_sync")
+    assert not (etc / "guard.nft").exists() and not (etc / "guard.key").exists() and not (tmp_path / "nft-table").exists()
+    # switched on again with nothing else changed: the copy is back
+    (etc / "strict").write_text("main\n")
+    sh("guard_sync")
+    assert (etc / "guard.nft").exists() and (tmp_path / "nft-table").exists()

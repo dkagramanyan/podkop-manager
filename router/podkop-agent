@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.24.0"
+AGENT_VERSION="0.25.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -853,6 +853,12 @@ cmd_protect() {
     and all(.sections[]; type == "string" and length > 0 and (explode | all(. == 95
       or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))' >/dev/null 2>&1 ||
     fail bad_request 'expected {"sections": [section names]}'
+  # the lock first: a list written and then "busy" would be a change half made
+  _plock=0
+  if [ -n "$(singbox_pid)" ] && ! safe_mode; then
+    exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress; try again in a moment"
+    _plock=1
+  fi
   printf '%s' "$_pr" | jq -r '.sections | unique | .[]' > "$RUN/protected.t"
   _changed=1
   if [ -s "$RUN/protected.t" ]; then
@@ -866,12 +872,11 @@ cmd_protect() {
   rm -f "$RUN/protected.t"
   if [ "$_changed" = 1 ]; then
     event protected "$(jq -nc --argjson s "$(protected_json)" '{sections: $s}')"
-    if [ -n "$(singbox_pid)" ] && ! safe_mode; then
-      exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+    if [ "$_plock" = 1 ]; then
       _pw=$(hot_apply "protected rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_pw"; }
-      exec 9>&-
     fi
   fi
+  [ "$_plock" = 0 ] || exec 9>&-
   reply "$(jq -nc --argjson p "$(protected_json)" '{protected: $p}')"
 }
 
