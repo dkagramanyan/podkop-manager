@@ -114,7 +114,9 @@ class OnlineAgent:
             return {"agent": {"version": "0.10.0", "capabilities": ["diagnostics", "eligibility", "heal", "resolve", "upgrade"]},
                     "podkop": {"running": False, "busy": False, "enabled": True, "paused": False, "version": "0.7.24"},
                     "fingerprint": "fp1", "singbox": {"version": "1.13", "features": []}, "router": {}, "pins": [],
-                    "probe": {"state": "none"}, "heal": None}
+                    "probe": {"state": "none"}, "heal": None,
+                    # the banner on Overview and the switch on the rule's page are drawn
+                    "protected": ["main"], "safe_mode": {"on": True, "since": 1, "reason": "test", "trial": True}}
         if name == "config-get":
             return {"config": self.config, "fingerprint": "fp1"}
         if name == "validate":

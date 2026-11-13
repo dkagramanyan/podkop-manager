@@ -3,9 +3,21 @@
 import { S } from "./state.js";
 import { api, h, modal, toast } from "./ui.js";
 
+// has another router run this agent version, and how did it go
+function triedNote(tried) {
+  if (!tried || !tried.version) return null;
+  const rs = tried.routers || [];
+  const good = rs.filter((r) => !r.trouble && r.hours !== null && r.hours >= 24);
+  if (good.length) return h("p", { class: "small muted" }, `Agent ${tried.version} has run on ${good.map((r) => r.name).join(", ")} for a day or more without trouble.`);
+  const text = !rs.length ? `No other router runs agent ${tried.version} yet. With a spare router, update that one first and give it a day.`
+    : rs.some((r) => r.trouble) ? `Agent ${tried.version} had trouble on ${rs.filter((r) => r.trouble).map((r) => r.name).join(", ")} (see its events) before you update this router.`
+      : `Agent ${tried.version} runs on ${rs.map((r) => `${r.name} for ${r.hours === null ? "an unknown time" : `${r.hours} h`}`).join(", ")}: less than a day.`;
+  return h("p", { class: "small bad-text" }, text);
+}
+
 export async function updateAgent(id, done = async () => {}) {
-  let command = "";
-  try { ({ command } = await api("GET", `/api/routers/${id}/agent-upgrade`)); }
+  let command = "", tried = null;
+  try { ({ command, tried } = await api("GET", `/api/routers/${id}/agent-upgrade`)); }
   catch (e) { return toast(e.message, true); }
   const out = h("p", { class: "small muted", role: "status" });
   const code = h("textarea", { class: "input mono", rows: 5, readonly: true,
@@ -40,6 +52,6 @@ export async function updateAgent(id, done = async () => {}) {
     onclose: () => S.upgradeWatch.delete(id),
     body: h("div", { class: "stack" },
       h("p", {}, "The manager sends its own copies of the files to the router over SSH and the agent installs them; podkop keeps running."),
-      out, manual),
+      triedNote(tried), out, manual),
     foot: [h("span"), run] });
 }

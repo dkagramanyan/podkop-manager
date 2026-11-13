@@ -29,10 +29,10 @@ RELEASE="$REPO_URL/releases/latest/download"
 KEYS=/etc/dropbear/authorized_keys
 MARK=podkop-agent
 FWD_MARK=podkop-agent-forward
-KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn"
+KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel"
 
 set -u
-KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0
+KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0; PRINT_SENTINEL=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --key) KEY=${2:-}; PAIRING=1; shift 2 ;;
@@ -43,11 +43,219 @@ while [ $# -gt 0 ]; do
     --src) SRC=${2:-}; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --upgrade) UPGRADE=1; shift ;;
+    --print-sentinel) PRINT_SENTINEL=1; shift ;;
     *) echo "unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 die() { echo "error: $*" >&2; exit 1; }
+
+# --- podkop-sentinel ---------------------------------------------------------------
+#
+# A watcher of its own, apart from podkop-agent: a small script that an agent
+# update replaces only when this text changes. It restarts an agent daemon
+# that stands still, and for the protected rules ($ETC/protected) it falls
+# back to plain podkop ("safe mode") when one of them stops working and
+# plain podkop makes it work again. Written out by --print-sentinel too
+# (the tests run it).
+sentinel_text() {
+  cat <<'SENTINEL'
+#!/bin/sh
+# shellcheck shell=dash
+# podkop-sentinel: watches podkop-agent from outside. Installed by
+# podkop-agent's install.sh; "safe mode" is described in podkop-manager.
+SENTINEL_VERSION=1
+ETC=/etc/podkop-agent
+RUN=/tmp/podkop-agent
+S=/tmp/podkop-sentinel
+MARK=$ETC/safe-mode
+TICK=${PODKOP_SENTINEL_TICK:-60}
+BEAT_MAX=600      # s without the daemon's sign of life before it is restarted
+FAILS=5           # checks in a row (minutes) a protected rule fails before plain podkop is tried
+SETTLE=${PODKOP_SENTINEL_SETTLE:-90}     # s podkop gets to start before the rule is tested again
+TRIAL=${PODKOP_SENTINEL_TRIAL:-360}      # s plain podkop gets to show that the rule works with it
+BACKOFF=21600     # s before the next try after one that did not help
+TEST_URL=https://www.gstatic.com/generate_204
+TAB=$(printf '\t')
+
+log() { logger -t podkop-sentinel "$*"; }
+now() { date +%s; }
+# the manager learns of it through the agent's events (when the agent can still do that)
+event() { /usr/bin/podkop-agent _event "$1" "$2" </dev/null >/dev/null 2>&1 || :; }
+enabled() { for _f in /etc/rc.d/S[0-9][0-9]"$1"; do [ -e "$_f" ] && return 0; done; return 1; }
+
+# api <path> [curl -G arguments]: sing-box's Clash API
+api() {
+  _c=$(uci -q get podkop.settings.config_path); [ -n "$_c" ] || _c=/etc/sing-box/config.json
+  [ -s "$_c" ] || return 1
+  if [ ! -s "$S/api" ] || [ "$_c" -nt "$S/api" ]; then
+    jq -r '.experimental.clash_api | [(.external_controller // ""), (.secret // "")] | join("\t")' "$_c" > "$S/api.t" 2>/dev/null &&
+      mv "$S/api.t" "$S/api" || return 1
+  fi
+  IFS="$TAB" read -r _a _s < "$S/api"
+  [ -n "$_a" ] || return 1
+  _p=$1; shift
+  if [ -n "$_s" ]; then curl -s --max-time 8 -G -H "Authorization: Bearer $_s" "$@" "http://$_a$_p"
+  else curl -s --max-time 8 -G "$@" "http://$_a$_p"; fi
+}
+
+# rule_ok <section>: a request through the rule's outbound gets an answer
+rule_ok() { api "/proxies/$1-out/delay" --data-urlencode "url=$TEST_URL" --data "timeout=5000" 2>/dev/null | grep -q '"delay":[1-9]'; }
+
+# the provider's line answers (a rule that fails without it is nobody's fault here)
+wan_ok() {
+  _g=$(ip -4 route show default 2>/dev/null | awk 'NR == 1 { print $3 }')
+  for _h in $_g 77.88.8.8 8.8.8.8; do
+    case "$_h" in ""|*[!0-9.]*) continue ;; esac
+    ping -c 1 -W 2 "$_h" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+protected() { [ -s "$ETC/protected" ] && grep -v '[^A-Za-z0-9_]' "$ETC/protected"; }
+
+# nothing is judged while podkop is off on purpose, the router just started,
+# or an apply, an agent update or the probe runs
+busy() {
+  [ -f "$ETC/paused" ] && return 0
+  enabled podkop || return 0
+  [ "$(cut -d . -f 1 /proc/uptime)" -lt "${PODKOP_SENTINEL_BOOT:-300}" ] && return 0
+  for _l in install.lock apply.lock; do
+    [ -e "$RUN/$_l" ] && ! flock -n "$RUN/$_l" true 2>/dev/null && return 0
+  done
+  [ "$(cat "$RUN/probe/state" 2>/dev/null)" = running ] && return 0
+  return 1
+}
+
+# the agent's daemon writes $RUN/beat every round; one that stands still is
+# restarted, at most 3 times an hour
+check_daemon() {
+  enabled podkop-agent || return 0
+  grep -q 'RUN/beat' /usr/bin/podkop-agent 2>/dev/null || return 0      # an agent without the sign of life
+  _b=$(date -r "$RUN/beat" +%s 2>/dev/null) || _b=$START
+  [ "$_b" -ge "$START" ] || _b=$START
+  [ $(( $(now) - _b )) -gt "$BEAT_MAX" ] || return 0
+  _t=$(now)
+  awk -v t="$_t" '$1 > t - 3600' "$S/restarts" 2>/dev/null > "$S/restarts.t"; mv "$S/restarts.t" "$S/restarts"
+  [ "$(wc -l < "$S/restarts")" -lt 3 ] || return 0
+  echo "$_t" >> "$S/restarts"
+  log "podkop-agent's daemon gave no sign of life for more than $BEAT_MAX s: restarted"
+  /etc/init.d/podkop-agent restart >/dev/null 2>&1
+  START=$(now)
+  event sentinel_restart '{}'
+}
+
+check_rules() {
+  _bad=""
+  for _r in $(protected); do
+    rule_ok "$_r" || { sleep "${PODKOP_SENTINEL_RETRY:-2}"; rule_ok "$_r"; } || _bad="$_bad $_r"
+  done
+  if [ -z "$_bad" ] || ! wan_ok; then echo 0 > "$S/fails"; return 0; fi
+  _n=$(( $(cat "$S/fails" 2>/dev/null || echo 0) + 1 )); echo "$_n" > "$S/fails"
+  [ "$_n" -ge "$FAILS" ] || return 0
+  [ "$(now)" -ge "$(cat "$S/backoff" 2>/dev/null || echo 0)" ] || return 0
+  enter "${_bad# } did not answer for $FAILS checks in a row" trial
+}
+
+# enter <reason> [trial]: plain podkop. The agent's daemon idles while the
+# mark is there; what it added at run time (all in RAM) goes: borrowed
+# servers, servers kept out of their groups, the DNS block of kill switches.
+enter() {
+  mkdir -p "$ETC" "$S"
+  printf '%s\t%s\n' "$(now)" "$1" > "$MARK.t" && mv "$MARK.t" "$MARK" || return 1
+  log "safe mode: $1; podkop runs without podkop-agent's additions"
+  /etc/init.d/podkop-agent stop >/dev/null 2>&1
+  rm -f "$RUN/heal/state.json" "$RUN/heal/extra.json" "$RUN/eligibility.json"
+  _dns=""
+  for _f in /tmp/dnsmasq.d/podkop-agent-strict.conf /tmp/dnsmasq.*.d/podkop-agent-strict.conf; do
+    [ -f "$_f" ] && { rm -f "$_f"; _dns=1; }
+  done
+  if enabled podkop && [ ! -f "$ETC/paused" ]; then /etc/init.d/podkop restart >/dev/null 2>&1
+  elif [ -n "$_dns" ]; then /etc/init.d/dnsmasq restart >/dev/null 2>&1; fi
+  if [ "${2:-}" = trial ]; then now > "$S/trial"; echo 0 > "$S/good"; else rm -f "$S/trial"; fi
+  enabled podkop-agent && /etc/init.d/podkop-agent start >/dev/null 2>&1
+  event safe_mode "$(jq -nc --arg r "$1" --arg t "${2:-}" '{reason: $r, trial: ($t == "trial")}')"
+}
+
+# leave <why> [seconds before the next automatic try]
+leave() {
+  rm -f "$MARK" "$S/trial" "$S/good"; mkdir -p "$S"; echo 0 > "$S/fails"
+  [ -z "${2:-}" ] || echo $(( $(now) + $2 )) > "$S/backoff"
+  log "safe mode off: $1"
+  enabled podkop-agent && /etc/init.d/podkop-agent restart >/dev/null 2>&1
+  event safe_mode_off "$(jq -nc --arg r "$1" '{reason: $r}')"
+}
+
+# follow: a safe mode entered by ourselves stays only if it helped
+follow() {
+  [ -f "$S/trial" ] || return 0
+  _el=$(( $(now) - $(cat "$S/trial") ))
+  [ "$_el" -ge "$SETTLE" ] || return 0
+  _bad=""
+  for _r in $(protected); do rule_ok "$_r" || _bad=1; done
+  if [ -z "$_bad" ]; then
+    _g=$(( $(cat "$S/good" 2>/dev/null || echo 0) + 1 )); echo "$_g" > "$S/good"
+    [ "$_g" -ge 2 ] || return 0
+    rm -f "$S/trial"
+    log "safe mode stays: the protected rules work with plain podkop"
+    event safe_mode_confirmed '{}'
+  else
+    echo 0 > "$S/good"
+    [ "$_el" -ge "$TRIAL" ] || return 0
+    leave "plain podkop did not help: the rule's servers do not answer" "$BACKOFF"
+  fi
+}
+
+round() {
+  [ -x /usr/bin/podkop-agent ] || return 0
+  if [ -f "$MARK" ]; then follow; return 0; fi
+  busy && return 0
+  check_daemon
+  check_rules
+}
+
+case "${1:-run}" in
+  enter) enter "${2:-switched on by hand}" ;;
+  leave) leave "${2:-switched off by hand}" 3600 ;;
+  version) echo "$SENTINEL_VERSION" ;;
+  run) mkdir -p "$S"; START=$(now); while :; do sleep "$TICK"; round; done ;;
+  once) mkdir -p "$S"; START=${PODKOP_SENTINEL_START:-$(now)}; round ;;      # one round (the tests)
+  *) echo "usage: podkop-sentinel run|enter [reason]|leave [reason]|version" >&2; exit 1 ;;
+esac
+# end of podkop-sentinel
+SENTINEL
+}
+sentinel_init_text() {
+  cat <<'SENTINEL'
+#!/bin/sh /etc/rc.common
+# podkop-sentinel: watches podkop-agent from outside (written by podkop-agent's install.sh)
+# shellcheck disable=SC2034
+START=99
+USE_PROCD=1
+start_service() {
+  procd_open_instance
+  procd_set_param command /usr/bin/podkop-sentinel run
+  procd_set_param respawn 3600 5 0
+  procd_close_instance
+}
+SENTINEL
+}
+# sentinel_install: written only when its text changed (flash), started then
+sentinel_install() {
+  sentinel_text > "$TMP/podkop-sentinel" && sentinel_init_text > "$TMP/podkop-sentinel.init" &&
+    sh -n "$TMP/podkop-sentinel" 2>/dev/null || { echo "warning: podkop-sentinel was not installed" >&2; return 0; }
+  _sch=0
+  cmp -s "$TMP/podkop-sentinel" /usr/bin/podkop-sentinel || _sch=1
+  cmp -s "$TMP/podkop-sentinel.init" /etc/init.d/podkop-sentinel || _sch=1
+  put "$TMP/podkop-sentinel" /usr/bin/podkop-sentinel
+  put "$TMP/podkop-sentinel.init" /etc/init.d/podkop-sentinel
+  /etc/init.d/podkop-sentinel enabled 2>/dev/null || /etc/init.d/podkop-sentinel enable 2>/dev/null
+  if [ "$_sch" = 1 ] || ! /etc/init.d/podkop-sentinel running >/dev/null 2>&1; then
+    /etc/init.d/podkop-sentinel restart >/dev/null 2>&1 7>&- 8>&- 9>&- || echo "warning: podkop-sentinel did not start" >&2
+  fi
+}
+
+if [ "$PRINT_SENTINEL" = 1 ]; then sentinel_text; exit 0; fi
 
 if [ "$UPGRADE" = 1 ] && { [ "$PAIRING" = 1 ] || [ "$UNINSTALL" = 1 ]; }; then
   die "--upgrade cannot be combined with key, firewall or uninstall options"
@@ -82,6 +290,8 @@ firewall_rules() {
 }
 
 if [ "$UNINSTALL" = 1 ]; then
+  [ -x /etc/init.d/podkop-sentinel ] && { /etc/init.d/podkop-sentinel stop 2>/dev/null; /etc/init.d/podkop-sentinel disable 2>/dev/null; }
+  rm -rf /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /tmp/podkop-sentinel
   /etc/init.d/podkop-agent stop 2>/dev/null; /etc/init.d/podkop-agent disable 2>/dev/null
   # the OpenVPN client (VPN page); the openvpn package stays
   [ -x /etc/init.d/podkop-vpn ] && { /etc/init.d/podkop-vpn stop 2>/dev/null; /etc/init.d/podkop-vpn disable 2>/dev/null; rm -f /etc/init.d/podkop-vpn; }
@@ -204,9 +414,31 @@ if [ "$UPGRADE" = 1 ]; then
   jq -e '.ok == true and (.data.capabilities | index("diagnostics") != null and index("eligibility") != null)' \
     "$TMP/version.json" >/dev/null || die "updated agent is missing connection health commands"
   if [ "$WAS_RUNNING" = 1 ]; then
+    _sb=$(ubus call service list '{"name":"sing-box"}' 2>/dev/null | jq -r '[.["sing-box"].instances[]? | select(.running)] | length' 2>/dev/null)
+    rm -f /tmp/podkop-agent/beat
     /etc/init.d/podkop-agent restart 7>&- 8>&- 9>&- || die "could not restart the updated agent"
+    # the updated daemon is watched for a while before the old files go: it
+    # must keep giving its sign of life (an agent once stood still 35 s after
+    # every start), and a sing-box that ran must still run. Our locks are
+    # let go first: the daemon waits for them.
+    SOAK=${PODKOP_INSTALL_SOAK:-90}
+    if [ "$SOAK" -gt 0 ]; then
+      exec 7>&- 9>&-
+      echo "watching the updated agent for $SOAK s..."
+      sleep "$SOAK"
+      beat_age() { echo $(( $(date +%s) - $(date -r /tmp/podkop-agent/beat +%s 2>/dev/null || echo 0) )); }
+      # (one long round, e.g. a restart of podkop, is not a daemon that stands still)
+      _again=60; [ "$SOAK" -ge 60 ] || _again=$SOAK
+      [ "$(beat_age)" -le 60 ] || { sleep "$_again"; [ "$(beat_age)" -le 60 ]; } ||
+        die "the updated agent's daemon stopped giving its sign of life ($(beat_age) s ago)"
+      if [ "${_sb:-0}" -gt 0 ] && [ ! -f /etc/podkop-agent/safe-mode ]; then
+        _sa=$(ubus call service list '{"name":"sing-box"}' 2>/dev/null | jq -r '[.["sing-box"].instances[]? | select(.running)] | length' 2>/dev/null)
+        [ "${_sa:-0}" -gt 0 ] || die "sing-box stopped after the agent was updated"
+      fi
+    fi
   fi
   ROLLBACK=0
+  sentinel_install
   for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
   echo "podkop-agent $(jq -r '.data.version' "$TMP/version.json") upgraded; keys, firewall and Podkop settings preserved"
   exit 0
@@ -242,6 +474,7 @@ fi
 for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
 
 /etc/init.d/podkop-agent enable && /etc/init.d/podkop-agent restart 2>/dev/null || die "could not start podkop-agent"
+sentinel_install
 echo "podkop-agent $(sed -n 's/^AGENT_VERSION="\(.*\)"/\1/p' /usr/bin/podkop-agent) installed"
 
 # the line for podkop-manager: LAN address, SSH port and host key (ed25519

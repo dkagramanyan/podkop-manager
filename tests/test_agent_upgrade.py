@@ -163,7 +163,7 @@ def router_files(tmp_path):
     script = write(tmp_path / "install.sh", relocate((ROOT / "router/install.sh").read_text()))
     write(bins / "sing-box", "#!/bin/sh\necho tools.decode-link\n", True)
     env = dict(os.environ, PATH=f"{bins}:{os.environ['PATH']}", TEST_INIT_LOG=str(tmp_path / "init.log"),
-               TEST_STOPPED="0", TEST_RESTART_FAIL="0")
+               TEST_STOPPED="0", TEST_RESTART_FAIL="0", PODKOP_INSTALL_SOAK="0")
     env.pop("SSH_ORIGINAL_COMMAND", None)
     env.pop("SSH_CONNECTION", None)
 
@@ -186,7 +186,7 @@ def test_upgrade_preserves_pairing_settings_and_service_state(router_files, stop
     assert all(p.read_bytes() == data for p, data in before.items())
     assert (root / "usr/share/podkop-agent/reliability.sh").read_bytes() == (src / "reliability.sh").read_bytes()
     version = subprocess.check_output([str(root / "usr/bin/podkop-agent"), "version"], env=env, text=True)
-    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "strict", "resolve", "upgrade", "ipv6", "vpn"]
+    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "strict", "resolve", "upgrade", "ipv6", "vpn", "safe"]
     log = Path(env["TEST_INIT_LOG"]).read_text()
     assert ("new:restart" in log) is not stopped
     assert "enable" not in log and "stop\n" not in log
@@ -343,3 +343,25 @@ def test_manager_updates_the_agent_with_its_own_files(tmp_path):
     assert sent["podkop-agent"] == (ROOT / "router/podkop-agent").read_text()
     assert [(e["type"], e["data"]) for e in db.events(rid)][-1] == ("agent_upgraded", {"version": "0.10.0"})
     assert rt.online and rt.status["agent"]["version"] == "0.10.0"
+
+
+@pytest.mark.parametrize("alive", [True, False])
+def test_upgrade_is_undone_when_the_updated_daemon_gives_no_sign_of_life(router_files, alive):
+    """An agent once stood still 35 s after every start: the installer watches
+    the updated daemon for a while and puts the old files back otherwise."""
+    root, src, env, run = router_files
+    beat = root / "tmp/podkop-agent/beat"
+    init = (src / "podkop-agent.init").read_text()
+    if alive:
+        init = init.replace("# podkop-agent daemon\n", f'# podkop-agent daemon\n[ "$1" != restart ] || : > "{beat}"\n')
+        (src / "podkop-agent.init").write_text(init)
+    env["PODKOP_INSTALL_SOAK"] = "1"
+    old = (root / "usr/bin/podkop-agent").read_bytes()
+    result = run()
+    if alive:
+        assert result.returncode == 0 and "upgraded" in result.stdout, result.stderr
+        assert (root / "usr/bin/podkop-agent").read_bytes() != old
+        assert (root / "usr/bin/podkop-sentinel").read_text().rstrip().endswith("# end of podkop-sentinel")
+    else:
+        assert result.returncode != 0 and "sign of life" in result.stderr
+        assert (root / "usr/bin/podkop-agent").read_bytes() == old

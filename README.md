@@ -137,6 +137,17 @@ that already runs there are taken into **Keys and usage** and the rules.
   are blocked at all times, which also catches a device with its own DNS.
   It works with self-heal off too: the rule's servers (or those of the rule
   it sends through) are still watched, only nothing is borrowed.
+- **Protected** (a switch on a rule, agent 0.24): podkop-agent leaves the
+  rule exactly as podkop builds it (nothing borrowed into it, none of its
+  servers kept out; a sing-box config that changes it is not written).
+  **podkop-sentinel**, a small watcher of its own on the router, restarts
+  an agent daemon that stands still, and when a protected rule stops
+  answering for 5 minutes while the provider's line is up it tries **safe
+  mode**: plain podkop without the agent's additions. Safe mode stays only
+  if the rule works with it (otherwise the agent is back and the next try
+  comes 6 hours later); Overview shows it with **Leave safe mode**. While
+  it is on there are no applies, self-heal or kill switch updates. Nothing
+  is protected until you switch it on; main is the usual choice.
 - **IPv6** (**Connection health → IPv6**): podkop routes IPv4 only. If the
   router gives the LAN IPv6, a device with its own DNS reaches any site over
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the

@@ -268,3 +268,30 @@ def test_connection_checks_slow_down_only_while_nothing_is_wrong():
     assert not reliability.calm(dict(report, direct=bad))
     assert not reliability.calm(dict(report, banned=["main-2-out"]))
     assert not reliability.calm(dict(report, nodes={}))
+
+
+def test_update_dialog_says_whether_another_router_ran_this_agent(tmp_path):
+    import re
+    import time
+    db, hub, rt, rid = _hub(tmp_path)
+    version = re.search(r'^AGENT_VERSION="([^"]+)"', (hub.src / "router/podkop-agent").read_text(), re.M).group(1)
+    assert hub.agent_tried(rid) == {"version": version, "routers": []}
+    spare = db.add_router("spare", "spare", 22, "ssh-ed25519 BBBB")
+    other = RouterRuntime(db.router(spare), tmp_path / "key")
+    other.status = {"agent": {"version": version}}
+    hub.routers[spare] = other
+    db.add_event(spare, "agent_started", {"version": version})
+    db.x("UPDATE events SET t = ? WHERE router_id = ?", time.time() - 30 * 3600, spare)
+    assert hub.agent_tried(rid)["routers"] == [{"name": "spare", "hours": 30.0, "trouble": False}]
+    db.add_event(spare, "agent_stuck", {})
+    assert hub.agent_tried(rid)["routers"][0]["trouble"] is True
+    other.status = {"agent": {"version": "0.1.0"}}             # runs something else: says nothing
+    assert hub.agent_tried(rid)["routers"] == []
+
+
+def test_safe_mode_is_an_alert_until_it_is_left(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path)
+    hub._on_message(rt, {"type": "safe_mode", "reason": "main did not answer", "trial": True})
+    assert rt.alert["type"] == "safe_mode"
+    hub._on_message(rt, {"type": "safe_mode_off", "reason": "switched off"})
+    assert rt.alert is None

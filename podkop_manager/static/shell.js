@@ -19,6 +19,7 @@ export function routerState(rt) {
   if (!rt.online) return { cls: "bad", label: rt.checked ? "offline" : "connecting" };
   const p = rt.status.podkop;
   if (p.busy) return { cls: "warn", label: "applying" };
+  if ((rt.status.safe_mode || {}).on) return { cls: "warn", label: "safe mode" };
   if (p.paused) return { cls: "warn", label: "stopped" };
   if (!p.enabled) return { cls: "warn", label: "disabled" };
   if (!p.running) return { cls: "bad", label: "podkop down" };
@@ -32,6 +33,7 @@ export const alertText = (a) => (a.type === "group_down" ? `a rule's servers sto
   : a.type === "change_not_applied" ? `a change was not applied ${ago(a.t)}`
   : a.type === "probe_failed" ? `the nightly probe failed ${ago(a.t)}`
   : a.type === "probe_not_started" ? `the nightly probe did not start ${ago(a.t)}`
+  : a.type === "safe_mode" ? `safe mode since ${ago(a.t)}`
   : a.type === "agent_stuck" ? `the router's watchdog stands still since ${ago(a.t)}`
   : a.type === "vpn_down" ? `the VPN went down ${ago(a.t)}`
   : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);

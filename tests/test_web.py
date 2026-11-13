@@ -44,6 +44,7 @@ class FakeHub:
     probe_status = Hub.probe_status
     _avoided_links = Hub._avoided_links
     sub_links = Hub.sub_links
+    agent_tried = Hub.agent_tried
 
     def local_probe_missing(self):
         return "sing-box not found"

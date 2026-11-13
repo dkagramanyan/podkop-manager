@@ -48,6 +48,16 @@ export async function viewOverview(main, id) {
       !rt.online ? h("div", { class: "banner bad" }, h("span", { class: "dot bad" }),
         h("span", { class: "grow" }, h("b", {}, "The router does not answer. "), rt.error || ""),
         h("span", { class: "muted small" }, rt.down_since ? `since ${shortWhen(rt.down_since)}` : "")) : null,
+      st && st.safe_mode && st.safe_mode.on ? h("div", { class: "banner bad" }, h("span", { class: "dot bad" }),
+        h("span", { class: "grow" }, h("b", {}, "Safe mode. "),
+          `The router runs plain podkop: no watchdog, self-heal, kill switch updates or applies from here. ${st.safe_mode.reason || ""}`
+          + (st.safe_mode.trial ? " (being tried: it stays only if the protected rules work with it)" : "")),
+        h("button", { type: "button", class: "btn", onclick: async (e) => {
+          const b = e.currentTarget; b.disabled = true;
+          try { await api("PUT", `/api/routers/${id}/safe-mode`, { on: false }); toast("Safe mode off"); }
+          catch (err) { toast(err.message, true); }
+          b.disabled = false;
+        } }, "Leave safe mode")) : null,
       waiting(rt, cfg, running),
       st ? statusStrip(st) : null,
       h("div", { class: "split" },

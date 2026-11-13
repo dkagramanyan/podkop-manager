@@ -262,6 +262,7 @@ export function ruleEditor(w, s, { onRename }) {
         auto ? null : h("span", {}, "The probe tests your keys and picks servers by region, ping and speed"))) : null,
     ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
     ct === "proxy" && (pt === "urltest" || (pt === "outbound" && viaRule(w, s))) ? strictField(w, s) : null,
+    protectField(w, s),
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
     ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,
@@ -485,6 +486,28 @@ function strictField(w, s) {
       h("span", {}, off ? `Needs self-heal on for ${watched}, or agent 0.17 (Connection health)`
         : via ? `Through ${via.name}'s servers or nowhere: connections refused at once while none of them answers (even if ${via.name} borrowed servers), its sites blocked on the router while podkop is down`
           : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down (works with self-heal off too)")));
+}
+
+// Protected: the agent never changes this rule at run time, and the router
+// falls back to plain podkop when it stops working (saved on the router at
+// once; agent 0.24)
+function protectField(w, s) {
+  const heal = w.heal;
+  if (!heal || !Array.isArray(heal.protected)) return null;
+  const on = heal.protected.includes(s.name);
+  return h("label", { class: "check" },
+    h("input", { type: "checkbox", role: "switch", checked: on, onchange: async (e) => {
+      const sections = heal.protected.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
+      e.target.disabled = true;
+      try {
+        heal.protected = (await api("PUT", `/api/routers/${w.id}/protect`, { sections })).protected;
+        toast(e.target.checked ? `${s.name} is protected` : `${s.name} is not protected any more`);
+      } catch (err) { toast(err.message, true); }
+      finally { w.redraw(); }
+    } }),
+    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Protected"),
+      h("span", {}, "podkop-agent leaves this rule exactly as podkop builds it: no borrowed servers, none of its servers kept out. "
+        + "If it stops working for 5 minutes while the provider's line is up, the router tries plain podkop (safe mode) and keeps it only if that helps")));
 }
 
 export async function toggleAuto(w, s, on) {

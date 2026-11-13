@@ -427,7 +427,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.get("/api/routers/{rid}/agent-upgrade", dependencies=[api])
     async def agent_upgrade(rid: int):
         router_or_404(rid)
-        return {"command": upgrade_command(release_tag(hub.src))}
+        return {"command": upgrade_command(release_tag(hub.src)), "tried": hub.agent_tried(rid)}
 
     @app.post("/api/routers/{rid}/agent-upgrade", dependencies=[api])
     async def agent_upgrade_now(rid: int):
@@ -486,6 +486,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return {"supported": heal is not None, "sections": sections,
                 "off": (heal or {}).get("off", []), "strict": (heal or {}).get("strict"),
                 "needs_heal": agent < [0, 17, 0],      # before 0.17 the kill switch worked only with self-heal on
+                # protected rules (agent 0.24): None = this agent cannot
+                "protected": (rt.status or {}).get("protected"),
                 "groups": (heal or {}).get("groups", {})}
 
     @app.put("/api/routers/{rid}/heal", dependencies=[api])
@@ -506,6 +508,28 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
             raise HTTPException(400, "sections must be a list of section names")
         out = await rt.agent.call("strict", payload={"sections": sections}, timeout=60)
+        await hub.refresh(rt)
+        return out
+
+    @app.put("/api/routers/{rid}/protect", dependencies=[api])
+    async def protected_rules(rid: int, body: dict):
+        """Protected rules (agent 0.24): the agent never changes them at run
+        time, and podkop-sentinel falls back to plain podkop for them."""
+        rt = router_or_404(rid)
+        sections = body.get("sections")
+        if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
+            raise HTTPException(400, "sections must be a list of section names")
+        out = await rt.agent.call("protect", payload={"sections": sections}, timeout=60)
+        await hub.refresh(rt)
+        return out
+
+    @app.put("/api/routers/{rid}/safe-mode", dependencies=[api])
+    async def safe_mode(rid: int, body: dict):
+        """Safe mode (agent 0.24): plain podkop, the agent only looks."""
+        rt = router_or_404(rid)
+        if not isinstance(body.get("on"), bool):
+            raise HTTPException(400, "on must be true or false")
+        out = await rt.agent.call("safe-mode", "on" if body["on"] else "off", timeout=60)
         await hub.refresh(rt)
         return out
 
