@@ -94,6 +94,17 @@ def checked_path(rows: list[dict]) -> str:
     return "degraded"
 
 
+def calm(report: dict) -> bool:
+    """Nothing in the check asks for a closer look: every server tested and
+    the direct path answered, DNS works, nothing is kept out of its group."""
+    nodes = report.get("nodes") or {}
+    return (bool(nodes) and all(checked_path(rows) == "up" for rows in nodes.values())
+            and checked_path(report.get("direct") or []) == "up"
+            and report.get("router_dns") is True and report.get("primary_dns", {}).get("ok") is not False
+            and all(payload_state(rows) == "up" for rows in (report.get("payload") or {}).values())
+            and not report.get("banned"))
+
+
 def payload_state(rows: list[dict]) -> str:
     outcome = checked_path(rows)
     if outcome == "up" and not all(v.get("bytes") == 65536 for v in rows):

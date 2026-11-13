@@ -91,7 +91,8 @@ let d = make();
 assert.equal(verdict(d).tone, 'ok');
 assert.equal(verdict(d, {online:false}).title, 'Router unreachable');
 d.summary = {failures:100000}; assert.equal(verdict(d).tone, 'ok'); // log volume is not a current check
-assert.equal(healthVerdict(d, {}, 1300).title, 'Results are out of date');
+assert.equal(healthVerdict(d, {}, 1300).tone, 'ok');       // calm checks come every 300 s
+    assert.equal(healthVerdict(d, {}, 2000).title, 'Results are out of date');
 d.latest = {error:'collector failed'}; assert.equal(verdict(d).title, 'Last check could not finish');
 d = make(); d.checks = []; assert.equal(verdict(d).title, 'No baseline yet');
 d = make(); d.agent.supported = false; assert.equal(verdict(d).title, 'Diagnostics unavailable');

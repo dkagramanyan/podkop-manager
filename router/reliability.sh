@@ -34,6 +34,12 @@ diagnostic_lookup() (
   exit "$_dl_rc"
 )
 
+# diagnostic_byte <offset> <file>: that byte as a number (OpenWrt has hexdump
+# and no od: with od alone a working DoH resolver was always reported down)
+diagnostic_byte() {
+  hexdump -s "$1" -n 1 -e '1/1 "%u"' "$2" 2>/dev/null || od -An -tu1 -j"$1" -N1 "$2" 2>/dev/null | tr -d ' '
+}
+
 diagnostic_primary_dns() (
   _dp=$(jq -c '.dns.servers[]? | select(.tag == "dns-server")' "$1")
   _dt=$(printf '%s' "$_dp" | jq -r '.type // "unknown"')
@@ -58,8 +64,8 @@ diagnostic_primary_dns() (
           -o "$2/primary.dns" -w '%{http_code}' \
           "https://$_name:$_port$_path?dns=AAABAAABAAAAAAAAB2V4YW1wbGUDY29tAAABAAE" 2>/dev/null)
         if [ "$_code" = 200 ] && [ "$(wc -c < "$2/primary.dns" 2>/dev/null)" -ge 12 ]; then
-          _qr=$(od -An -tu1 -j2 -N1 "$2/primary.dns" | tr -d ' ')
-          _rcode=$(od -An -tu1 -j3 -N1 "$2/primary.dns" | tr -d ' ')
+          _qr=$(diagnostic_byte 2 "$2/primary.dns")
+          _rcode=$(diagnostic_byte 3 "$2/primary.dns")
           [ "$((_qr & 128))" = 128 ] && [ "$((_rcode & 15))" = 0 ] && _ok=true
         fi ;;
     esac
@@ -473,7 +479,7 @@ guard_build() {
   ( flock 4; guard_build_locked ) 4> "$RUN/guard/build.lock"
 }
 guard_build_locked() {
-  _gc=$(config_json) || return 1
+  _gc=$(seen_json) || return 1
   _gs=$(strict_json)
   _gk=$(printf '%s%s%s%s' "$(printf '%s' "$_gc" | jq -cS "${FP_JQ:-.}" 2>/dev/null)" "$_gs" "$(cat "$RUN/guard/resolved" 2>/dev/null)" \
     "$(cat "$RUN/guard/lists.rev" 2>/dev/null)" | md5sum | cut -c 1-32)
@@ -843,6 +849,18 @@ heal_commit() {
 }
 heal_state_write() { printf '%s\n' "$1" > "$RUN/heal/state.t" && mv "$RUN/heal/state.t" "$RUN/heal/state.json"; }
 
+# heal_slim <sing-box config>: its groups only, in $RUN/heal/slim.json; made
+# again when the config changed (the stamp is made before the read)
+heal_slim() {
+  if [ -s "$RUN/heal/slim.json" ] && [ "$RUN/heal/slim.stamp" -nt "$1" ]; then return 0; fi
+  : > "$RUN/heal/slim.stamp.t"
+  jq -c '{outbounds: [.outbounds[]? | select(.type == "urltest" or .type == "selector")
+      | {type, tag, outbounds, fallbacks, url, default} | with_entries(select(.value != null))]}' "$1" > "$RUN/heal/slim.t" 2>/dev/null &&
+    [ -s "$RUN/heal/slim.t" ] && mv "$RUN/heal/slim.t" "$RUN/heal/slim.json" && mv "$RUN/heal/slim.stamp.t" "$RUN/heal/slim.stamp" && return 0
+  rm -f "$RUN/heal/slim.t" "$RUN/heal/slim.stamp.t" "$RUN/heal/slim.json" "$RUN/heal/slim.stamp"
+  return 1
+}
+
 # heal_check: one round (the daemon runs it every 30 s)
 heal_check() {
   mkdir -p "$RUN/heal"
@@ -862,8 +880,11 @@ heal_check() {
     return 0
   fi
   rm -f "$RUN/heal/silent"
-  _hf=$(config_fp) || return 0
+  _hf=$(seen_fp) || return 0
   [ -s "$RUN/heal/state.json" ] || echo '{}' > "$RUN/heal/state.json"
+  # the round reads the groups a dozen times: from a copy with nothing but
+  # them, not from sing-box's whole config (hundreds of kB with many servers)
+  heal_slim "$_hc" && _hc="$RUN/heal/slim.json"
   heal_test "$_hc" "$RUN/heal/proxies.json"
   # the state is read and written under the apply lock: "heal-links" of the
   # manager changes it too, and a write of a plan made before would drop
@@ -895,7 +916,7 @@ heal_round() {
 
 # heal_status: for "status" and "heal"
 heal_status() {
-  _hf=$(config_fp 2>/dev/null)
+  _hf=$(seen_fp 2>/dev/null)
   jq -nc --argjson off "$(heal_off_json)" --slurpfile st "$RUN/heal/state.json" --arg fp "$_hf" '
     ($st[0] // {}) as $s
     | {off: $off, strict: $strict, guard: $guard, groups: (if ($s.fingerprint // "") == $fp then ($s.groups // {}) else {} end)}' \

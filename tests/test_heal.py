@@ -22,6 +22,8 @@ STUBS = '''
 D="$2"; RUN="$D/run"; ETC="$D/etc"; mkdir -p "$RUN" "$ETC"
 uci() { echo "$RUN/live.json"; }
 config_fp() { cat "$D/fp"; }
+seen_fp() { config_fp; }
+seen_json() { config_json; }
 proxies() { cat "$D/proxies.json"; }
 date() { if [ "${1:-}" = +%s ]; then cat "$D/now"; else command date "$@"; fi; }
 event() { printf '%s %s\\n' "$1" "${2:-{\\}}" >> "$D/events"; }
