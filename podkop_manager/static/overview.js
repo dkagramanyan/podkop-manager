@@ -102,6 +102,11 @@ export async function viewOverview(main, id) {
           h("span", {}, "The probe can't test servers on this router. Reading and applying settings work.")),
         h("a", { class: "alink", href: "https://github.com/FiyeroT/podkop-engine", target: "_blank", rel: "noopener" }, "podkop-engine")));
     }
+    if (st && Math.abs(st.clock_off || 0) > 300) {
+      notes.push(h("div", { class: "note" }, h("span", { class: "dot warn" }),
+        h("div", { class: "col" }, h("span", {}, `The router's clock is ${Math.round(Math.abs(st.clock_off) / 60)} min ${st.clock_off > 0 ? "behind" : "ahead"}`),
+          h("span", {}, "TLS and Reality servers refuse connections when the clock is wrong. Check System → Time (NTP) on the router."))));
+    }
     if (st && st.ipv6 && st.ipv6.lan && !st.ipv6.blocked) {
       notes.push(h("div", { class: "note" }, h("span", { class: "dot warn" }),
         h("div", { class: "col" }, h("span", {}, "IPv6 goes around podkop"),

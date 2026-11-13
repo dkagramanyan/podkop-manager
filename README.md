@@ -157,6 +157,14 @@ that already runs there are taken into **Keys and usage** and the rules.
   IPv6 past podkop; one switch adds a firewall rule that keeps IPv6 from the
   LAN off the internet (devices fall back to IPv4 at once). Overview warns
   while the LAN has IPv6 and the rule is off.
+- **Devices' own DNS** (**Connection health**, agent 0.26, off by default): a
+  rule by domain works through the router's DNS. One switch makes the LAN use
+  it: plain DNS is answered by the router, DNS over TLS and DNS over HTTPS to
+  the well-known public resolvers are refused.
+- **The manager's own watch**: a hung manager ends itself and Docker starts
+  it again; after a start it says for how long it was not running; with
+  `PODKOP_MANAGER_HEARTBEAT_URL` in `.env` an uptime monitor of yours is
+  told every minute that it works.
 - A rule's probe parameters have **If none works**: when nothing in its
   countries answers, self-heal may take a server in Europe or anywhere;
   the nightly probe keeps to the rule's countries. A router with less than

@@ -7,6 +7,8 @@ Credentials come from the environment (.env with Docker Compose):
   PODKOP_MANAGER_USER             the web login's name (default admin)
   PODKOP_MANAGER_PASSWORD         its password, at least 8 characters
   PODKOP_MANAGER_HTTPS=1          the login cookie goes over HTTPS only (behind a TLS proxy)
+  PODKOP_MANAGER_HEARTBEAT_URL    requested every minute while the manager works (an uptime monitor's check-in URL)
+  PODKOP_MANAGER_WATCHDOG=0       do not end the process when it hangs (default: it ends, Docker starts it again)
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .agent import AGENT_FILES
     from .hub import Hub
+    from .selfwatch import STALL_SECONDS, SelfWatch
     from .web import create_app
 
     src = source_dir()
@@ -85,6 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     host, _, port = a.listen.rpartition(":")
     hub = Hub(db, key_path, src)
     hub.auto_engine = True       # podkop-engine for testing servers here, fetched in the background
+    hub.selfwatch = SelfWatch(d / "alive", os.environ.get("PODKOP_MANAGER_HEARTBEAT_URL", "").strip(),
+                              0 if os.environ.get("PODKOP_MANAGER_WATCHDOG", "") == "0" else STALL_SECONDS)
     app = create_app(db, hub, public_key, password,
                      os.environ.get("PODKOP_MANAGER_USER", "").strip() or "admin",
                      secure_cookies=os.environ.get("PODKOP_MANAGER_HTTPS", "") == "1")

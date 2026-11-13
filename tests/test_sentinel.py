@@ -104,6 +104,20 @@ def test_nothing_is_judged_while_podkop_is_off_or_an_apply_runs(box):
     assert box.calls() == [] and not box.mark.exists()
 
 
+def test_nothing_is_judged_before_ntp_has_set_the_clock(box, tmp_path):
+    box.beat()
+    box.protect("main")
+    box.up()
+    mark = tmp_path / "clock"
+    for _ in range(7):                                        # after a power cut: TLS fails until the clock is right
+        box.run(PODKOP_CLOCK_MARK=str(mark), PODKOP_SENTINEL_CLOCK="999999999")
+    assert box.calls() == [] and not box.mark.exists()
+    mark.write_text("")
+    for _ in range(5):
+        box.run(PODKOP_CLOCK_MARK=str(mark), PODKOP_SENTINEL_CLOCK="999999999")
+    assert box.mark.exists()
+
+
 def test_safe_mode_when_a_protected_rule_fails_and_plain_podkop_helps(box):
     box.beat()
     box.protect("main")

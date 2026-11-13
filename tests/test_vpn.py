@@ -335,3 +335,42 @@ def test_podkop_enabled_looks_at_the_start_links_without_running_a_script(tmp_pa
     assert run() == "no"
     (rc / "S99podkop").write_text("")
     assert run() == "yes"
+
+
+def test_dns_guard_writes_three_firewall_sections_once_and_removes_them(tmp_path):
+    code = _agent_code("# --- the router.s DNS for every device", "# --- OpenVPN client")
+    script = f'''
+F="{tmp_path}/fw"; mkdir -p "$F"
+uci() {{
+  [ "$1" = -q ] && shift
+  case "$1" in
+    get) [ -f "$F/${{2#firewall.}}" ] && echo x ;;
+    set) k=${{2%%=*}}; k=${{k#firewall.}}; echo "${{2#*=}}" >> "$F/${{k%%.*}}" ;;
+    add_list) k=${{2%%=*}}; k=${{k#firewall.}}; echo "${{2#*=}}" >> "$F/${{k%%.*}}" ;;
+    delete) rm -f "$F/${{2#firewall.}}" ;;
+    commit) echo commit >> "{tmp_path}/commits" ;;
+  esac
+}}
+event() {{ echo "$1 $2" >> "{tmp_path}/events"; }}
+reply() {{ printf '%s\\n' "$1"; }}
+fail() {{ echo "$*" >&2; exit 1; }}
+{code}
+'''
+    code_run = lambda c: subprocess.run(["sh", "-c", script.replace("/etc/init.d/firewall reload", "true") + c],  # noqa: E731
+                                        capture_output=True, text=True, timeout=30)
+    assert json.loads(code_run("dns_json").stdout) == {"guard": False}
+    assert json.loads(code_run("cmd_dns_guard on").stdout) == {"guard": True}
+    assert sorted(p.name for p in (tmp_path / "fw").iterdir()) == ["podkop_agent_dns_doh", "podkop_agent_dns_dot", "podkop_agent_dns_redirect"]
+    redirect = (tmp_path / "fw/podkop_agent_dns_redirect").read_text().split("\n")
+    assert redirect[0] == "redirect" and "53" in redirect and "DNAT" in redirect and "lan" in redirect
+    doh = (tmp_path / "fw/podkop_agent_dns_doh").read_text().split("\n")
+    assert "REJECT" in doh and "443" in doh and "1.1.1.1" in doh and "8.8.8.8" in doh
+    assert "853" in (tmp_path / "fw/podkop_agent_dns_dot").read_text().split("\n")
+    code_run("cmd_dns_guard on")                                  # already on: nothing is written (flash)
+    assert (tmp_path / "commits").read_text().count("commit") == 1
+    assert json.loads(code_run("cmd_dns_guard off").stdout) == {"guard": False}
+    assert not list((tmp_path / "fw").iterdir()) and (tmp_path / "commits").read_text().count("commit") == 2
+    code_run("cmd_dns_guard off")
+    assert (tmp_path / "commits").read_text().count("commit") == 2
+    assert (tmp_path / "events").read_text().splitlines() == ['dns_guard {"on":true}', 'dns_guard {"on":false}']
+    assert code_run("cmd_dns_guard maybe").returncode == 1

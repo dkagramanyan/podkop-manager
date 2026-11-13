@@ -31,6 +31,7 @@ TEXT = {
     "recovery_gave_up": lambda d: "watchdog gave up after 3 tries in an hour",
     "vpn_down": lambda d: "VPN is down" + (f": {d['last']}" if d.get("last") else "") + ("" if d.get("running") else " (OpenVPN is not running)"),
     "vpn_up": lambda d: "VPN is up again",
+    "group_stuck": lambda d: f"{d.get('section')}: sing-box kept {d.get('server')}, which does not answer, although another server did; podkop is restarted",
     "clash_api_silent": lambda d: "sing-box runs but does not answer; podkop is restarted",
     "reverted": lambda d: f"a change was reverted: {d.get('reason') or d.get('message') or ''}",
     "revert_failed": lambda d: "a change failed and could not be reverted",
@@ -53,6 +54,11 @@ TEXT = {
     "router_offline": lambda d: f"the manager cannot reach the router: {d.get('message') or ''}",
     "router_online": lambda d: "the router answers again",
 }
+
+
+def span(seconds: float) -> str:
+    m = int(seconds // 60)
+    return f"{m} min" if m < 120 else f"{m // 60} h {m % 60} min"
 
 
 def text(router: str, event: str, data: dict) -> str | None:

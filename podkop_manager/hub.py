@@ -158,6 +158,7 @@ class Hub:
         self.forward_key = key.parent / "id_forward"
         self.engine = {"state": "", "error": ""}    # its download: "", "downloading", "failed"
         self.auto_engine = False     # serve: download podkop-engine at start when it isn't there
+        self.selfwatch = None              # set by the command line: the manager's own watch (selfwatch.py)
         self.routers: dict[int, RouterRuntime] = {}
         self.subscribers: set[asyncio.Queue] = set()
         self.tasks: list[asyncio.Task] = []
@@ -174,9 +175,23 @@ class Hub:
         self.tasks.append(asyncio.create_task(self._scheduler()))
         self.tasks.append(asyncio.create_task(self._pruner()))
         self.tasks.append(asyncio.create_task(self._backup_loop()))
+        if self.selfwatch:
+            self._was_down(self.selfwatch.down_for())
+            self.tasks.append(asyncio.create_task(self.selfwatch.run()))
         self._resume()
         if self.auto_engine and not shutil.which("sing-box", path=self.probe_path):
             self.download_engine()
+
+    def _was_down(self, gap: float | None) -> None:
+        """After a start: the manager was not running for a while, and what
+        the routers reported in that time was not sent to anybody."""
+        settings = self.db.get_setting("notify", notify.DEFAULTS)
+        if gap is None or not notify.configured(settings):
+            return
+        since = dt.datetime.fromtimestamp(time.time() - gap).strftime("%d.%m %H:%M")
+        message = (f"podkop-manager runs again. It was not running for {notify.span(gap)} (since {since}); "
+                   "alerts from the routers in that time were not sent.")
+        self._background_task(self.send_notification(settings, message, {"event": "manager_started", "data": {"down_seconds": int(gap)}}))
 
     async def stop(self) -> None:
         for rt in list(self.routers.values()):
@@ -252,6 +267,8 @@ class Hub:
         try:
             old = (rt.status or {}).get("agent")
             rt.status = await rt.agent.call("status", timeout=30)
+            if isinstance(rt.status.get("time"), (int, float)):      # agent 0.26: the router's clock against this server's
+                rt.status["clock_off"] = round(time.time() - rt.status["time"])
             self._clear_heal_alert(rt)
             self._check_daemon(rt)
             if rt.status.get("agent") != old:

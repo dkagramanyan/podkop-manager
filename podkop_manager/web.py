@@ -613,6 +613,18 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         await hub.refresh(rt)
         return out
 
+    @app.put("/api/routers/{rid}/dns-guard", dependencies=[api])
+    async def dns_guard(rid: int, body: dict):
+        """podkop's rules by domain work through the router's DNS: firewall
+        rules send the LAN's plain DNS to the router and refuse DNS over TLS
+        and DNS over HTTPS to the well-known public resolvers (agent 0.26)."""
+        rt = router_or_404(rid)
+        if not isinstance(body.get("on"), bool):
+            raise HTTPException(400, "on must be true or false")
+        out = await rt.agent.call("dns-guard", "on" if body["on"] else "off", timeout=60)
+        await hub.refresh(rt)
+        return out
+
     @app.post("/api/routers/{rid}/reliability/check", dependencies=[api])
     async def check_connections(rid: int):
         rt = router_or_404(rid)

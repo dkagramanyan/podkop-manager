@@ -29,7 +29,7 @@ RELEASE="$REPO_URL/releases/latest/download"
 KEYS=/etc/dropbear/authorized_keys
 MARK=podkop-agent
 FWD_MARK=podkop-agent-forward
-KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /etc/init.d/podkop-guard"
+KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /etc/init.d/podkop-guard /etc/hotplug.d/ntp/90-podkop-agent"
 
 set -u
 KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0; PRINT_SENTINEL=0
@@ -65,7 +65,7 @@ sentinel_text() {
 # shellcheck shell=dash
 # podkop-sentinel: watches podkop-agent from outside. Installed by
 # podkop-agent's install.sh; "safe mode" is described in podkop-manager.
-SENTINEL_VERSION=1
+SENTINEL_VERSION=2
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
 S=/tmp/podkop-sentinel
@@ -121,6 +121,8 @@ busy() {
   [ -f "$ETC/paused" ] && return 0
   enabled podkop || return 0
   [ "$(cut -d . -f 1 /proc/uptime)" -lt "${PODKOP_SENTINEL_BOOT:-300}" ] && return 0
+  # the clock is not set yet (no battery clock: TLS to the servers fails until NTP answers)
+  [ -f "${PODKOP_CLOCK_MARK:-/tmp/podkop-clock}" ] || [ "$(cut -d . -f 1 /proc/uptime)" -ge "${PODKOP_SENTINEL_CLOCK:-900}" ] || return 0
   for _l in install.lock apply.lock; do
     [ -e "$RUN/$_l" ] && ! flock -n "$RUN/$_l" true 2>/dev/null && return 0
   done
@@ -273,6 +275,15 @@ guard_init_install() {
   /etc/init.d/podkop-guard enabled 2>/dev/null || /etc/init.d/podkop-guard enable 2>/dev/null
 }
 
+# clock_hook_install: NTP's hotplug event leaves a mark in RAM once the clock
+# is set; the agent and the sentinel judge no server before that
+clock_hook_install() {
+  printf '%s\n' '#!/bin/sh' "# podkop-agent: NTP has set the clock (written by podkop-agent's install.sh)" \
+    '[ "$ACTION" = unsync ] || : > /tmp/podkop-clock' > "$TMP/clock-hook"
+  mkdir -p /etc/hotplug.d/ntp && put "$TMP/clock-hook" /etc/hotplug.d/ntp/90-podkop-agent
+  : > /tmp/podkop-clock      # (an install got here with the clock it has: the next boot waits for NTP)
+}
+
 # sentinel_install: written only when its text changed (flash), started then
 sentinel_install() {
   sentinel_text > "$TMP/podkop-sentinel" && sentinel_init_text > "$TMP/podkop-sentinel.init" &&
@@ -327,7 +338,7 @@ if [ "$UNINSTALL" = 1 ]; then
   [ -x /etc/init.d/podkop-sentinel ] && { /etc/init.d/podkop-sentinel stop 2>/dev/null; /etc/init.d/podkop-sentinel disable 2>/dev/null; }
   rm -rf /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /tmp/podkop-sentinel
   [ -x /etc/init.d/podkop-guard ] && /etc/init.d/podkop-guard disable 2>/dev/null
-  rm -f /etc/init.d/podkop-guard
+  rm -f /etc/init.d/podkop-guard /etc/hotplug.d/ntp/90-podkop-agent /tmp/podkop-clock
   /etc/init.d/podkop-agent stop 2>/dev/null; /etc/init.d/podkop-agent disable 2>/dev/null
   # the OpenVPN client (VPN page); the openvpn package stays
   [ -x /etc/init.d/podkop-vpn ] && { /etc/init.d/podkop-vpn stop 2>/dev/null; /etc/init.d/podkop-vpn disable 2>/dev/null; rm -f /etc/init.d/podkop-vpn; }
@@ -474,7 +485,7 @@ if [ "$UPGRADE" = 1 ]; then
     fi
   fi
   ROLLBACK=0
-  sentinel_install; guard_init_install
+  sentinel_install; guard_init_install; clock_hook_install
   for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
   echo "podkop-agent $(jq -r '.data.version' "$TMP/version.json") upgraded; keys, firewall and Podkop settings preserved"
   exit 0
@@ -510,7 +521,7 @@ fi
 for _f in $KEEP; do grep -qxF "$_f" /etc/sysupgrade.conf 2>/dev/null || echo "$_f" >> /etc/sysupgrade.conf; done
 
 /etc/init.d/podkop-agent enable && /etc/init.d/podkop-agent restart 2>/dev/null || die "could not start podkop-agent"
-sentinel_install; guard_init_install
+sentinel_install; guard_init_install; clock_hook_install
 echo "podkop-agent $(sed -n 's/^AGENT_VERSION="\(.*\)"/\1/p' /usr/bin/podkop-agent) installed"
 
 # the line for podkop-manager: LAN address, SSH port and host key (ed25519
