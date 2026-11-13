@@ -22,6 +22,10 @@ Kill switch: the first minute after a boot, and proof that it blocks
   table that something emptied or changed is loaded again (an event says so).
 - A warning when flow offloading is on in the router's firewall (offloaded
   connections go past the firewall's chains).
+- Fixed: switching a kill switch on or off while the router was busy with
+  an apply or a self-heal reload answered "busy" but had already saved the
+  list; the next try then saw nothing to change and did not load it into
+  sing-box. The list is now saved only once the change can be loaded.
 
 Looked at and left out: blocking the router's own traffic to those
 addresses (RouteGuard does): with podkop the router's DNS and list

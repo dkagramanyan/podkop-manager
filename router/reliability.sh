@@ -1005,6 +1005,12 @@ cmd_strict() {
     and all(.sections[]; type == "string" and length > 0 and (explode | all(. == 95
       or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))' >/dev/null 2>&1 ||
     fail bad_request 'expected {"sections": [section names]}'
+  # the lock before the list is written: refused after it, the list stayed
+  # saved but not loaded, and the next try saw "nothing changed"
+  _sl=0
+  if [ -n "$(singbox_pid)" ]; then
+    exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"; _sl=1
+  fi
   printf '%s' "$_sr" | jq -r '.sections | unique | .[]' > "$RUN/strict.t"
   _changed=1
   if [ -s "$RUN/strict.t" ]; then
@@ -1017,8 +1023,7 @@ cmd_strict() {
   rm -f "$RUN/strict.t"
   if [ "$_changed" = 1 ]; then
     event strict "$(jq -nc --argjson s "$(strict_json)" '{sections: $s}')"
-    if [ -n "$(singbox_pid)" ]; then
-      exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+    if [ "$_sl" = 1 ]; then
       _sw=$(hot_apply "strict rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_sw"; }
       exec 9>&-
       _sc=$(uci -q get podkop.settings.config_path); [ -n "$_sc" ] || _sc=/etc/sing-box/config.json
@@ -1026,6 +1031,7 @@ cmd_strict() {
     fi
     guard_sync
   fi
+  [ "$_sl" = 1 ] && exec 9>&-
   reply "$(heal_status)"
 }
 

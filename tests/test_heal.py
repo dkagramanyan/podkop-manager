@@ -1,6 +1,8 @@
 """Self-heal of dead URLTest groups on the router (router/reliability.sh)."""
+import fcntl
 import json
 import subprocess
+import time
 from pathlib import Path
 
 HELPER = Path(__file__).resolve().parents[1] / "router/reliability.sh"
@@ -280,6 +282,21 @@ def test_kill_switch_works_with_self_heal_off(tmp_path):
     assert r.events()[-1][0] == "strict_closed" and r.events()[-1][1]["via"] is True
 
 
+def test_kill_switch_refused_while_the_router_is_busy_saves_nothing(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/pins").write_text("")
+    with open(tmp_path / "run/apply.lock", "w") as busy:
+        fcntl.flock(busy, fcntl.LOCK_EX)
+        p = subprocess.run(["sh", "-c", STUBS + "cmd_strict", "sh", str(HELPER), str(tmp_path)],
+                           input=json.dumps({"sections": ["main"]}), capture_output=True, text=True, timeout=30)
+        assert p.returncode == 1 and "busy" in p.stderr
+        assert not (tmp_path / "etc/strict").exists() and not (tmp_path / "events").exists()
+    r.sh("cmd_strict", json.dumps({"sections": ["main"]}))      # the next try saves and loads it
+    assert (tmp_path / "etc/strict").read_text() == "main\n"
+    assert (tmp_path / "applies").read_text().splitlines() == ["strict rules changed"]
+
+
 GUARD_STUBS = '''
 PODKOP_LIB="$D/nolib"
 config_json() { cat "$D/podkop.json"; }
@@ -399,7 +416,6 @@ def test_heal_off_command_validates_and_writes_only_on_change(tmp_path):
 # --- manager ----------------------------------------------------------------------------------
 
 import asyncio  # noqa: E402
-import time  # noqa: E402
 
 from podkop_manager import podkop  # noqa: E402
 from podkop_manager.db import DB  # noqa: E402
