@@ -3,6 +3,30 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.53.0 — 2026-11-18
+
+Podkop sections for a VPN server (agent 0.27.0; the manager is unchanged).
+
+- **`sections`** (a new agent command): a VPN server in front of the router
+  (its clients all reach the router from one address) asks which podkop
+  section a domain or an address belongs to, and counts the traffic of each
+  of its own clients by section itself. The agent learns the answers from
+  sing-box's open connections on its usual 15 s traffic poll: domain →
+  section, the FakeIP address the router's DNS gives that domain, and real
+  addresses that reached a section through podkop's address lists. Kept in
+  RAM (`/tmp/podkop-agent/sections/map.json`), up to 4096 names, 7 days.
+- The answer holds only the names and addresses that were asked, the list of
+  sections, the agent's version, podkop's address list on request
+  (`"subnets": true`) and an id of the FakeIP addresses: they are given out
+  again after a reboot or when sing-box starts a new cache file, so the id
+  changes then, the agent asks the router's DNS for every known name again
+  and the server forgets what it knew.
+- **A key that can ask nothing else**: in `/etc/dropbear/authorized_keys`,
+  `restrict,command="/usr/bin/podkop-agent --sections-only" <key>` runs
+  `sections` whatever the client sends.
+- The upgrade test for a running connection check no longer depends on the
+  machine's speed.
+
 ## 1.52.0 — 2026-11-13
 
 A rule stuck on a dead server, devices with their own DNS, the clock after

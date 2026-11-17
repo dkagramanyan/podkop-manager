@@ -346,6 +346,31 @@ or change routes from the imported config. Right after a full podkop
 restart, the device limit is back within seconds (the agent adds it when
 podkop is up again).
 
+## Sections for a VPN server (agent 0.27)
+
+A VPN server whose clients go out through this router (for example
+[openvpn-server](https://github.com/dkagramanyan/openvpn-server)) can show
+each client's traffic by podkop section. The router sees all of them as one
+address, so the server counts and the router only names the section:
+
+```sh
+echo '{"domains": ["www.youtube.com"], "addresses": ["198.18.0.40"]}' | ssh root@router podkop-agent sections
+```
+
+answers `{"domains": {"www.youtube.com": "youtube"}, "addresses":
+{"198.18.0.40": {"section": "youtube", "host": "www.youtube.com"}}, ...}`;
+`"subnets": true` adds podkop's address list. Up to 500 names and 500
+addresses a request. The agent knows a name once a connection to it was open
+during one of its 15 s polls and forgets it after 7 days without one; a name
+it has not seen is left out of the answer.
+
+Give the server a key of its own that can run nothing else: add to the
+router's `/etc/dropbear/authorized_keys`
+
+```
+restrict,command="/usr/bin/podkop-agent --sections-only" ssh-ed25519 AAAA... vpn-server
+```
+
 ## podkop-probe without the manager
 
 Tests every server of your keys on the router and puts the best into podkop:

@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.26.0"
+AGENT_VERSION="0.27.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn","safe","dns"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -938,6 +938,7 @@ traffic_poll() {
   if [ -n "$_sec" ]; then _c=$(curl -s --max-time 5 -H "Authorization: Bearer $_sec" "http://$_addr/connections")
   else _c=$(curl -s --max-time 5 "http://$_addr/connections"); fi
   [ -n "$_c" ] || return 0
+  printf '%s' "$_c" > "$RUN/conns.json" && sections_learn "$RUN/conns.json"; rm -f "$RUN/conns.json"
   # tag -> "<section><TAB><link>", named like tag_link does (and "<section>-out" for a url section)
   _tl=$(seen_json | jq -c '
     def lst: if . == null then [] elif type == "array" then . else [.] end;
@@ -2055,6 +2056,98 @@ cmd_probe_status() {
 
 # resolve_host <name>: its IPv4 address from outside DNS servers (the router's
 # own DNS may give podkop's fake 198.18.x addresses)
+# --- sections for the VPN server ---------------------------------------------------
+
+# The VPN server's own key (authorized_keys: restrict,command="/usr/bin/podkop-agent
+# --sections-only") may ask only this: which podkop section the traffic of its
+# users went through. The router sees all of it from one address (the core
+# router's NAT), so it answers about names and addresses, never about devices.
+# sections_learn <connections.json>, from each traffic poll: host -> section and
+# real destination -> section from sing-box's connections, and the FakeIP podkop's
+# DNS gives each new host. RAM only; the oldest entries go first.
+SECTIONS_MAX=4096
+SECTIONS_KEEP=$((7 * 86400))
+# A name keeps its FakeIP while sing-box keeps its cache file: a boot or a new
+# cache file gives the addresses out again. "<boot id>-<inode of the cache>";
+# nothing while the file is away (sing-box restarting).
+sections_gen() {
+  _gc=$(uci -q get podkop.settings.config_path); [ -n "$_gc" ] || _gc=/etc/sing-box/config.json
+  _gp=$(jq -r '.experimental.cache_file.path // empty' "$_gc" 2>/dev/null)
+  _gi=$(ls -i "${_gp:-/tmp/sing-box/cache.db}" 2>/dev/null | awk '{ print $1; exit }')
+  [ -n "$_gi" ] && printf '%s-%s' "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" "$_gi"
+}
+sections_learn() {
+  _sd="$RUN/sections"; mkdir -p "$_sd"
+  jq -e '.hosts and .dsts' "$_sd/map.json" >/dev/null 2>&1 || echo '{"hosts":{},"dsts":{}}' > "$_sd/map.json"
+  _g=$(sections_gen)
+  if [ -n "$_g" ] && [ "$(jq -r '.g // ""' "$_sd/map.json")" != "$_g" ]; then
+    # new addresses: the FakeIP of every known name is asked again below
+    jq -c --arg g "$_g" '.g = $g | .hosts |= with_entries(.value |= del(.f))' "$_sd/map.json" > "$_sd/map.new" &&
+      mv "$_sd/map.new" "$_sd/map.json"
+  fi
+  _t=$(date +%s)
+  jq -c --argjson t "$_t" --argjson max "$SECTIONS_MAX" --argjson keep "$SECTIONS_KEEP" --slurpfile m "$_sd/map.json" '
+    # (no regular expressions: the jq of OpenWrt is built without them)
+    def sec: (.chains // []) | (last // "") | rtrimstr("-out");
+    def fake: startswith("198.18.") or startswith("198.19.");
+    def trim: with_entries(select(.value.t > $t - $keep)) | to_entries | sort_by(-.value.t) | .[:$max] | from_entries;
+    $m[0] as $m
+    | [.connections[]? | {h: (.metadata.host // ""), d: (.metadata.destinationIP // ""), s: sec}
+       | select(.s != "" and .s != "direct")] as $cs
+    | {g: ($m.g // ""),
+       hosts: (reduce ($cs[] | select(.h != "")) as $c ($m.hosts; .[$c.h] = ((.[$c.h] // {}) + {s: $c.s, t: $t})) | trim),
+       dsts: (reduce ($cs[] | select(.d != "" and (.d | fake | not))) as $c ($m.dsts; .[$c.d] = {s: $c.s, t: $t}) | trim)}
+  ' "$1" > "$_sd/map.new" 2>/dev/null && mv "$_sd/map.new" "$_sd/map.json" || return 0
+  # the FakeIP of hosts seen for the first time (podkop's DNS; a few per poll)
+  jq -r '.hosts | to_entries[] | select(.value.f == null) | .key' "$_sd/map.json" | head -n 50 |
+    while IFS= read -r _h; do
+      case "$_h" in ""|*[!A-Za-z0-9._-]*) continue ;; esac
+      _a=$(nslookup "$_h" 127.0.0.42 2>/dev/null | awk '/^Name:/ { n = 1; next } n && /^Address/ { sub(/^Address[^:]*: */, ""); sub(/ .*/, ""); print; exit }')
+      case "$_a" in 198.18.*|198.19.*) printf '%s\t%s\n' "$_h" "$_a" ;; *) printf '%s\t-\n' "$_h" ;; esac
+    done > "$_sd/fakes.tsv"
+  [ -s "$_sd/fakes.tsv" ] || return 0
+  jq -c --rawfile f "$_sd/fakes.tsv" '
+    ($f | split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: .[1]}) | from_entries) as $n
+    | .hosts |= with_entries(if $n[.key] then .value.f = $n[.key] else . end)' "$_sd/map.json" > "$_sd/map.new" &&
+    mv "$_sd/map.new" "$_sd/map.json"
+}
+
+# sections: stdin {"domains": [names], "addresses": [IPv4], "subnets": bool} ->
+# {agent (its version), boot_id (of the FakeIP addresses, see sections_gen), sections, domains: {name: section}, addresses: {ip: {section, host}},
+#  subnets: ["a.b.c.d/n" | "a.b.c.d-e.f.g.h"]}; only what the router knows.
+cmd_sections() {
+  _sd="$RUN/sections"; mkdir -p "$_sd"
+  head -c 262144 > "$_sd/rq.$$"
+  jq -e '((.domains // []) | type == "array" and length <= 500 and all(type == "string"))
+         and ((.addresses // []) | type == "array" and length <= 500 and all(type == "string"))' "$_sd/rq.$$" >/dev/null 2>&1 ||
+    { rm -f "$_sd/rq.$$"; fail bad_request 'expected {"domains": [...], "addresses": [...], "subnets": bool}, at most 500 of each'; }
+  jq -e '.hosts and .dsts' "$_sd/map.json" >/dev/null 2>&1 || echo '{"hosts":{},"dsts":{}}' > "$_sd/map.json"
+  if jq -e '.subnets == true' "$_sd/rq.$$" >/dev/null 2>&1; then
+    nft -j list set inet PodkopTable podkop_subnets 2>/dev/null | jq -c '[.nftables[]? | select(.set) | .set.elem[]?
+      | if type == "string" then . elif .prefix then "\(.prefix.addr)/\(.prefix.len)"
+        elif .range then "\(.range[0])-\(.range[1])" else empty end]' > "$_sd/subnets.$$" 2>/dev/null
+    [ -s "$_sd/subnets.$$" ] || echo '[]' > "$_sd/subnets.$$"
+  else echo null > "$_sd/subnets.$$"; fi
+  { seen_json 2>/dev/null || config_json 2>/dev/null; } |
+    jq -c '[.sections[]? | select(.type == "section" and .name != "settings") | .name]' > "$_sd/names.$$" 2>/dev/null
+  [ -s "$_sd/names.$$" ] || echo '[]' > "$_sd/names.$$"
+  _g=$(sections_gen); [ -n "$_g" ] || _g=$(jq -r '.g // ""' "$_sd/map.json")
+  [ -n "$_g" ] || _g=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+  _out=$(jq -nc --arg b "$_g" --arg v "${AGENT_VERSION:-}" \
+      --slurpfile m "$_sd/map.json" --slurpfile rq "$_sd/rq.$$" --slurpfile sub "$_sd/subnets.$$" --slurpfile names "$_sd/names.$$" '
+    $m[0] as $m | $rq[0] as $rq
+    | ($m.hosts | to_entries | sort_by(.value.t)     # two names on one address: the one seen last has it
+       | map(select((.value.f // "-") != "-") | {key: .value.f, value: {section: .value.s, host: .key}})
+       | from_entries) as $fk
+    | {agent: $v, boot_id: $b, sections: $names[0],
+       domains: ([($rq.domains // [])[] | select($m.hosts[.]) | {key: ., value: $m.hosts[.].s}] | from_entries),
+       addresses: ([($rq.addresses // [])[] | if $fk[.] then {key: ., value: $fk[.]}
+                     elif $m.dsts[.] then {key: ., value: {section: $m.dsts[.].s, host: ""}} else empty end] | from_entries)}
+    + (if $sub[0] == null then {} else {subnets: $sub[0]} end)')
+  rm -f "$_sd/rq.$$" "$_sd/subnets.$$" "$_sd/names.$$"
+  reply "$_out"
+}
+
 resolve_host() {
   case "$1" in *[!0-9.]*) ;; *) echo "$1"; return ;; esac
   for _ns in 77.88.8.8 8.8.8.8; do
@@ -2080,8 +2173,11 @@ mkdir -p "$RUN/jobs" "$ETC" 2>/dev/null
 # over SSH the command comes in SSH_ORIGINAL_COMMAND (forced command of the
 # manager's key); the internal commands below are for procd and our own jobs
 REMOTE=0
-if [ -n "${SSH_CONNECTION:-}" ]; then
-  REMOTE=1
+[ -n "${SSH_CONNECTION:-}" ] && REMOTE=1
+if [ "${1:-}" = "--sections-only" ]; then
+  # the VPN server's key: whatever it sends, only "sections" runs
+  set -- sections
+elif [ -n "${SSH_CONNECTION:-}" ]; then
   if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
     set -f
     # shellcheck disable=SC2086
@@ -2104,6 +2200,7 @@ case "$_cmd" in
   heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
   strict)        command -v cmd_strict >/dev/null || fail unsupported "reinstall agent for strict rules"; cmd_strict ;;
   resolve)       cmd_resolve ;;
+  sections)      cmd_sections ;;
   ipv6)          cmd_ipv6 "$@" ;;
   dns-guard)     cmd_dns_guard "$@" ;;
   vpn)           cmd_vpn "$@" ;;
@@ -2148,7 +2245,7 @@ case "$_cmd" in
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic diagnostics eligibility heal heal-off heal-links strict protect safe-mode resolve ipv6 vpn upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic sections diagnostics eligibility heal heal-off heal-links strict protect safe-mode resolve ipv6 vpn upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

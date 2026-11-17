@@ -186,7 +186,7 @@ def test_upgrade_preserves_pairing_settings_and_service_state(router_files, stop
     assert all(p.read_bytes() == data for p, data in before.items())
     assert (root / "usr/share/podkop-agent/reliability.sh").read_bytes() == (src / "reliability.sh").read_bytes()
     version = subprocess.check_output([str(root / "usr/bin/podkop-agent"), "version"], env=env, text=True)
-    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "strict", "resolve", "upgrade", "ipv6", "vpn", "safe", "dns"]
+    assert json.loads(version)["data"]["capabilities"] == CAPS + ["heal", "strict", "resolve", "upgrade", "ipv6", "vpn", "safe", "dns", "sections"]
     log = Path(env["TEST_INIT_LOG"]).read_text()
     assert ("new:restart" in log) is not stopped
     assert "enable" not in log and "stop\n" not in log
@@ -233,11 +233,23 @@ def test_failed_upgrade_preserves_previous_install(router_files, failure):
 def test_upgrade_waits_for_a_running_connection_check(router_files):
     import fcntl
     import threading
+    import time
     root, src, env, run = router_files
     (root / "tmp/podkop-agent").mkdir(exist_ok=True)
-    lock = (root / "tmp/podkop-agent/diagnostics.lock").open("w")
+    path = root / "tmp/podkop-agent/diagnostics.lock"
+    lock = path.open("w")
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    threading.Timer(2, lock.close).start()      # the check ends after 2 s
+    opened = path.stat().st_mtime_ns
+
+    def end_check():
+        # the check ends 2 s after the installer reaches the lock (it opens the file for writing); how long
+        # the installer needs to get there depends on the machine
+        deadline = time.monotonic() + 60
+        while path.stat().st_mtime_ns == opened and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(2)
+        lock.close()
+    threading.Thread(target=end_check, daemon=True).start()
     result = run()
     assert result.returncode == 0, result.stderr
     assert "waiting for a connection check to finish" in result.stdout and "upgraded" in result.stdout
