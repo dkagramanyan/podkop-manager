@@ -19,7 +19,9 @@ export async function viewLogs(main, id) {
   const foot = h("div", { class: "card-foot" });
   const toolbar = h("div", { class: "row", role: "toolbar", "aria-label": "Log filters", style: "gap: 10px 12px" });
   const page = h("div", { class: "page" },
-    pageHead("Logs"),
+    pageHead("Logs", null, h("a", { class: "btn", href: `/api/routers/${id}/support-report`, download: "",
+      title: "Versions, state, settings, last changes, events and the log as one text file. Servers become host-1, host-2…; ids, keys, passwords and subscription addresses are taken out. The rules' own domains stay: read it before sending" },
+    "Support report")),
     toolbar,
     h("section", { class: "card clip", "aria-label": "Log lines" }, box, foot));
   put(main, page);

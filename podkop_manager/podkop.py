@@ -145,6 +145,85 @@ INTERNAL_OPTIONS = {"shutdown_correctly"}
 SCHEMA = {"podkop": "0.7.24", "settings": SETTINGS_OPTIONS, "section": SECTION_OPTIONS,
           "internal": sorted(INTERNAL_OPTIONS)}
 
+def _entries(o: dict, kind: str) -> list[str]:
+    """A section's own domains or subnets ("domain" / "subnet") as podkop reads them."""
+    mode = o.get(f"user_{kind}_list_type") or "disabled"
+    if mode == "dynamic":
+        raw = o.get(f"user_{kind}s") or []
+        raw = raw if isinstance(raw, list) else [raw]
+    elif mode == "text":
+        raw = re.split(r"[\s,]+", "\n".join(ln.split("//")[0] for ln in str(o.get(f"user_{kind}s_text") or "").splitlines()))
+    else:
+        raw = []
+    return [x.strip().lower().rstrip(".") for x in raw if x.strip()]
+
+
+def _same_servers(o: dict) -> str:
+    """The section whose servers a 'selector of <section>-out' rule sends through, or ""."""
+    m = re.search(r'"outbounds"\s*:\s*\[\s*"([A-Za-z0-9_]+)-out"\s*\]', str(o.get("outbound_json") or ""))
+    return m.group(1) if m and o.get("proxy_config_type") == "outbound" else ""
+
+
+def _few(items: list, n: int = 4) -> str:
+    return ", ".join(items[:n]) + (f" and {len(items) - n} more" if len(items) > n else "")
+
+
+def notes(config: dict) -> list[dict]:
+    """Things podkop accepts that are probably not meant: [{"section", "option",
+    "message"}]. Rules are tried in their order and the first that matches takes
+    the connection, so a name listed again further down never gets there."""
+    out = []
+    secs = [s for s in config.get("sections", []) if s.get("type") == "section"]
+    seen: dict[str, str] = {}          # own domain -> the first section that lists it
+    lists: dict[str, str] = {}         # community list -> the first section that has it
+    for s in secs:
+        name, o = s["name"], s.get("options") or {}
+        add = lambda option, message: out.append({"section": name, "option": option, "message": message})
+        for kind in ("domain", "subnet"):
+            mode = o.get(f"user_{kind}_list_type") or "disabled"
+            option = f"user_{kind}s_text" if mode == "text" else f"user_{kind}s"
+            items = _entries(o, kind)
+            if mode != "disabled" and not items:
+                add(option, f"own {kind}s are switched on and the list is empty"
+                    + ("; podkop logs an nft error for an empty address list" if kind == "subnet" else ""))
+            twice = sorted({x for x in items if items.count(x) > 1})
+            if twice:
+                add(option, f"listed twice: {_few(twice)}")
+            if kind != "domain":
+                continue
+            taken: dict[str, list] = {}
+            for d in dict.fromkeys(items):
+                parts = d.split(".")
+                first = next((seen[".".join(parts[i:])] for i in range(len(parts)) if ".".join(parts[i:]) in seen), None)
+                if first and first != name:
+                    taken.setdefault(first, []).append(d)
+            for first, names in taken.items():
+                a, b = _same_servers(sections_by_name(config)[first]["options"]) or first, _same_servers(o) or name
+                add(option, f"{_few(names)}: rule {first} comes first and takes "
+                    + ("them" if len(names) > 1 else "it")
+                    + (" (the same servers, so only the traffic count and a kill switch differ)" if a == b
+                       else f", so the traffic goes through {first}'s servers"))
+            for d in items:
+                seen.setdefault(d, name)
+        cl = o.get("community_lists") or []
+        for c in cl if isinstance(cl, list) else [cl]:
+            if lists.setdefault(c, name) != name:
+                add("community_lists", f"community list {c} is also in rule {lists[c]}, which comes first")
+        if o.get("connection_type", "proxy") == "proxy":
+            kind = o.get("proxy_config_type") or "url"
+            if kind == "urltest":
+                bare = lambda v: {str(x).split("#")[0] for x in (v if isinstance(v, list) else [v]) if x}
+                both = bare(o.get("urltest_proxy_links") or []) & bare(o.get("urltest_fallback_links") or [])
+                fb = bare(o.get("urltest_fallback_links") or [])
+                if both:
+                    add("urltest_fallback_links", (f"all {len(fb)} fallback servers are" if both == fb and len(fb) > 1
+                                                    else f"{len(both)} of {len(fb)} fallback servers " + ("is" if len(both) == 1 else "are"))
+                        + " also among the rule's own servers, so they add nothing when those fail")
+            if kind != "outbound" and str(o.get("outbound_json") or "").strip():
+                add("outbound_json", "an outbound is left over from an earlier configuration type; podkop does not use it")
+    return out
+
+
 YOUTUBE_PING_URL = "https://www.youtube.com/generate_204"
 
 

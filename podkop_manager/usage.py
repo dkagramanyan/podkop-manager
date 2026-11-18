@@ -12,7 +12,7 @@ import base64
 import datetime as dt
 import re
 
-from .podkop import link_name
+from .podkop import link_host, link_name
 
 GB = 1024 ** 3
 DAY = 86400
@@ -40,6 +40,23 @@ def norm(link: str) -> str:
     """A link without its #name and TLS fingerprint, to match the same server in
     different lists (the manager may have changed the fingerprint)."""
     return re.sub(r"([?&])fp=[^&#]*&?", r"\1", link.split("#", 1)[0].strip()).rstrip("?&")
+
+
+def mask(url: str) -> str:
+    """sub.example.com/s/…k9Q for a subscription's address: enough to tell keys
+    apart, not enough to use one. The address itself stays on the server."""
+    m = re.match(r"https?://([^/?#]+)([^#]*)", url or "")
+    if not m:
+        return (url or "")[:12] + "…"
+    host, path = m.group(1).rsplit("@", 1)[-1], m.group(2)
+    return f"{host}{path[:path.find('/', 1) + 1 or 1]}…{path[-3:]}" if len(path) > 8 else host + ("/…" if len(path) > 1 else "")
+
+
+def shown(key: dict) -> str:
+    """What the interface shows of a key's address."""
+    if key["kind"] == "sub":
+        return mask(key["url"])
+    return f"{key['url'].split('://', 1)[0]}://…@{link_host(key['url'])}"
 
 
 def link_index(keys: list) -> dict:
@@ -170,7 +187,7 @@ def key_usage(key: dict, samples: list, traffic: list, now: float) -> dict:
             by_rule[r["rule"]] = by_rule.get(r["rule"], 0) + r["bytes"]
 
     return {
-        "id": key["id"], "kind": key["kind"], "url": key["url"], "label": key_label(key),
+        "id": key["id"], "kind": key["kind"], "shown": shown(key), "label": key_label(key),
         "title": key["title"], "why": key["why"], "servers": len(key["links"]),
         "limit_source": "provider" if provider else "manual", "settings": {
             k: key[k] for k in ("label", "limit_source", "limit_gb", "period", "reset_time", "action", "threshold")},

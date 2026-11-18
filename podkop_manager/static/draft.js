@@ -28,6 +28,7 @@ export async function loadWork(id) {
     auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
     heal,      // self-heal state of the router: strict rules, rules left alone (agent 0.12 for strict)
     problems: old && old.problems && draft && same(old.config, draft.config) ? old.problems : null,
+    notes: old && old.notes && draft && same(old.config, draft.config) ? old.notes : [],
     saving: null, inflight: null, loaded: Date.now(), redraw: () => {},
   };
   S.work[id] = w;
@@ -109,6 +110,7 @@ export async function checkWork(w) {
   try {
     const r = await api("POST", `/api/routers/${w.id}/validate`, { config: w.config });
     w.problems = r.problems;
+    w.notes = r.notes || [];
   } catch (e) { toast(e.message, true); }
   w.checking = false;
   w.redraw();
@@ -157,7 +159,12 @@ export function draftBar(w) {
         !stale ? h("button", { type: "button", class: "btn primary", onclick: () => reviewWork(w) }, "Review and apply") : null)),
     probs.length ? h("div", { class: "problem-box", style: "margin-top: 8px" }, probs.map((p) => h("div", {},
       p.section && rulesOf(w.config).some((s) => s.name === p.section)
-        ? h("a", { href: `#/r/${w.id}/rules/${p.section}`, style: "color: inherit; text-decoration: underline" }, problemText(p)) : problemText(p)))) : null);
+        ? h("a", { href: `#/r/${w.id}/rules/${p.section}`, style: "color: inherit; text-decoration: underline" }, problemText(p)) : problemText(p)))) : null,
+    // allowed by podkop, probably not meant (a name listed twice, a rule further up that takes it)
+    w.problems && !w.problems.stale && (w.notes || []).length ? h("details", { class: "small", style: "margin-top: 8px" },
+      h("summary", { class: "muted" }, `${plural(w.notes.length, "thing")} worth a look (they do not stop Apply)`),
+      w.notes.map((p) => h("div", { style: "margin-top: 4px" },
+        h("a", { href: `#/r/${w.id}/rules/${p.section}`, style: "color: inherit; text-decoration: underline" }, problemText(p))))) : null);
   };
   w.drawBar && w.drawBar();
   return box;

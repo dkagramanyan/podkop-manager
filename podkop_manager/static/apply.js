@@ -117,7 +117,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
   const info = h("span", {}, "Will be saved in History");
   const close = h("button", { type: "button", class: "btn" }, "Close, keep going");
   const go = h("button", { type: "button", class: "btn primary", disabled: true }, "Apply");
-  let problems = null, finished = false;
+  let problems = null, notes = [], finished = false;
   // Now, or Later at a time of the browser's clock (the next 03:00 to start with)
   const pad = (x) => String(x).padStart(2, "0");
   const local = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
@@ -165,9 +165,12 @@ export async function openApply(id, { base, config, note, trigger, done }) {
         h("span", {}, icon("check", 14, { stroke: "var(--ok)", width: 2 }), "Lists and domains valid"));
       checks.className = "checks";
     }
+    // allowed by podkop, probably not meant: shown, never in the way of Apply
+    if (notes.length) checks.append(h("span", { class: "muted", style: "margin-top: 6px" }, `Worth a look (${notes.length}), does not stop Apply:`),
+      ...notes.map((p) => h("span", { class: "warn-text" }, problemText(p))));
     go.disabled = stale || problems.length > 0 || finished;
   };
-  api("POST", `/api/routers/${id}/validate`, { config }).then((r) => { problems = r.problems; showChecks(); })
+  api("POST", `/api/routers/${id}/validate`, { config }).then((r) => { problems = r.problems; notes = r.notes || []; showChecks(); })
     .catch((e) => { put(checks, h("span", {}, `Could not check: ${e.message}`)); checks.className = "checks bad"; go.disabled = stale; });
 
   const scheduleIt = async () => {

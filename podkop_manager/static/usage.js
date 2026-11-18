@@ -2,18 +2,9 @@
 
 import { pageHead, seg } from "./shell.js";
 import { S } from "./state.js";
-import { ago, api, duration, h, hhmm, icon, linkHost, linkProto, longWhen, modal, plural, put, toast } from "./ui.js";
+import { ago, api, duration, h, hhmm, icon, longWhen, modal, plural, put, toast } from "./ui.js";
 
 // --- keys and usage -----------------------------------------------------------------------------------
-
-// sub.example.com/s/…k9Q: enough to tell keys apart, not enough to use one
-export function keyLabel(url) {
-  try {
-    const u = new URL(url);
-    const path = u.pathname + u.search;
-    return path.length > 8 ? `${u.host}${path.slice(0, path.indexOf("/", 1) + 1 || 1)}…${path.slice(-3)}` : u.host + path;
-  } catch { return url.slice(0, 12) + "…"; }
-}
 
 export const countryName = (cc) => {
   try { return new Intl.DisplayNames(["en"], { type: "region" }).of(cc); } catch { return cc; }
@@ -86,7 +77,7 @@ export async function viewUsage(main, id) {
     catch (e) { toast(e.message, true); }
   };
 
-  const kindText = (k) => (k.kind === "sub" ? `subscription · ${keyLabel(k.url)}` : `single link · ${linkProto(k.url)}://…@${linkHost(k.url)}`);
+  const kindText = (k) => `${k.kind === "sub" ? "subscription" : "single link"} · ${k.shown}`;
   const bar = (k) => (k.limit ? h("div", { class: `ubar${k.pct >= 100 ? " over" : ""}`, role: "progressbar", "aria-label": `${k.label} traffic`,
     "aria-valuemin": "0", "aria-valuemax": String(k.limit), "aria-valuenow": String(k.used) },
   h("div", { style: `width: ${Math.min(100, k.pct)}%` }),

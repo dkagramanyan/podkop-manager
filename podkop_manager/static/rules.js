@@ -476,9 +476,8 @@ function strictField(w, s) {
   const on = heal.strict.includes(s.name);
   return h("label", { class: "check", title: off ? `This agent watches ${watched}'s servers only with self-heal on` : null },
     h("input", { type: "checkbox", role: "switch", checked: on, disabled: off, onchange: async (e) => {
-      const sections = heal.strict.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
       e.target.disabled = true;
-      try { Object.assign(heal, await api("PUT", `/api/routers/${w.id}/strict`, { sections })); toast(e.target.checked ? `Kill switch on for ${s.name}` : `Kill switch off for ${s.name}`); }
+      try { Object.assign(heal, await api("PUT", `/api/routers/${w.id}/strict`, { section: s.name, on: e.target.checked })); toast(e.target.checked ? `Kill switch on for ${s.name}` : `Kill switch off for ${s.name}`); }
       catch (err) { toast(err.message, true); }
       finally { w.redraw(); }
     } }),
@@ -497,10 +496,9 @@ function protectField(w, s) {
   const on = heal.protected.includes(s.name);
   return h("label", { class: "check" },
     h("input", { type: "checkbox", role: "switch", checked: on, onchange: async (e) => {
-      const sections = heal.protected.filter((x) => x !== s.name).concat(e.target.checked ? [s.name] : []);
       e.target.disabled = true;
       try {
-        heal.protected = (await api("PUT", `/api/routers/${w.id}/protect`, { sections })).protected;
+        heal.protected = (await api("PUT", `/api/routers/${w.id}/protect`, { section: s.name, on: e.target.checked })).protected;
         toast(e.target.checked ? `${s.name} is protected` : `${s.name} is not protected any more`);
       } catch (err) { toast(err.message, true); }
       finally { w.redraw(); }

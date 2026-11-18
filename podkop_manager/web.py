@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop, reliability, notify
+from . import __version__, backup, configs, podkop, reliability, notify, report, usage
 from .agent import (AgentError, connection_support, forward_line, install_command, pair,
                     parse_pairing, release_tag, require_connection_support, upgrade_command)
 from .db import DB
@@ -290,7 +290,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def validate(rid: int, body: dict):
         router_or_404(rid)
         cfg = config_of(body)
-        return {"problems": await hub.validate(rid, cfg)}
+        return {"problems": await hub.validate(rid, cfg), "notes": podkop.notes(cfg)}
 
     @app.post("/api/routers/{rid}/apply", dependencies=[api])
     async def apply(rid: int, body: dict):
@@ -423,6 +423,21 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return [dict(podkop.parse_log(line), line=line)
                 for line in await rt.agent.call("logs", str(min(lines, 2000)))]
 
+    @app.get("/api/routers/{rid}/support-report", dependencies=[api])
+    async def support_report(rid: int):
+        """Versions, state, settings, last changes, events and the log of one
+        router as a text file with the secrets taken out (report.py)."""
+        rt = router_or_404(rid)
+        logs = []
+        with contextlib.suppress(AgentError):
+            logs = await rt.agent.call("logs", "400")
+        status = dict(rt.status, proxies=rt.proxies) if rt.status else None
+        text = report.build({"name": rt.row["name"]}, status, (rt.config or {}).get("config"), db.events(rid, 60),
+                            db.versions(rid, 15), logs,
+                            {"Connection check": getattr(rt, "connection_check", None) or "none yet"})
+        return Response(text, media_type="text/plain; charset=utf-8", headers={
+            "Content-Disposition": f'attachment; filename="podkop-report-{rid}-{time.strftime("%Y%m%d-%H%M")}.txt"'})
+
     # --- probe ------------------------------------------------------------------------
     @app.get("/api/routers/{rid}/agent-upgrade", dependencies=[api])
     async def agent_upgrade(rid: int):
@@ -500,15 +515,34 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         await hub.refresh(rt)
         return out
 
+    # Kill switch and Protected are lists on the router, and a page sends the
+    # list it last saw: two switches flipped one after the other (or in two
+    # tabs) each sent a list without the other's change, and the last one won.
+    # A page now names one rule ({"section", "on"}), and the list is the
+    # router's own, one request at a time.
+    switch_locks: dict[int, asyncio.Lock] = {}
+
+    def switch_lock(rid: int) -> asyncio.Lock:
+        return switch_locks.setdefault(rid, asyncio.Lock())
+
+    def switched(body: dict, current) -> list:
+        if isinstance(body.get("section"), str) and isinstance(body.get("on"), bool):
+            if not isinstance(current, list):
+                raise HTTPException(409, "the router's list is not known yet: try again in a moment")
+            return [x for x in current if x != body["section"]] + ([body["section"]] if body["on"] else [])
+        sections = body.get("sections")
+        if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
+            raise HTTPException(400, "sections must be a list of section names")
+        return sections
+
     @app.put("/api/routers/{rid}/strict", dependencies=[api])
     async def strict_rules(rid: int, body: dict):
         """Strict rules: through their own servers or nowhere (agent 0.12)."""
         rt = router_or_404(rid)
-        sections = body.get("sections")
-        if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
-            raise HTTPException(400, "sections must be a list of section names")
-        out = await rt.agent.call("strict", payload={"sections": sections}, timeout=60)
-        await hub.refresh(rt)
+        async with switch_lock(rid):
+            sections = switched(body, ((rt.status or {}).get("heal") or {}).get("strict"))
+            out = await rt.agent.call("strict", payload={"sections": sections}, timeout=60)
+            await hub.refresh(rt)
         return out
 
     @app.put("/api/routers/{rid}/protect", dependencies=[api])
@@ -516,11 +550,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         """Protected rules (agent 0.24): the agent never changes them at run
         time, and podkop-sentinel falls back to plain podkop for them."""
         rt = router_or_404(rid)
-        sections = body.get("sections")
-        if not isinstance(sections, list) or not all(isinstance(x, str) for x in sections):
-            raise HTTPException(400, "sections must be a list of section names")
-        out = await rt.agent.call("protect", payload={"sections": sections}, timeout=60)
-        await hub.refresh(rt)
+        async with switch_lock(rid):
+            sections = switched(body, (rt.status or {}).get("protected"))
+            out = await rt.agent.call("protect", payload={"sections": sections}, timeout=60)
+            await hub.refresh(rt)
         return out
 
     @app.put("/api/routers/{rid}/safe-mode", dependencies=[api])
@@ -678,6 +711,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         rt = router_or_404(rid)
         st = None
         ps = db.probe_settings(rid)
+        # subscription addresses are secrets nobody needs to read back: masked on the way out
+        ps = dict(ps, keys=[usage.mask(k) for k in ps["keys"]])
         if settings:        # a rule's page needs only these
             return {"settings": ps}
         rules = db.auto_rules(rid)
@@ -686,7 +721,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if st:
             picks = hub.auto_picks(rid, st)
             st["rows"] = podkop.probe_rows(st, hub.probe_options(rid), picks)
-            st["keys"] = podkop.probe_keys(st.get("log") or [], db.last_probe_keys(rid))
+            st["keys"] = {usage.mask(k): v for k, v in podkop.probe_keys(st.get("log") or [], db.last_probe_keys(rid)).items()}
             secs = podkop.sections_by_name(rt.config["config"]) if rt.config else {}
             for r in rules:
                 pick = picks[r["section"]]
@@ -727,7 +762,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         db.set_probe_settings(rid, **fields)
         if "keys" in fields:
             db.sync_sub_keys(rid, fields["keys"])
-        return db.probe_settings(rid)
+        ps = db.probe_settings(rid)
+        return dict(ps, keys=[usage.mask(k) for k in ps["keys"]])
 
     # --- keys and usage -------------------------------------------------------------------
     @app.get("/api/routers/{rid}/usage", dependencies=[api])
