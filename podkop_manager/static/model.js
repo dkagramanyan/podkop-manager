@@ -184,6 +184,8 @@ export const EVENT_TEXT = {
   sentinel_restart: () => "podkop-agent's daemon stood still and was restarted by podkop-sentinel",
   agent_stuck: () => "podkop-agent's watchdog on the router stands still: no restart of podkop, no self-heal, no kill switch updates (restart it: /etc/init.d/podkop-agent restart)",
   agent_ok: () => "podkop-agent's watchdog runs again",
+  fds_high: (d) => `sing-box holds ${d.open} of ${d.limit} open files: when they run out, DNS stops for the whole network (restart podkop if it keeps climbing)`,
+  fds_ok: (d) => `sing-box's open files are back to ${d.open}`,
   agent_started: (d) => `podkop-agent ${d.version} started`,
   agent_upgraded: (d) => `podkop-agent updated to ${d.version} from the manager`,
   agent_upgrade_failed: (d) => `Agent update failed: ${d.message}`,
@@ -211,7 +213,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", fds_high: "bad", fds_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",

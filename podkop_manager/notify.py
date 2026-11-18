@@ -51,6 +51,9 @@ TEXT = {
     "agent_stuck": lambda d: "podkop-agent's watchdog on the router stands still (no restart of podkop, no kill switch updates); "
                              "restart it: /etc/init.d/podkop-agent restart",
     "agent_ok": lambda d: "podkop-agent's watchdog runs again",
+    "fds_high": lambda d: f"sing-box holds {d.get('open')} of {d.get('limit')} open files: when they run out, DNS stops for the whole network; "
+                          "restart podkop if it keeps climbing",
+    "fds_ok": lambda d: f"sing-box's open files are back to {d.get('open')}",
     "router_offline": lambda d: f"the manager cannot reach the router: {d.get('message') or ''}",
     "router_online": lambda d: "the router answers again",
 }

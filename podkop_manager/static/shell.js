@@ -11,6 +11,7 @@ import { viewSettings } from "./settings.js";
 import { S } from "./state.js";
 import { ago, h, icon, plural, put, shortWhen, store } from "./ui.js";
 import { viewUsage } from "./usage.js";
+import { viewDevices } from "./devices.js";
 import { viewVpn } from "./vpn.js";
 
 // --- routers ------------------------------------------------------------------------
@@ -35,6 +36,7 @@ export const alertText = (a) => (a.type === "group_down" ? `a rule's servers sto
   : a.type === "probe_not_started" ? `the nightly probe did not start ${ago(a.t)}`
   : a.type === "safe_mode" ? `safe mode since ${ago(a.t)}`
   : a.type === "agent_stuck" ? `the router's watchdog stands still since ${ago(a.t)}`
+  : a.type === "fds_high" ? `sing-box is running out of open files since ${ago(a.t)}`
   : a.type === "vpn_down" ? `the VPN went down ${ago(a.t)}`
   : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
 export const draftChanges = (rt) => (rt.draft && rt.draft.changes) || 0;
@@ -62,6 +64,7 @@ export const SECTIONS = {
   rules: { title: "Routing rules", view: (m, id, sub) => viewRules(m, id, sub) },
   global: { title: "Global settings", view: (m, id) => viewGlobal(m, id) },
   configs: { title: "Configs", view: (m, id) => viewConfigs(m, id) },
+  devices: { title: "Devices", view: (m, id) => viewDevices(m, id) },
   reliability: { title: "Connection health", view: (m, id) => viewReliability(m, id) },
   vpn: { title: "VPN", view: (m, id) => viewVpn(m, id) },
   logs: { title: "Logs", view: (m, id) => viewLogs(m, id) },
@@ -155,6 +158,7 @@ export function drawSide() {
         n ? h("span", { class: "count", title: `${plural(n, "change")} not applied` }, n) : null),
       h("a", { href: `#/r/${rt.id}/rules`, class: "sub", "aria-current": cur("rules") }, "Rules"),
       h("a", { href: `#/r/${rt.id}/global`, class: "sub", "aria-current": cur("global") }, "Global settings"),
+      h("a", { href: `#/r/${rt.id}/devices`, class: "sub", "aria-current": cur("devices") }, "Devices"),
       h("a", { href: `#/r/${rt.id}/configs`, class: "sub", "aria-current": cur("configs") }, "Configs"),
       link("reliability", "Connection health", "probe"),
       link("vpn", "VPN", "shield"),

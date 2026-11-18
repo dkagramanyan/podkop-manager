@@ -8,6 +8,7 @@ import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
 import { EUROPE, busyClick, countriesText, countryName, hasEurope } from "./usage.js";
+import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
 
 // --- routing rules -----------------------------------------------------------------------------------------
@@ -29,7 +30,7 @@ export async function viewRules(main, id, sub) {
   const bar = draftBar(w);
   const listBox = h("section", { "aria-label": "Rules", class: "stack", style: "flex: 1 1 400px; min-width: 0; gap: 10px" });
   const editBox = h("div", { style: "flex: 1.3 1 520px; min-width: 0" });
-  put(page, pageHead("Routing rules"),
+  put(page, pageHead("Routing rules", null, h("button", { type: "button", class: "btn", onclick: () => openRoute(id, true) }, "Where does it go?")),
     bar, h("div", { class: "split" }, listBox, editBox));
 
   const selected = () => {

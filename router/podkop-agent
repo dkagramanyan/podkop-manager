@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.27.0"
+AGENT_VERSION="0.28.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -1580,12 +1580,15 @@ cmd_status() {
     --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" \
     --argjson safe "$(safe_json)" --argjson prot "$(protected_json)" --argjson sent "$(sentinel_json)" \
     --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
+    --arg fdn "$([ -z "$_pid" ] || ls "/proc/$_pid/fd" 2>/dev/null | wc -l)" \
+    --arg fdm "$([ -z "$_pid" ] || awk '/^Max open files/ { print $4 }' "/proc/$_pid/limits" 2>/dev/null)" \
     '{agent: {version: $av, protocol: $pv, capabilities: $caps}, boot: $boot, uptime: ($up | tonumber? // 0),
       time: ($now | tonumber? // null), clock_set: ($clk == "1"), dns: $dns,
       router: {model: $fixed.model, openwrt: $fixed.os, utc_offset: $tz, mem_free: ($mem | tonumber? // null)},
       podkop: {version: $fixed.podkop, enabled: ($en == "1"), paused: ($pa == "1"), start: $st,
                running: ($pid != ""), busy: ($busy == "1")},
-      singbox: {version: $fixed.singbox, features: $fixed.features},
+      singbox: {version: $fixed.singbox, features: $fixed.features,
+                fds: (if ($fdn | tonumber? // 0) > 0 then {open: ($fdn | tonumber), limit: ($fdm | tonumber? // null)} else null end)},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
       engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6,
       daemon: {beat: ($beat | tonumber? // null)}, safe_mode: $safe, protected: $prot, sentinel: $sent,
@@ -2167,6 +2170,130 @@ cmd_resolve() {
     done | jq -Rsc 'split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: .[1]}) | from_entries')"
 }
 
+# devices: what is on the LAN, for the Devices page: DHCP leases, the fixed
+# leases of /etc/config/dhcp and the neighbours seen on podkop's source
+# interfaces (a device with an address of its own has no lease).
+cmd_devices() {
+  _ifs=$(uci -q get podkop.settings.source_network_interfaces); [ -n "$_ifs" ] || _ifs=br-lan
+  {
+    [ ! -r /tmp/dhcp.leases ] || awk '{ printf "lease\t%s\t%s\t%s\n", $3, $2, ($4 == "*" ? "" : $4) }' /tmp/dhcp.leases
+    uci -q show dhcp 2>/dev/null | awk -F "'" '
+      /^dhcp\.[^.]*=host$/ { flush(); sec = $0; sub(/=host$/, "", sec); next }
+      sec != "" && index($0, sec ".ip=") == 1 { ip = $2 }
+      sec != "" && index($0, sec ".mac=") == 1 { mac = $2 }
+      sec != "" && index($0, sec ".name=") == 1 { name = $2 }
+      function flush() { if (sec != "" && ip != "") printf "fixed\t%s\t%s\t%s\n", ip, tolower(mac), name; ip = mac = name = "" }
+      END { flush() }'
+    for _i in $_ifs; do
+      ip -4 neigh show dev "$_i" 2>/dev/null | awk '$2 == "lladdr" && $NF != "FAILED" { printf "seen\t%s\t%s\t\n", $1, $3 }'
+    done
+  } | jq -Rsc 'split("\n") | map(select(. != "") | split("\t") | {kind: .[0], ip: .[1], mac: (.[2] // "" | ascii_downcase), name: (.[3] // "")})
+      | map(select(.ip | length > 0)) | group_by(.ip)
+      | map({ip: .[0].ip, mac: (map(.mac | select(. != "")) | first // ""), name: (map(.name | select(. != "")) | first // ""),
+             fixed: any(.[]; .kind == "fixed"), lease: any(.[]; .kind == "lease")})' > "$RUN/devices.$$" 2>/dev/null
+  _dv=$(cat "$RUN/devices.$$" 2>/dev/null); rm -f "$RUN/devices.$$"
+  reply "$(jq -nc --argjson d "${_dv:-[]}" '{devices: $d}')"
+}
+
+# route: where a connection to a name or an address would go, read from the
+# configuration sing-box runs now. Its rules are tried in their order, as
+# sing-box does; a rule's lists are asked with sing-box's own "rule-set
+# match". podkop's own lists are files in RAM already; a community list is
+# downloaded to RAM (kept for a day), the way the kill switch gets its lists.
+# {"target": "name or IPv4", "from": "a device's IPv4, optional"}
+ROUTE_KEEP=86400
+ROUTE_BUDGET=${PODKOP_ROUTE_BUDGET:-60}
+route_list() {       # route_list <config> <tag> -> "<format>\t<file>" or nothing
+  _rl=$(jq -r --arg t "$2" '.route.rule_set[]? | select(.tag == $t) | [.type, (.format // "binary"), (.path // .url // "")] | join("\t")' "$1" 2>/dev/null)
+  IFS="$TAB" read -r _rt _rf _rp <<EOF_RL
+$_rl
+EOF_RL
+  case "$_rt" in
+    local) [ -s "$_rp" ] && printf '%s\t%s' "$_rf" "$_rp" ;;
+    remote)
+      _rc="$RUN/route/$(printf '%s' "$_rp" | md5sum | cut -c 1-16).$_rf"
+      _ra=$(date -r "$_rc" +%s 2>/dev/null) || _ra=0
+      # downloads share ROUTE_BUDGET seconds of one question, and a list that
+      # did not come is not asked for again for ten minutes: the answer then
+      # names the lists it could not read
+      _rn=$(date +%s); _rb=$(date -r "$_rc.bad" +%s 2>/dev/null) || _rb=0
+      if { [ ! -s "$_rc" ] || [ $((_rn - _ra)) -gt "$ROUTE_KEEP" ]; } && [ $((_rn - _rb)) -gt 600 ] &&
+         [ $((_rn - ROUTE_T0)) -lt "$ROUTE_BUDGET" ]; then
+        if command -v guard_fetch >/dev/null 2>&1; then guard_fetch "$_rp" "$_rc.t" < /dev/null
+        else wget -q -T 30 -O "$_rc.t" "$_rp" 2>/dev/null; fi
+        if [ -s "$_rc.t" ]; then mv "$_rc.t" "$_rc"; rm -f "$_rc.bad"; else rm -f "$_rc.t"; : > "$_rc.bad"; fi
+      fi
+      [ -s "$_rc" ] && printf '%s\t%s' "$_rf" "$_rc" ;;
+  esac
+}
+route_match() { sing-box rule-set match -f "$1" "$2" "$3" 2>&1 | grep -q '^match'; }
+cmd_route() {
+  _rq=$(head -c 4096)
+  _t=$(printf '%s' "$_rq" | jq -r '(.target // "") | ascii_downcase' 2>/dev/null)
+  _from=$(printf '%s' "$_rq" | jq -r '.from // ""' 2>/dev/null)
+  case "$_t" in ""|*[!a-z0-9._-]*|.*|*.) fail bad_request 'expected {"target": "a name or an IPv4 address"}' ;; esac
+  case "$_from" in *[!0-9.]*) fail bad_request "from must be a device's IPv4 address" ;; esac
+  _kind=domain; case "$_t" in *[!0-9.]*) ;; *.*.*.*) _kind=ip ;; esac
+  _c=$(uci -q get podkop.settings.config_path); [ -n "$_c" ] || _c=/etc/sing-box/config.json
+  [ -s "$_c" ] || fail not_running "sing-box has no configuration: podkop has not started yet"
+  mkdir -p "$RUN/route"; ROUTE_T0=$(date +%s)
+  # one line per routing rule: index, outbound, does the device fit, does an
+  # entry written in the rule itself match, has it any destination, its lists
+  jq -r --arg t "$_t" --arg k "$_kind" --arg from "$_from" '
+    def lst: if type == "array" then . elif . == null then [] else [.] end;
+    def num: split(".") | map(tonumber? // 0) | ((.[0] * 256 + .[1]) * 256 + .[2]) * 256 + .[3];
+    def incidr($ip; $c): ($c | split("/")) as $p | (32 - (($p[1] // "32") | tonumber? // 32)) as $h
+      | pow(2; $h) as $d | (($ip | num) / $d | floor) == (($p[0] | num) / $d | floor);
+    .route.rules | to_entries[] | .key as $i | .value
+    | select((.action // "route") == "route" and (.outbound // "") != "")
+    | (.source_ip_cidr | lst) as $src
+    | (if ($src | length) == 0 then true elif $from == "" then false
+       else any($src[]; select(test(":") | not) as $c | incidr($from; $c)) end) as $ok
+    | (if $k == "domain" then (any(.domain | lst | .[]; ascii_downcase == $t)
+          or any(.domain_suffix | lst | .[]; ascii_downcase | ltrimstr(".") as $s | $t == $s or ($t | endswith("." + $s))))
+       else any(.ip_cidr | lst | .[]; select(contains(":") | not) as $c | incidr($t; $c)) end) as $own
+    | [$i, .outbound, (if $ok then 1 else 0 end), (if $own then 1 else 0 end),
+       (if ([.domain, .domain_suffix, .domain_keyword, .domain_regex, .ip_cidr, .rule_set] | map(lst | length) | add) > 0 then 1 else 0 end),
+       (.rule_set | lst | join(" "))] | join("\t")' "$_c" > "$RUN/route/rules.$$" 2>/dev/null ||
+    { rm -f "$RUN/route/rules.$$"; fail internal "cannot read sing-box's routing rules"; }
+  _hit=""; _bad=""
+  while IFS="$TAB" read -r _i _o _ok _own _dest _sets; do
+    [ "$_ok" = 1 ] || continue
+    if [ "$_own" = 1 ]; then _hit="$_i$TAB$_o$TAB"; break; fi
+    if [ "$_dest" = 0 ]; then _hit="$_i$TAB$_o$TAB*"; break; fi
+    for _s in $_sets; do
+      _lf=$(route_list "$_c" "$_s")
+      if [ -z "$_lf" ]; then _bad="$_bad $_s"; continue; fi
+      if route_match "${_lf%%"$TAB"*}" "${_lf#*"$TAB"}" "$_t"; then _hit="$_i$TAB$_o$TAB$_s"; break 2; fi
+    done
+  done < "$RUN/route/rules.$$"
+  rm -f "$RUN/route/rules.$$"
+  # what the router itself says: a name podkop routes gets a FakeIP address
+  # from the router's DNS; an address is routed only when podkop's nft sets hold it
+  _dns=""; _set=""
+  if [ "$_kind" = domain ]; then
+    _dns=$(nslookup "$_t" 127.0.0.1 2>/dev/null | awk '/^Name:/ { n = 1; next } n && /^Address/ { sub(/^Address[^:]*: */, ""); sub(/ .*/, ""); if ($0 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print; exit } }')
+  else
+    for _ns in $(nft list sets inet 2>/dev/null | awk '$1 == "set" && $2 ~ /^podkop_/ { print $2 }'); do
+      if nft get element inet PodkopTable "$_ns" "{ $_t }" >/dev/null 2>&1; then _set=$_ns; break; fi
+    done
+  fi
+  _seen=null
+  [ ! -s "$RUN/sections/map.json" ] || _seen=$(jq -c --arg t "$_t" '(.hosts[$t] // .dsts[$t]) as $x | if $x then {section: $x.s, t: ($x.t // null)} else null end' "$RUN/sections/map.json" 2>/dev/null) || _seen=null
+  IFS="$TAB" read -r _hi _ho _hl <<EOF_RT
+$_hit
+EOF_RT
+  reply "$(jq -nc --arg t "$_t" --arg k "$_kind" --arg from "$_from" --arg hi "${_hi:-}" --arg ho "${_ho:-}" --arg hl "${_hl:-}" \
+    --arg bad "$_bad" --arg dns "$_dns" --arg set "$_set" --argjson seen "${_seen:-null}" \
+    --arg fin "$(jq -r '.route.final // ""' "$_c" 2>/dev/null)" '
+    {target: $t, kind: $k, from: $from,
+     match: (if $ho == "" then null else {rule: ($hi | tonumber), outbound: $ho,
+              list: (if $hl == "" or $hl == "*" then null else $hl end), every: ($hl == "*")} end),
+     final: $fin, unread: ($bad | split(" ") | map(select(. != ""))),
+     dns: (if $k == "domain" then {address: $dns, fakeip: ($dns | startswith("198.18.") or startswith("198.19."))} else null end),
+     nft_set: (if $k == "ip" then $set else null end), seen: $seen}')"
+}
+
 # --- dispatch -----------------------------------------------------------------------
 
 mkdir -p "$RUN/jobs" "$ETC" 2>/dev/null
@@ -2200,6 +2327,8 @@ case "$_cmd" in
   heal-links)    command -v cmd_heal_links >/dev/null || fail unsupported "reinstall agent for self-heal"; cmd_heal_links ;;
   strict)        command -v cmd_strict >/dev/null || fail unsupported "reinstall agent for strict rules"; cmd_strict ;;
   resolve)       cmd_resolve ;;
+  devices)       cmd_devices ;;
+  route)         cmd_route ;;
   sections)      cmd_sections ;;
   ipv6)          cmd_ipv6 "$@" ;;
   dns-guard)     cmd_dns_guard "$@" ;;

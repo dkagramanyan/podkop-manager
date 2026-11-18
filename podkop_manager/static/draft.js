@@ -121,7 +121,7 @@ export function reviewWork(w) {
     if (!ok) return;
     await loadWork(w.id);
     // "Close, keep going": the job may end while another page is open, which must not be redrawn under the user
-    if ([`#/r/${w.id}/rules`, `#/r/${w.id}/global`].some((p) => location.hash.startsWith(p))) render();
+    if ([`#/r/${w.id}/rules`, `#/r/${w.id}/global`, `#/r/${w.id}/devices`].some((p) => location.hash.startsWith(p))) render();
   } });
 }
 

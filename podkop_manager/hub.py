@@ -30,11 +30,12 @@ FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "fa
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
-                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode")
+                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
 CALM_CHECKS = 5          # connection checks that found nothing wrong run this many times less often
+FDS_HIGH, FDS_OK = 0.6, 0.4  # sing-box's open files against its limit: reported above, calm again below
 STUCK_SECONDS = 300      # the router's watchdog (podkop-agent daemon) gave no sign of life for this long
 TRAFFIC_SECONDS = 60     # the router's traffic per server
 EXIT_SECONDS = 3600      # a section's exit IP is looked up again after this long
@@ -118,6 +119,7 @@ class RouterRuntime:
         self.draft: dict | None = None     # summary of the unapplied draft
         self.alert: dict | None = None     # the last change undone on the router
         self.stuck_told = False            # "agent_stuck" was reported
+        self.fds_told = False              # "fds_high" was reported
         self.usage: dict = {"pct": None, "alerts": []}   # daily limits, for the menu and Overview
         self.online = False
         self.error = ""
@@ -271,6 +273,7 @@ class Hub:
                 rt.status["clock_off"] = round(time.time() - rt.status["time"])
             self._clear_heal_alert(rt)
             self._check_daemon(rt)
+            self._check_fds(rt)
             if rt.status.get("agent") != old:
                 rt.exit_ip = True                 # a new agent may have exit-ip
                 if (rt.connection_check.get("code") == "agent_upgrade"
@@ -338,6 +341,24 @@ class Hub:
             if (rt.alert or {}).get("type") == "agent_stuck":
                 rt.alert = None
             self._event(rt, "agent_ok", {})
+
+    def _check_fds(self, rt: RouterRuntime) -> None:
+        """sing-box that runs out of file descriptors stops answering DNS for
+        the whole network (podkop issue 460: a loop on its own DNS inbound,
+        35 minutes); the count climbs for a while first, which is the moment
+        to say so (agent 0.28)."""
+        fds = ((rt.status or {}).get("singbox") or {}).get("fds")
+        if not isinstance(fds, dict) or not fds.get("limit"):
+            return
+        share = fds["open"] / fds["limit"]
+        if share >= FDS_HIGH and not rt.fds_told:
+            rt.fds_told = True
+            self._event(rt, "fds_high", {"open": fds["open"], "limit": fds["limit"]})
+        elif share < FDS_OK and rt.fds_told:
+            rt.fds_told = False
+            if (rt.alert or {}).get("type") == "fds_high":
+                rt.alert = None
+            self._event(rt, "fds_ok", {"open": fds["open"], "limit": fds["limit"]})
 
     def _clear_heal_alert(self, rt: RouterRuntime) -> None:
         """A "group down" alert goes once the router has no group down (its

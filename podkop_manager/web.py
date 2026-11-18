@@ -423,6 +423,46 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return [dict(podkop.parse_log(line), line=line)
                 for line in await rt.agent.call("logs", str(min(lines, 2000)))]
 
+    def needs(rt, capability: str, version: str) -> None:
+        if capability not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
+            raise HTTPException(409, f"this router's agent is too old for it: update it first (Settings → Update agent, agent {version} or newer)")
+
+    @app.get("/api/routers/{rid}/devices", dependencies=[api])
+    async def devices(rid: int):
+        """What is on the router's LAN: leases, fixed leases, neighbours (agent 0.28)."""
+        rt = router_or_404(rid)
+        needs(rt, "devices", "0.28")
+        return await rt.agent.call("devices", timeout=30)
+
+    @app.post("/api/routers/{rid}/route", dependencies=[api])
+    async def route(rid: int, body: dict):
+        """Where a connection to a name or an address goes on this router now:
+        the rule that takes it (asked of the configuration sing-box runs), the
+        server that rule uses at the moment and where it comes out (agent 0.28)."""
+        rt = router_or_404(rid)
+        needs(rt, "route", "0.28")
+        target = re.sub(r"^[a-z]+://", "", str(body.get("target") or "").strip().lower()).split("/")[0].split(":")[0].rstrip(".")
+        source = str(body.get("from") or "").strip()
+        if not re.fullmatch(r"[a-z0-9_-]+(\.[a-z0-9_-]+)+", target):
+            raise HTTPException(400, "a name like example.com or an IPv4 address like 1.2.3.4")
+        if source and not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", source):
+            raise HTTPException(400, "the device is an IPv4 address")
+        out = await rt.agent.call("route", payload={"target": target, "from": source}, timeout=150)
+        m = out.get("match")
+        if m:
+            section = re.sub(r"(-strict)?-out$", "", m["outbound"])
+            cfg = (rt.config or {}).get("config") or {"sections": []}
+            sec = podkop.sections_by_name(cfg).get(section)
+            tag = reliability.selections(cfg, rt.proxies).get(section) if sec else None
+            lst = m.get("list") or ""
+            kind = ("domains" if lst == f"{section}-user-domains-ruleset" else "subnets" if lst == f"{section}-user-subnets-ruleset"
+                    else "community" if lst.endswith("-community-ruleset") else "list" if lst else "")
+            out["rule"] = {"section": section, "known": bool(sec), "type": (sec or {}).get("options", {}).get("connection_type", "proxy"),
+                           "by": kind, "list": lst[len(section) + 1:-len("-community-ruleset")] if kind == "community" else lst,
+                           "server": (rt.names or {}).get(tag) or tag, "exit": (rt.exits or {}).get(section),
+                           "kill_switch": section in (((rt.status or {}).get("heal") or {}).get("strict") or [])}
+        return out
+
     @app.get("/api/routers/{rid}/support-report", dependencies=[api])
     async def support_report(rid: int):
         """Versions, state, settings, last changes, events and the log of one
