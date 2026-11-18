@@ -358,6 +358,8 @@ GUARD_LIST_AGE=1440     # minutes: remote and community lists are fetched again 
 GUARD_RESOLVE_AGE=60    # minutes: the strict sections' own domains are resolved again after an hour
 GUARD_RESOLVE_MAX=400   # names resolved at most
 GUARD_RETRY=10          # minutes before a list that could not be fetched is tried again
+GUARD_FLAP_WINDOW=300   # seconds: sing-box going away twice within this is a crash loop ...
+GUARD_HOLD=60           # ... and then it must stay up this long before dnsmasq is restarted again
 
 guard_dnsmasq_dir() {
   _gd=$(grep -hs '^conf-dir=' /var/etc/dnsmasq.conf.* 2>/dev/null | head -n 1 | cut -d= -f2 | cut -d, -f1)
@@ -614,7 +616,20 @@ guard_dns_on() {
   cmp -s "$RUN/guard/dnsmasq.conf" "$_gf" 2>/dev/null && return 0
   mkdir -p "${_gf%/*}" && cp "$RUN/guard/dnsmasq.conf" "$_gf.t" && mv "$_gf.t" "$_gf" || return 1
   [ "$1" = norestart ] || guard_dnsmasq_restart
+  { tail -n 4 "$RUN/guard/downs" 2>/dev/null; printf '%s\n' "$(date +%s)"; } > "$RUN/guard/downs.t" && mv "$RUN/guard/downs.t" "$RUN/guard/downs"
   event strict_guard '{"dns":true}'
+}
+# guard_calm: may the NXDOMAIN file come out now? Each change of it restarts
+# dnsmasq, the DNS of the whole network. sing-box in a crash loop (up for a
+# few seconds, down again) made that happen twice per crash; after a second
+# fall within GUARD_FLAP_WINDOW the file stays until sing-box has run for
+# GUARD_HOLD seconds without a break. One restart of podkop is not held.
+guard_calm() {
+  _gn=$(date +%s)
+  _gc=$(awk -v n="$_gn" -v w="$GUARD_FLAP_WINDOW" 'n - $1 < w { c++ } END { print c + 0 }' "$RUN/guard/downs" 2>/dev/null)
+  [ "${_gc:-0}" -ge 2 ] || return 0
+  _gu=$(cat "$RUN/guard/up" 2>/dev/null); [ -n "$_gu" ] || _gu=$_gn
+  [ $((_gn - _gu)) -ge "$GUARD_HOLD" ]
 }
 guard_dns_off() {
   _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
@@ -633,7 +648,11 @@ guard_sync() {
   fi
   guard_build || return 0
   guard_nft_sync
-  if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then guard_dns_on restart; else guard_dns_off; fi
+  if [ -z "$(singbox_pid)" ] || [ "$(podkop_start_state)" = running ]; then rm -f "$RUN/guard/up"; guard_dns_on restart
+  else
+    [ -s "$RUN/guard/up" ] || printf '%s\n' "$(date +%s)" > "$RUN/guard/up"
+    if guard_calm; then guard_dns_off; fi
+  fi
 }
 
 # flow offloading moves forwarded connections past the firewall's chains:

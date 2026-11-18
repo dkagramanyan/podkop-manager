@@ -419,6 +419,31 @@ def test_strict_guard_blocks_the_rules_destinations_while_podkop_is_down(tmp_pat
     assert json.loads(sh("guard_status"))["nft"] is False
 
 
+def test_strict_guard_holds_dns_through_a_crash_loop(tmp_path):
+    r = Router(tmp_path)
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/strict").write_text("main\n")
+    (tmp_path / "podkop.json").write_text(json.dumps(PODKOP))
+    sh = lambda c, i="": r.sh(GUARD_STUBS + c, i)       # noqa: E731
+    f = tmp_path / "dnsmasq.d/podkop-agent-strict.conf"
+    restarts = lambda: (tmp_path / "dnsmasq-restarts").read_text().count("restart")     # noqa: E731
+
+    def step(t, pid):
+        r.now(t); (tmp_path / "pid").write_text(pid); sh("guard_sync; wait")
+    step(1000, "1"); step(1010, "")                    # one fall (a podkop restart): in, and out as soon as it is up
+    assert f.exists() and restarts() == 1
+    step(1020, "2")
+    assert not f.exists() and restarts() == 2
+    step(1030, ""); assert f.exists() and restarts() == 3      # a second fall within 5 minutes: a crash loop
+    step(1035, "3"); assert f.exists() and restarts() == 3     # up again, held: no restart of dnsmasq
+    step(1040, ""); step(1045, "4"); step(1050, ""); step(1055, "5")
+    assert f.exists() and restarts() == 3                       # three more crashes cost nothing
+    step(1100, "5"); assert f.exists()                          # up for 45 s: not yet
+    step(1116, "5"); assert not f.exists() and restarts() == 4  # up for a minute: out
+    step(2000, ""); step(2010, "6")                             # long after: a single fall is not held again
+    assert not f.exists() and restarts() == 6
+
+
 def test_silent_clash_api_restarts_podkop_once(tmp_path):
     r = Router(tmp_path)
     (tmp_path / "proxies.json").write_text("")
