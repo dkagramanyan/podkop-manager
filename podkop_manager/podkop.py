@@ -568,7 +568,8 @@ def _youtube_why(row: dict, need: str) -> str:
 
 
 UNLOCK = ("netflix", "chatgpt", "claude")
-# where ChatGPT and Claude are not offered: a server their edge sees there is of no use for them
+# where ChatGPT and Claude are not offered (a short fixed list, not their full
+# terms): a server their edge sees there is of no use for them
 UNSERVED = {"RU", "BY", "CN", "HK", "IR", "KP", "SY", "CU"}
 _UNLOCK_NAME = {"netflix": "Netflix", "chatgpt": "ChatGPT", "claude": "Claude"}
 

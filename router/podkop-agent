@@ -2256,7 +2256,7 @@ cmd_route() {
     | .outbound = (.outbound // "reject")
     | (.source_ip_cidr | lst) as $src
     | (if ($src | length) == 0 then true elif $from == "" then false
-       else any($src[]; select(test(":") | not) as $c | incidr($from; $c)) end) as $ok
+       else any($src[]; select(contains(":") | not) as $c | incidr($from; $c)) end) as $ok
     | (if $k == "domain" then (any(.domain | lst | .[]; ascii_downcase == $t)
           or any(.domain_suffix | lst | .[]; ascii_downcase | ltrimstr(".") as $s | $t == $s or ($t | endswith("." + $s))))
        else any(.ip_cidr | lst | .[]; select(contains(":") | not) as $c | incidr($t; $c)) end) as $own

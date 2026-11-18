@@ -733,7 +733,7 @@ export function autoRuleEditor(w, s, rule) {
             h("button", { type: "button", class: "toggle", "aria-pressed": String((rule.unlock || []).includes(v)),
               onclick: () => update({ unlock: (rule.unlock || []).includes(v) ? rule.unlock.filter((y) => y !== v) : [...(rule.unlock || []), v] }, true) }, t))),
           h("span", { class: "help" }, "The probe asks each chosen service through every fast server. Netflix: left out where it shows only its own titles or refuses. "
-            + "ChatGPT and Claude: only the country they see is checked, left out where they are not offered; whether one dislikes the address itself shows only after a login")))),
+            + "ChatGPT and Claude: only the country they see is checked, left out in RU BY CN HK IR KP SY CU; whether one dislikes the address itself shows only after a login")))),
       h("div", { class: "servers" },
         h("div", { class: "part-head", style: "padding: 12px 14px" },
           h("div", { class: "col", style: "gap: 2px" },

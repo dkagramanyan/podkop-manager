@@ -17,8 +17,9 @@ support report (manager 0.41.0, agent 0.28.0).
   or an address, by which list, the rule's server now and its exit, from
   the rules sing-box runs, in order, with sing-box's own `rule-set match`.
   Block and exclusion rules and device routes are read too. Community lists
-  are downloaded to RAM once a day for this (40 s per question at most); a
-  list that could not be read is named in the answer.
+  are downloaded to RAM once a day for this (no new download starts after
+  40 s, so a first question can take about two minutes); a list that could
+  not be read is named in the answer.
 - **Worth a look**: Check and Review and apply list what podkop accepts but
   is probably not meant (a domain twice, a domain that an earlier rule
   takes, a community list in two rules, fallback servers that repeat the
@@ -26,8 +27,9 @@ support report (manager 0.41.0, agent 0.28.0).
   apply shows only those of the rules it changes; none stops an apply.
 - **Services** in a rule's probe parameters (probe 1.54 `--unlock`): Netflix
   (its whole catalogue, or only its own titles), ChatGPT and Claude (the
-  country their edge sees). Servers a rule cannot use for them are left
-  out. Tried on openwrt-reserv's 13 servers: every fast one opened the
+  country their edge sees, against a short fixed list of countries where
+  they are not offered: RU BY CN HK IR KP SY CU). Servers a rule cannot use
+  for them are left out. Needs agent 0.28 and probe 1.54 on the router. Tried on openwrt-reserv's 13 servers: every fast one opened the
   whole Netflix catalogue; Claude saw one of them in another country than
   ChatGPT did.
 - **Support report** (Logs → Support report): a text file with servers as

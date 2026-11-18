@@ -482,7 +482,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         text = report.build({"name": rt.row["name"]}, status, (rt.config or {}).get("config"), db.events(rid, 60),
                             db.versions(rid, 15), logs,
                             {"Connection check": getattr(rt, "connection_check", None) or "none yet"},
-                            hide=[k["url"] for k in db.keys(rid)] + db.probe_settings(rid)["keys"])
+                            hide=[k["url"] for k in db.keys(rid)] + db.probe_settings(rid)["keys"],
+                            entry_ips=db.get_setting(f"entry_ips:{rid}", {}) or {})
         return Response(text, media_type="text/plain; charset=utf-8", headers={
             "Content-Disposition": f'attachment; filename="podkop-report-{rid}-{time.strftime("%Y%m%d-%H%M")}.txt"'})
 

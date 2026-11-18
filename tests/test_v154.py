@@ -5,7 +5,7 @@ import time
 
 from podkop_manager import podkop, report, usage
 from podkop_manager.hub import Hub, RouterRuntime
-from tests.test_web import H, FakeRouter, client
+from test_web import H, FakeRouter, client
 
 LOGIN = {"user": "admin", "password": "secret-pass"}
 
@@ -89,11 +89,16 @@ def test_report_removes_secrets_and_names_servers_by_number():
               "servers": [{"name": "main-1-out", "delay": 90}, {"name": "main-2-out", "delay": None}]}}
     text = report.build({"name": "home"}, status, cfg, [{"t": 0, "type": "group_down", "data": {}}], [],
                         ["sing-box: dial tcp 5.6.7.8:8388: i/o timeout (de1.vpn.example)", "dial 203.0.113.9:443",
-                         "probe: key 1 (https://sub.example/s/tok123): device limit"], now=0, hide=["https://sub.example/s/tok123"])
-    for secret in ("0ec76309", "de1.vpn.example", "5.6.7.8", "203.0.113.9", "PUBKEY", "s3cret", "abcd", "Y2hhY2hh", "Germany", "tok123"):
+                         "probe: key 1 (https://sub.example/s/tok123): device limit",
+                         "outbound/vless[main-1-out]: dial tcp 198.51.100.7:8443: i/o timeout",
+                         'outbound main-2-out download test could not run: Get "https://x/": dial tcp 198.51.100.8:8388: i/o timeout', "entry 192.0.2.44 refused"],
+                        now=0, hide=["https://sub.example/s/tok123"], entry_ips={"de1.vpn.example": "192.0.2.44"})
+    for secret in ("0ec76309", "de1.vpn.example", "5.6.7.8", "203.0.113.9", "PUBKEY", "s3cret", "abcd", "Y2hhY2hh", "Germany", "tok123", "198.51.100.7", "198.51.100.8", "192.0.2.44"):
         assert secret not in text, secret
     assert "vless://…@host-1:8443?type=grpc&serviceName=…&security=reality&sni=…&pbk=…&sid=…" in text
     assert "dial tcp host-2:8388" in text and "dial host-3:443" in text
+    assert "[main-1-out]: dial tcp host-1:8443" in text and "entry host-1 refused" in text     # the same server as its name
+    assert "main-2-out download test could not run: Get \"https://x/\": dial tcp host-2:8388" in text
     assert "main-urltest-out: URLTest, now main-1-out, 1 of 2 servers answered" in text
 
 

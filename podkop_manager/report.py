@@ -12,7 +12,7 @@ import re
 import time
 
 from . import __version__
-from .podkop import link_host
+from .podkop import link_host, tag_links
 
 LINK_OPTIONS = ("proxy_string", "selector_proxy_links", "urltest_proxy_links", "urltest_fallback_links")
 _LINK = re.compile(r"\b(?:vless|vmess|trojan|ss|hysteria2|hy2|tuic|socks5?|https?)://[^\s\"'<>\\]+")
@@ -22,6 +22,9 @@ _SECRET_PARAM = re.compile(r"([?&](?:pbk|sid|password|pass|auth|token|key|obfs-p
 _Q = r'\\?"'
 _SECRET_JSON = re.compile(r'(' + _Q + r'(?:uuid|password|auth_str|private_key|public_key|short_id|pre_shared_key|secret|token|username|user)'
                           + _Q + r'\s*:\s*)(' + _Q + r')(?:[^"\\]|\\[^"])*' + _Q)
+# sing-box's log names a server's resolved address: outbound/vless[main-4-out]: dial tcp 203.0.113.5:443
+# (and podkop-engine's urltest: outbound youtube-1-out download test ...: dial tcp 203.0.113.5:8443)
+_DIAL = re.compile(r"outbound(?:/\w+\[([\w-]+)\]:| ([\w-]+-out) .*?:) dial (?:tcp|udp) \[?([0-9A-Fa-f.:]+?)\]?:\d+")
 _SERVER_JSON = re.compile(_Q + r'(?:server|server_name|host|address)' + _Q + r'\s*:\s*' + _Q + r'([^"\\]+)' + _Q)
 
 
@@ -68,11 +71,23 @@ class Scrub:
 
 
 def build(router: dict, status: dict | None, config: dict | None, events: list, versions: list, logs: list,
-          extra: dict | None = None, now: float | None = None, hide: list | None = None) -> str:
+          extra: dict | None = None, now: float | None = None, hide: list | None = None,
+          entry_ips: dict | None = None) -> str:
     s = Scrub(hide)
     stamp = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t)) + "Z" if t else "-"
     # the servers of the settings first: the log names them by address alone
     s.learn(json.dumps(config or {}, ensure_ascii=False))
+    # ... and their resolved addresses (from the log and the entry addresses the
+    # manager knows) take the same host-N as the server's name
+    by_tag = {tag: link_host(link) for tag, (_, link) in tag_links(config).items()} if config else {}
+    for line in logs:
+        for tag1, tag2, ip in _DIAL.findall(line):
+            tag = tag1 or tag2
+            if by_tag.get(tag):
+                s.hosts.setdefault(ip.lower(), s.host(by_tag[tag]))
+    for host, ip in (entry_ips or {}).items():
+        if ip and s.hosts.get(str(host).lower()):
+            s.hosts.setdefault(str(ip).lower(), s.hosts[str(host).lower()])
     out = [f"podkop-manager support report, {stamp(now or time.time())}",
            f"manager {__version__}, router \"{router.get('name', '')}\"",
            "Secrets are removed: servers are host-N, ids, keys and passwords are …, subscription addresses are left out.",
