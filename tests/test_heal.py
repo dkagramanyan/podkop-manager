@@ -442,6 +442,10 @@ def test_strict_guard_holds_dns_through_a_crash_loop(tmp_path):
     step(1116, "5"); assert not f.exists() and restarts() == 4  # up for a minute: out
     step(2000, ""); step(2010, "6")                             # long after: a single fall is not held again
     assert not f.exists() and restarts() == 6
+    # the agent's own podkop restarts (an apply, its undo) are not a crash loop
+    for t in (3000, 3100):
+        r.now(t); sh("guard_build; guard_dns_on norestart"); step(t + 5, ""); step(t + 20, "7")
+        assert not f.exists()
 
 
 def test_silent_clash_api_restarts_podkop_once(tmp_path):

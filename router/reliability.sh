@@ -615,8 +615,12 @@ guard_dns_on() {
   _gf="$(guard_dnsmasq_dir)/$GUARD_DNS"
   cmp -s "$RUN/guard/dnsmasq.conf" "$_gf" 2>/dev/null && return 0
   mkdir -p "${_gf%/*}" && cp "$RUN/guard/dnsmasq.conf" "$_gf.t" && mv "$_gf.t" "$_gf" || return 1
-  [ "$1" = norestart ] || guard_dnsmasq_restart
-  { tail -n 4 "$RUN/guard/downs" 2>/dev/null; printf '%s\n' "$(date +%s)"; } > "$RUN/guard/downs.t" && mv "$RUN/guard/downs.t" "$RUN/guard/downs"
+  if [ "$1" != norestart ]; then
+    guard_dnsmasq_restart
+    # a fall the agent did not cause itself (its own restarts come with
+    # norestart): counted for guard_calm
+    { tail -n 4 "$RUN/guard/downs" 2>/dev/null; printf '%s\n' "$(date +%s)"; } > "$RUN/guard/downs.t" && mv "$RUN/guard/downs.t" "$RUN/guard/downs"
+  fi
   event strict_guard '{"dns":true}'
 }
 # guard_calm: may the NXDOMAIN file come out now? Each change of it restarts

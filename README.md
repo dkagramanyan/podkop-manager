@@ -161,6 +161,35 @@ that already runs there are taken into **Keys and usage** and the rules.
   rule by domain works through the router's DNS. One switch makes the LAN use
   it: plain DNS is answered by the router, DNS over TLS and DNS over HTTPS to
   the well-known public resolvers are refused.
+- **Devices** (**Routing → Devices**, agent 0.28): the devices the router
+  sees (DHCP leases, fixed leases, neighbours), each set to go by the rules,
+  everything through one rule, or never through podkop. These are podkop's
+  own "Fully routed IPs" and "IPs never routed"; a change is reviewed and
+  applied like any other. A device with an address from DHCP is flagged:
+  give it a static lease, or its route moves with the address.
+- **Where does it go?** (**Rules**, agent 0.28): type a name or an address
+  (and a device, if devices have routes of their own) and the router says
+  which rule takes it, by which list, the server that rule uses now and
+  where it comes out, read from the rules sing-box runs, in their order.
+  A community list is downloaded to the router's RAM for this once a day.
+- **Worth a look** (Check and Review and apply): what podkop accepts but is
+  probably not meant: a domain listed twice, a domain that a rule further
+  up takes first (and so goes through that rule's servers), a community
+  list in two rules, fallback servers that are the rule's own servers again,
+  an empty address list, an outbound left over from an earlier type. They
+  never stop an apply.
+- **Services** in a rule's probe parameters: the probe asks Netflix,
+  ChatGPT and/or Claude through every fast server. Netflix: servers where
+  it shows only its own titles or refuses are left out. ChatGPT and Claude:
+  only the country they see is checked (left out where they are not
+  offered); whether one of them dislikes an address shows only after a
+  login.
+- **Support report** (**Logs**): versions, state, settings, recent changes,
+  events and the router's log in one text file. Servers become host-1,
+  host-2…; ids, keys, passwords and subscription addresses are taken out.
+  The rules' own domains stay: read it before you send it.
+- **sing-box's open files**: an alert when sing-box holds more than 60% of
+  its file limit (when they run out, DNS stops for the whole network).
 - **The manager's own watch**: a hung manager ends itself and Docker starts
   it again; after a start it says for how long it was not running; with
   `PODKOP_MANAGER_HEARTBEAT_URL` in `.env` an uptime monitor of yours is

@@ -170,7 +170,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       ...notes.map((p) => h("span", { class: "warn-text" }, problemText(p))));
     go.disabled = stale || problems.length > 0 || finished;
   };
-  api("POST", `/api/routers/${id}/validate`, { config }).then((r) => { problems = r.problems; notes = r.notes || []; showChecks(); })
+  api("POST", `/api/routers/${id}/validate`, { config }).then((r) => { problems = r.problems; notes = (r.notes || []).filter((x) => d.diff.some((c) => c.section === x.section)); showChecks(); })
     .catch((e) => { put(checks, h("span", {}, `Could not check: ${e.message}`)); checks.className = "checks bad"; go.disabled = stale; });
 
   const scheduleIt = async () => {

@@ -40,7 +40,7 @@ export async function loadWork(id) {
 // may have changed it), after 2 minutes, or when the router's settings changed
 export async function workFor(id) {
   const w = S.work[id], rt = S.routers[id];
-  if (w && !w.stale && [`${id}/rules`, `${id}/global`].includes(S.from) && Date.now() - w.loaded < 120e3
+  if (w && !w.stale && [`${id}/rules`, `${id}/global`, `${id}/devices`].includes(S.from) && Date.now() - w.loaded < 120e3
       && rt && rt.status && rt.status.fingerprint === w.fp) return w;
   return loadWork(id);
 }

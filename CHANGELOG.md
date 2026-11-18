@@ -3,6 +3,50 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.54.0 — 2026-11-19
+
+Devices, "where does it go", things worth a look, services in the probe, a
+support report (manager 0.41.0, agent 0.28.0).
+
+- **Devices** (Routing → Devices): the router's devices (DHCP leases, fixed
+  leases, neighbours on podkop's interfaces), each going by the rules,
+  entirely through one rule, or never through podkop. The page edits
+  podkop's own "Fully routed IPs" and "IPs never routed" in the draft; a
+  device with an address from DHCP is flagged.
+- **Where does it go?** (Rules): the router answers which rule takes a name
+  or an address, by which list, the rule's server now and its exit, from
+  the rules sing-box runs, in order, with sing-box's own `rule-set match`.
+  Block and exclusion rules and device routes are read too. Community lists
+  are downloaded to RAM once a day for this (40 s per question at most); a
+  list that could not be read is named in the answer.
+- **Worth a look**: Check and Review and apply list what podkop accepts but
+  is probably not meant (a domain twice, a domain that an earlier rule
+  takes, a community list in two rules, fallback servers that repeat the
+  rule's own, an empty address list, a left-over outbound). Review and
+  apply shows only those of the rules it changes; none stops an apply.
+- **Services** in a rule's probe parameters (probe 1.54 `--unlock`): Netflix
+  (its whole catalogue, or only its own titles), ChatGPT and Claude (the
+  country their edge sees). Servers a rule cannot use for them are left
+  out. Tried on openwrt-reserv's 13 servers: every fast one opened the
+  whole Netflix catalogue; Claude saw one of them in another country than
+  ChatGPT did.
+- **Support report** (Logs → Support report): a text file with servers as
+  host-N and ids, keys, passwords and subscription addresses taken out.
+- **sing-box's open files** are in the status; above 60% of the limit an
+  alert (podkop issue 460: DNS stops for the whole network when they run
+  out), cleared below 40%.
+- **Kill switch DNS in a crash loop**: the NXDOMAIN file of kill-switch
+  rules came in and out with every crash of sing-box, and each change
+  restarts dnsmasq, the DNS of the whole network. After a second fall within
+  5 minutes it now stays until sing-box has run for a minute. The agent's
+  own podkop restarts (an apply, its undo) do not count.
+- **Subscription addresses** are no longer sent to the browser: the
+  interface shows sub.example.com/s/…k9Q, and a masked address sent back is
+  refused.
+- **Kill switch and Protected switches** send one rule's change; the
+  manager applies it to the router's own list, one request at a time, so
+  two switches flipped quickly no longer undo each other.
+
 ## 1.53.0 — 2026-11-18
 
 Podkop sections for a VPN server (agent 0.27.0; the manager is unchanged).

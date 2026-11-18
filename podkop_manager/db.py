@@ -108,6 +108,7 @@ COLUMNS = [
     ("auto_rules", "keys", "TEXT NOT NULL DEFAULT '[]'"),
     ("auto_rules", "profile", "TEXT NOT NULL DEFAULT 'balanced'"),
     ("auto_rules", "heal_fallback", "TEXT NOT NULL DEFAULT ''"),     # 1.40.0: self-heal's wider countries
+    ("auto_rules", "unlock", "TEXT NOT NULL DEFAULT '[]'"),          # 1.54.0: services the probe asks through each server
     ("versions", "due", "REAL"),                 # a change scheduled for this time
     ("versions", "base_config", "TEXT"),         # ... and the router's settings it was made on
 ]
@@ -494,7 +495,7 @@ class DB:
     def auto_rules(self, rid: int) -> list[dict]:
         rows = self.q("SELECT * FROM auto_rules WHERE router_id = ? ORDER BY section", rid)
         for r in rows:
-            for k in ("countries", "protocols", "exit_ips"):
+            for k in ("countries", "protocols", "exit_ips", "unlock"):
                 r[k] = json.loads(r[k])
             r.pop("keys")                     # 1.28.0's, now in rule_keys
             if r["youtube"] == "ru":          # before 0.9.0: "sees Russia"
@@ -506,14 +507,14 @@ class DB:
 
     def set_auto_rule(self, rid: int, section: str, rule: dict) -> None:
         self.x("INSERT INTO auto_rules (router_id, section, countries, protocols, exit_ips, name_contains, top, fallback, "
-               "max_ping, min_speed, youtube, profile, heal_fallback) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
+               "max_ping, min_speed, youtube, profile, heal_fallback, unlock) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (router_id, section) "
                "DO UPDATE SET countries = excluded.countries, protocols = excluded.protocols, exit_ips = excluded.exit_ips, "
                "name_contains = excluded.name_contains, top = excluded.top, fallback = excluded.fallback, "
                "max_ping = excluded.max_ping, min_speed = excluded.min_speed, youtube = excluded.youtube, profile = excluded.profile, "
-               "heal_fallback = excluded.heal_fallback",
+               "heal_fallback = excluded.heal_fallback, unlock = excluded.unlock",
                rid, section, json.dumps(rule["countries"]), json.dumps(rule["protocols"]), json.dumps(rule["exit_ips"]),
                rule["name_contains"], rule["top"], rule["fallback"], rule["max_ping"], rule["min_speed"], rule["youtube"],
-               rule.get("profile", "balanced"), rule.get("heal_fallback", ""))
+               rule.get("profile", "balanced"), rule.get("heal_fallback", ""), json.dumps(rule.get("unlock") or []))
 
     def delete_auto_rule(self, rid: int, section: str) -> None:
         self.x("DELETE FROM auto_rules WHERE router_id = ? AND section = ?", rid, section)

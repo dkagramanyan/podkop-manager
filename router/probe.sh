@@ -12,7 +12,7 @@
 #
 # https://github.com/dkagramanyan/podkop-manager
 
-VERSION="1.53.0"
+VERSION="1.54.0"
 REPO_URL="https://github.com/dkagramanyan/podkop-manager"
 RELEASE_URL="$REPO_URL/releases/latest/download/probe.sh"
 BIN=/usr/bin/podkop-probe            # installed copy, used by the nightly run
@@ -57,6 +57,14 @@ YOUTUBE=1; YT_NOADS=RU; YT_SECTION=youtube
 APPLY_TO=both                        # both, main or youtube: which lists go into podkop
 YT_PING_URL="https://www.youtube.com/generate_204"
 YT_VIDEO=jNQXAC9IVRw                 # "Me at the zoo": public everywhere, never removed
+# --unlock: what a streaming or AI service says through each server that is
+# fast enough (written to <csv>.unlock for podkop-manager's rules):
+#   netflix  ok (the whole catalogue), orig (only Netflix's own shows) or no,
+#            and the country of the catalogue
+#   chatgpt, claude  the country their own edge sees. Whether the service
+#            dislikes the address itself shows only after a login, not here.
+UNLOCK=""
+NF_TITLE=70143836                    # "Breaking Bad": not Netflix's own, so it opens only with the whole catalogue
 YT_UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 APPLY_SAVED=0
 SUB_INFO=0
@@ -136,6 +144,8 @@ YouTube (a separate podkop section for YouTube traffic):
                     with the YouTube list and placed before --section)
   --apply-to WHAT   both (default), main or youtube: which list goes into
                     podkop with --apply and in the nightly run
+  --unlock LIST     also ask netflix, chatgpt and/or claude through each fast
+                    server; results go to FILE.unlock of -o FILE
   --apply-saved     put the lists of the last run into podkop, no new test
   --sub-info        for podkop-manager: each -s key's usage header and links
                     (they are kept in /tmp until the router restarts)
@@ -218,7 +228,7 @@ is_uint() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -gt 0 ]; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    -f|-s|-C|--config|-n|-c|-j|-t|-u|-p|-o|--top|--section|--speed-url|--cron-line|--countries|--speed-jobs|--youtube-noads|--max-ping|--min-speed|--yt-section|--apply-to|--nodes|--via|--via-key|--via-host-key)
+    -f|-s|-C|--config|-n|-c|-j|-t|-u|-p|-o|--top|--section|--speed-url|--cron-line|--countries|--speed-jobs|--youtube-noads|--max-ping|--min-speed|--yt-section|--apply-to|--unlock|--nodes|--via|--via-key|--via-host-key)
       [ $# -ge 2 ] || { echo "option $1 needs a value" >&2; usage 1; }
       case "$1" in
         -f) FILE="$2" ;; -s) SUBS="$SUBS$2
@@ -231,6 +241,7 @@ while [ $# -gt 0 ]; do
         --countries) COUNTRIES="$2" ;;
         --max-ping) MAX_PING="$2" ;; --min-speed) MIN_SPEED="$2" ;; --yt-section) YT_SECTION="$2" ;;
         --apply-to) APPLY_TO="$2" ;;
+        --unlock) UNLOCK=$(printf '%s' "$2" | tr 'A-Z,' 'a-z ') ;;
         --nodes) NODES_FILE="$2" ;; --via) VIA="$2" ;; --via-key) VIA_KEY="$2" ;; --via-host-key) VIA_HOST_KEY="$2" ;;
         --youtube-noads) YT_NOADS=$(printf '%s' "$2" | tr 'a-z,' 'A-Z ' | sed 's/\bNONE\b//g; s/^ *//; s/ *$//') ;;
       esac
@@ -271,6 +282,7 @@ if [ "$CRON" = 1 ]; then
   ASSUME_YES=1; APPLY=yes; COLOR=0; TTY=""
 fi
 
+for _u in $UNLOCK; do case "$_u" in netflix|chatgpt|claude) ;; *) die "--unlock takes netflix, chatgpt and claude" ;; esac; done
 case "$APPLY_TO" in both|main|youtube) ;; *) die "--apply-to must be both, main or youtube" ;; esac
 case "$MIN_SPEED" in ''|*[!0-9]*) die "--min-speed must be a number, got '$MIN_SPEED'" ;; esac
 for _v in N C T BASEPORT TOP MAX_PING; do
@@ -1035,6 +1047,9 @@ speed_node() {
     if [ "$YOUTUBE" = 1 ] && awk -v s="$(cat "$WORK/n/$_sn/speed")" -v y="$MIN_SPEED" 'BEGIN { exit !(s + 0 > y) }'; then
       yt_measure "$_sn"
     fi
+    if [ -n "$UNLOCK" ] && awk -v s="$(cat "$WORK/n/$_sn/speed")" -v y="$MIN_SPEED" 'BEGIN { exit !(s + 0 > y) }'; then
+      unlock_check > "$WORK/n/$_sn/unlock"
+    fi
   else
     echo "0.0" > "$WORK/n/$_sn/speed"; echo "sing-box did not start" > "$WORK/n/$_sn/speed.why"
   fi
@@ -1153,6 +1168,31 @@ yt_check() {
   esac
 }
 
+# unlock_check -> "netflix:ok:LT chatgpt:ok:LT claude:fail:-" through the
+# node ($_px), for the services of --unlock
+unlock_check() {
+  for _us in $UNLOCK; do
+    case "$_us" in
+      netflix)
+        _ur=$(pcurl -s -o /dev/null -L --max-time 12 -A "$YT_UA" -w '%{http_code} %{url_effective}' "https://www.netflix.com/title/$NF_TITLE" 2>/dev/null)
+        # the catalogue's country is in the address it sends us to; the US one has none
+        _uc=$(printf '%s' "$_ur" | sed -n 's|.*netflix\.com/\([a-z][a-z]\)\(-[a-z]*\)\{0,1\}/title/.*|\1|p' | tr 'a-z' 'A-Z')
+        case "${_ur%% *}" in
+          200) _ut=ok; [ -n "$_uc" ] || _uc=US ;;
+          404) _ut=orig ;;
+          403) _ut=no ;;
+          *) _ut=fail ;;
+        esac ;;
+      chatgpt|claude)
+        _uh=chatgpt.com; [ "$_us" = claude ] && _uh=claude.ai
+        _uc=$(pcurl -s --max-time 8 "https://$_uh/cdn-cgi/trace" 2>/dev/null | sed -n 's/^loc=\([A-Z][A-Z]\)$/\1/p' | head -n 1)
+        _ut=ok; [ -n "$_uc" ] || _ut=fail ;;
+    esac
+    printf '%s:%s:%s ' "$_us" "$_ut" "${_uc:--}"
+  done
+  echo
+}
+
 # yt_bad <n>: YouTube was checked and does not work through node n
 yt_bad() { case "$(cut -d ' ' -f 1 "$WORK/n/$1/yt" 2>/dev/null)" in bot|no|fail) return 0 ;; esac; return 1; }
 
@@ -1207,9 +1247,10 @@ yt_measure() {
 yt_node() {
   if sb_start "$1"; then
     _px="socks5h://127.0.0.1:$_port"
-    yt_measure "$1"
+    [ "$YOUTUBE" = 0 ] || yt_measure "$1"
+    [ -z "$UNLOCK" ] || unlock_check > "$WORK/n/$1/unlock"
   else
-    echo "fail -" > "$WORK/n/$1/yt"
+    [ "$YOUTUBE" = 0 ] || echo "fail -" > "$WORK/n/$1/yt"
   fi
   sb_stop "$1"
 }
@@ -1854,7 +1895,7 @@ if [ "$SPEED" = 1 ]; then
       [ "$_n" = "$_src" ] && continue
       [ -f "$WORK/n/$_src/speed" ] && cp "$WORK/n/$_src/speed" "$WORK/n/$_n/speed"
       [ -f "$WORK/n/$_src/speed.why" ] && cp "$WORK/n/$_src/speed.why" "$WORK/n/$_n/speed.why"
-      for _f in yt yt.ms; do [ -f "$WORK/n/$_src/$_f" ] && cp "$WORK/n/$_src/$_f" "$WORK/n/$_n/$_f"; done
+      for _f in yt yt.ms unlock; do [ -f "$WORK/n/$_src/$_f" ] && cp "$WORK/n/$_src/$_f" "$WORK/n/$_n/$_f"; done
     done < "$WORK/speed.map"
   fi
 fi
@@ -1865,11 +1906,12 @@ fi
 # the rest (e.g. with --no-speed) are checked here, up to 4 at a time (fewer
 # with little free RAM), one check per server
 : > "$WORK/ytlist"
-if [ "$YOUTUBE" = 1 ]; then
+if [ "$YOUTUBE" = 1 ] || [ -n "$UNLOCK" ]; then
+  _have=yt; [ "$YOUTUBE" = 1 ] || _have=unlock
   _i=0
   while [ "$_i" -lt "$COUNT" ]; do
     _i=$((_i + 1))
-    [ -f "$WORK/n/$_i/yt" ] && continue
+    [ -f "$WORK/n/$_i/$_have" ] && continue
     fast_enough "$_i" && printf '%s\t%s\n' "$_i" "$(same_key "$_i")" >> "$WORK/ytlist"
   done
 fi
@@ -1888,7 +1930,7 @@ if [ "$_ny" -gt 0 ]; then
       yt_node "$_n"
       echo "$_n" >> "$WORK/yt.done"
       if [ "$VERBOSE" = 1 ]; then
-        read -r _ys _yc < "$WORK/n/$_n/yt"
+        _ys=-; _yc=-; [ ! -f "$WORK/n/$_n/yt" ] || read -r _ys _yc < "$WORK/n/$_n/yt"
         printf '  [%*d/%d] %-4s %-3s %6s  %s\n' "${#_ny}" "$(wc -l < "$WORK/yt.done")" "$_ny" \
           "$_ys" "$_yc" "$(cat "$WORK/n/$_n/yt.ms" 2>/dev/null || echo -)" "$(cat "$WORK/n/$_n/name")"
       else
@@ -1902,7 +1944,7 @@ if [ "$_ny" -gt 0 ]; then
   awk -F "$TAB" -v OFS="$TAB" '!($2 in f) { f[$2] = $1 } { print $1, f[$2] }' "$WORK/ytlist" |
   while IFS="$TAB" read -r _n _src; do
     [ "$_n" = "$_src" ] && continue
-    for _f in yt yt.ms; do [ -f "$WORK/n/$_src/$_f" ] && cp "$WORK/n/$_src/$_f" "$WORK/n/$_n/$_f"; done
+    for _f in yt yt.ms unlock; do [ -f "$WORK/n/$_src/$_f" ] && cp "$WORK/n/$_src/$_f" "$WORK/n/$_n/$_f"; done
   done
 fi
 
@@ -2140,6 +2182,11 @@ if [ -n "$CSV" ]; then
   while IFS="$TAB" read -r _n _rest; do
     [ -f "$WORK/n/$_n/link" ] && printf '%s\t%s\n' "$_n" "$(cat "$WORK/n/$_n/link")"
   done < "$WORK/sorted" > "$CSV.links"
+  # what the services of --unlock said through each row's server ("n<TAB>netflix:ok:LT ...")
+  rm -f "$CSV.unlock"
+  [ -z "$UNLOCK" ] || while IFS="$TAB" read -r _n _rest; do
+    [ -f "$WORK/n/$_n/unlock" ] && printf '%s\t%s\n' "$_n" "$(sed 's/ *$//' "$WORK/n/$_n/unlock")"
+  done < "$WORK/sorted" > "$CSV.unlock"
 fi
 
 # --- put the best nodes into podkop ------------------------------------------

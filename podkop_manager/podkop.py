@@ -445,10 +445,11 @@ PROBE_CSV = ("n", "verdict", "ok", "total", "min", "median", "p90", "mbit", "exi
              "youtube_ms", "node")
 
 
-def probe_csv_rows(text: str, links: str = "") -> list[dict]:
+def probe_csv_rows(text: str, links: str = "", unlock: str = "") -> list[dict]:
     """The rows of podkop-probe -o FILE (and FILE.links: "n<TAB>link"), as the
     agent's probe-status gives them."""
     link = dict(x.split("\t", 1) for x in links.splitlines() if "\t" in x)
+    asked = dict(x.split("\t", 1) for x in unlock.splitlines() if "\t" in x)      # FILE.unlock of --unlock
     rows = []
     for f in list(csv.reader(io.StringIO(text)))[1:]:
         if len(f) < len(PROBE_CSV):
@@ -456,6 +457,8 @@ def probe_csv_rows(text: str, links: str = "") -> list[dict]:
         r = dict(zip(PROBE_CSV, f[:len(PROBE_CSV) - 1] + [",".join(f[len(PROBE_CSV) - 1:])]))
         if links:
             r["link"] = link.get(r["n"])
+        if r["n"] in asked:
+            r["unlock"] = asked[r["n"]]
         rows.append(r)
     return rows
 
@@ -564,6 +567,28 @@ def _youtube_why(row: dict, need: str) -> str:
     return ""
 
 
+UNLOCK = ("netflix", "chatgpt", "claude")
+# where ChatGPT and Claude are not offered: a server their edge sees there is of no use for them
+UNSERVED = {"RU", "BY", "CN", "HK", "IR", "KP", "SY", "CU"}
+_UNLOCK_NAME = {"netflix": "Netflix", "chatgpt": "ChatGPT", "claude": "Claude"}
+
+
+def _unlock_why(row: dict, need: list) -> str:
+    """Why a server is of no use for the services a rule asks for, from the
+    probe's --unlock answers ("netflix:ok:LT chatgpt:ok:LT"); "" when it is,
+    or when the probe has not asked that service through it yet."""
+    seen = {p[0]: p[1:] for p in (x.split(":") for x in str(row.get("unlock") or "").split()) if len(p) == 3}
+    for svc in need:
+        if svc not in seen:
+            continue
+        state, cc = seen[svc]
+        if svc == "netflix" and state in ("orig", "no"):
+            return "Netflix shows only its own titles here" if state == "orig" else "Netflix refuses this server"
+        if svc != "netflix" and state == "ok" and cc in UNSERVED:
+            return f"{_UNLOCK_NAME[svc]} sees {cc}, where it is not offered"
+    return ""
+
+
 def check_auto_rule(rule: dict) -> dict:
     """A rule that takes servers from the probe, as stored: lists cleaned up;
     raises ValueError. No countries = any country."""
@@ -605,9 +630,14 @@ def check_auto_rule(rule: dict) -> dict:
     heal_fallback = str(rule.get("heal_fallback") or "").strip().lower()
     if heal_fallback not in ("", "europe", "any"):
         raise ValueError("heal_fallback is '', 'europe' or 'any'")
+    # services asked through each server by the probe: servers they refuse are left out
+    unlock = rule.get("unlock") or []
+    if not isinstance(unlock, list) or set(unlock) - set(UNLOCK):
+        raise ValueError(f"unlock is a list of {', '.join(UNLOCK)}")
     return {"profile": profile, "countries": countries, "protocols": protocols, "exit_ips": exit_ips,
             "name_contains": str(rule.get("name_contains") or "").strip(), "top": top, "fallback": fallback,
-            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube, "heal_fallback": heal_fallback}
+            "max_ping": max_ping, "min_speed": min_speed, "youtube": youtube, "heal_fallback": heal_fallback,
+            "unlock": [u for u in UNLOCK if u in unlock]}
 
 
 def widened(rule: dict) -> dict | None:
@@ -649,6 +679,8 @@ def auto_pick(rows: list, rule: dict) -> dict:
             why = probe_reason(r, rule["max_ping"], rule["min_speed"])
             if not why and rule["youtube"]:
                 why = _youtube_why(r, rule["youtube"])
+            if not why and rule.get("unlock"):
+                why = _unlock_why(r, rule["unlock"])
         item = {"name": name, "link": link, "protocol": link_protocol(link), "exit_ip": r.get("exit_ip"),
                 "country": r.get("country"), "median": r.get("median"), "mbit": r.get("mbit"), "verdict": r.get("verdict"),
                 "key": r.get("key"), "entry_ip": r.get("entry_ip")}

@@ -447,9 +447,16 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, "a name like example.com or an IPv4 address like 1.2.3.4")
         if source and not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", source):
             raise HTTPException(400, "the device is an IPv4 address")
-        out = await rt.agent.call("route", payload={"target": target, "from": source}, timeout=150)
+        out = await rt.agent.call("route", payload={"target": target, "from": source}, timeout=160)
         m = out.get("match")
-        if m:
+        if m and m["outbound"] in ("direct-out", "reject"):
+            # podkop's shared rules: block sections (reject), exclusion sections and
+            # "IPs never routed" (direct); the list names the section (<section>-…-ruleset)
+            lst = m.get("list") or ""
+            out["rule"] = {"section": lst.split("-", 1)[0] if lst else "", "known": bool(lst), "by": "list" if lst else "device",
+                           "list": lst, "type": "block" if m["outbound"] == "reject" else "exclusion" if lst else "excluded",
+                           "server": None, "exit": None, "kill_switch": False}
+        elif m:
             section = re.sub(r"(-strict)?-out$", "", m["outbound"])
             cfg = (rt.config or {}).get("config") or {"sections": []}
             sec = podkop.sections_by_name(cfg).get(section)
@@ -474,7 +481,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         status = dict(rt.status, proxies=rt.proxies) if rt.status else None
         text = report.build({"name": rt.row["name"]}, status, (rt.config or {}).get("config"), db.events(rid, 60),
                             db.versions(rid, 15), logs,
-                            {"Connection check": getattr(rt, "connection_check", None) or "none yet"})
+                            {"Connection check": getattr(rt, "connection_check", None) or "none yet"},
+                            hide=[k["url"] for k in db.keys(rid)] + db.probe_settings(rid)["keys"])
         return Response(text, media_type="text/plain; charset=utf-8", headers={
             "Content-Disposition": f'attachment; filename="podkop-report-{rid}-{time.strftime("%Y%m%d-%H%M")}.txt"'})
 
@@ -779,6 +787,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if "keys" in body:
             if not isinstance(body["keys"], list):
                 raise HTTPException(400, "keys must be a list of addresses")
+            if any("…" in str(k) for k in body["keys"]):       # a masked address read back: would delete the key
+                raise HTTPException(400, "keys are full subscription addresses, not the masked ones this page shows")
             fields["keys"] = [str(k).strip() for k in body["keys"]
                               if re.fullmatch(r"https?://\S+", str(k).strip())]
         if "options" in body:

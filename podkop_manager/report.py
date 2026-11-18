@@ -18,13 +18,17 @@ LINK_OPTIONS = ("proxy_string", "selector_proxy_links", "urltest_proxy_links", "
 _LINK = re.compile(r"\b(?:vless|vmess|trojan|ss|hysteria2|hy2|tuic|socks5?|https?)://[^\s\"'<>\\]+")
 _UUID = re.compile(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
 _SECRET_PARAM = re.compile(r"([?&](?:pbk|sid|password|pass|auth|token|key|obfs-password|spx|path|serviceName|host|sni|authority|extra|fm)=)[^&#\s\"]*")
-_SECRET_JSON = re.compile(r'("(?:uuid|password|auth_str|private_key|public_key|short_id|pre_shared_key|secret|token|username|user)"\s*:\s*)"[^"]*"')
-_SERVER_JSON = re.compile(r'"(?:server|server_name|host|address)"\s*:\s*"([^"]+)"')
+# also inside a JSON value that is itself JSON (podkop's outbound_json), where the quotes come as \"
+_Q = r'\\?"'
+_SECRET_JSON = re.compile(r'(' + _Q + r'(?:uuid|password|auth_str|private_key|public_key|short_id|pre_shared_key|secret|token|username|user)'
+                          + _Q + r'\s*:\s*)(' + _Q + r')(?:[^"\\]|\\[^"])*' + _Q)
+_SERVER_JSON = re.compile(_Q + r'(?:server|server_name|host|address)' + _Q + r'\s*:\s*' + _Q + r'([^"\\]+)' + _Q)
 
 
 class Scrub:
-    def __init__(self):
+    def __init__(self, hide: list | None = None):
         self.hosts: dict[str, str] = {}
+        self.hide = sorted({h for h in hide or [] if h}, key=len, reverse=True)   # e.g. subscription addresses
 
     def host(self, h: str) -> str:
         h = h.lower()
@@ -51,9 +55,11 @@ class Scrub:
         return f"{proto}://…@{self.host(host) or '…'}{port}{_SECRET_PARAM.sub(r'\1…', query)}"
 
     def text(self, text: str) -> str:
+        for x in self.hide:
+            text = text.replace(x, "subscription …")
         self.learn(text)
         text = _LINK.sub(lambda m: m.group(0) if m.group(0).startswith("http") else self.link(m.group(0)), text)
-        text = _SECRET_JSON.sub(r'\1"…"', text)
+        text = _SECRET_JSON.sub(lambda m: f"{m.group(1)}{m.group(2)}…{m.group(2)}", text)
         text = _UUID.sub("…", text)
         # longest first, so that a.b.example is not cut by b.example
         for h in sorted(self.hosts, key=len, reverse=True):
@@ -62,8 +68,8 @@ class Scrub:
 
 
 def build(router: dict, status: dict | None, config: dict | None, events: list, versions: list, logs: list,
-          extra: dict | None = None, now: float | None = None) -> str:
-    s = Scrub()
+          extra: dict | None = None, now: float | None = None, hide: list | None = None) -> str:
+    s = Scrub(hide)
     stamp = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(t)) + "Z" if t else "-"
     # the servers of the settings first: the log names them by address alone
     s.learn(json.dumps(config or {}, ensure_ascii=False))

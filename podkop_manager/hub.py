@@ -1108,7 +1108,7 @@ class Hub:
                 return ""
         return {"state": lp["state"], "started": lp["started"], "finished": lp["finished"], "exit": lp["exit"],
                 "log": [x for x in read("log").splitlines() if x][-400:], "local": True,
-                "rows": podkop.probe_csv_rows(read("result.csv"), read("result.csv.links")),
+                "rows": podkop.probe_csv_rows(read("result.csv"), read("result.csv.links"), read("result.csv.unlock")),
                 "lists": {"main": [], "main_fallback": [], "youtube": [], "youtube_fallback": []}}
 
     async def probe_status(self, rt: RouterRuntime) -> dict:
@@ -1251,6 +1251,13 @@ class Hub:
                     "--min-speed", f"{min(r['min_speed'] for r in rules):g}"]
         if not any(r["youtube"] for r in rules):
             out.append("--no-youtube")
+        asked = [u for u in podkop.UNLOCK if any(u in (r.get("unlock") or []) for r in rules)]
+        # (an older podkop-probe on the router stops at an option it does not know)
+        rt = self.routers.get(rid)
+        ver = (((rt.status if rt else None) or {}).get("probe") or {}).get("version") or "0"
+        new = tuple(int(x) for x in ver.split(".")[:2] if x.isdigit()) >= (1, 54)
+        if asked and (new or self.db.probe_settings(rid).get("test_from") == "manager"):
+            out += ["--unlock", ",".join(asked)]
         return out
 
     # --- a router that already runs podkop ---------------------------------------------------

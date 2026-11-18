@@ -1822,7 +1822,7 @@ cmd_service() {
 
 # options passed through to podkop-probe, with the number of values each takes
 PROBE_OPTS="-q:0 -F:0 -v:0 --no-speed:0 --no-youtube:0 --no-entry-check:0 --fix-fingerprint:0 -n:1 -c:1 -j:1 -t:1
---countries:1 --top:1 --max-ping:1 --min-speed:1 --speed-jobs:1 --youtube-noads:1"
+--countries:1 --top:1 --max-ping:1 --min-speed:1 --speed-jobs:1 --youtube-noads:1 --unlock:1"
 
 # probe_check: a "running" probe whose runner is gone (killed, e.g. out of
 # memory, or never started) has failed; call it holding the probe lock (fd 7)
@@ -1892,7 +1892,7 @@ cmd_probe_start() {
   # single links (keys of their own) go to the probe as a file of links
   jq -r '.links[]?' "$RUN/probe/req.json" > "$RUN/probe/links.txt"
   echo running > "$RUN/probe/state"
-  rm -f "$RUN/probe/result.csv" "$RUN/probe/result.csv.links" "$RUN/probe/exit" "$RUN/probe/pid"
+  rm -f "$RUN/probe/result.csv" "$RUN/probe/result.csv.links" "$RUN/probe/result.csv.unlock" "$RUN/probe/exit" "$RUN/probe/pid"
   now > "$RUN/probe/started"
   exec 7>&-   # the runner must not inherit the lock
   if ! spawn _run-probe; then
@@ -2043,6 +2043,12 @@ cmd_probe_status() {
     jq -Rsc --slurpfile rows "$_pf.rows" '
       (split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1:] | join("\t"))}) | from_entries) as $l
       | $rows[0] | map(. + {link: ($l[.n] // null)})' "$RUN/probe/result.csv.links" > "$_pf.rows.t" && mv "$_pf.rows.t" "$_pf.rows"
+  fi
+  # what the services of --unlock said through each row's server ("n<TAB>netflix:ok:LT ...")
+  if [ -s "$RUN/probe/result.csv.unlock" ]; then
+    jq -Rsc --slurpfile rows "$_pf.rows" '
+      (split("\n") | map(select(. != "") | split("\t") | {key: .[0], value: (.[1] // "")}) | from_entries) as $u
+      | $rows[0] | map(if $u[.n] then . + {unlock: $u[.n]} else . end)' "$RUN/probe/result.csv.unlock" > "$_pf.rows.t" && mv "$_pf.rows.t" "$_pf.rows"
   fi
   _pr=$(jq -nc --arg st "$(cat "$RUN/probe/state" 2>/dev/null || echo none)" \
     --arg s "$(cat "$RUN/probe/started" 2>/dev/null)" --arg f "$(cat "$RUN/probe/finished" 2>/dev/null)" \
@@ -2202,7 +2208,7 @@ cmd_devices() {
 # downloaded to RAM (kept for a day), the way the kill switch gets its lists.
 # {"target": "name or IPv4", "from": "a device's IPv4, optional"}
 ROUTE_KEEP=86400
-ROUTE_BUDGET=${PODKOP_ROUTE_BUDGET:-60}
+ROUTE_BUDGET=${PODKOP_ROUTE_BUDGET:-40}
 route_list() {       # route_list <config> <tag> -> "<format>\t<file>" or nothing
   _rl=$(jq -r --arg t "$2" '.route.rule_set[]? | select(.tag == $t) | [.type, (.format // "binary"), (.path // .url // "")] | join("\t")' "$1" 2>/dev/null)
   IFS="$TAB" read -r _rt _rf _rp <<EOF_RL
@@ -2245,7 +2251,9 @@ cmd_route() {
     def incidr($ip; $c): ($c | split("/")) as $p | (32 - (($p[1] // "32") | tonumber? // 32)) as $h
       | pow(2; $h) as $d | (($ip | num) / $d | floor) == (($p[0] | num) / $d | floor);
     .route.rules | to_entries[] | .key as $i | .value
-    | select((.action // "route") == "route" and (.outbound // "") != "")
+    # block sections are "reject" rules, exclusions and never-routed devices go to direct-out
+    | select(((.action // "route") == "route" and (.outbound // "") != "") or .action == "reject")
+    | .outbound = (.outbound // "reject")
     | (.source_ip_cidr | lst) as $src
     | (if ($src | length) == 0 then true elif $from == "" then false
        else any($src[]; select(test(":") | not) as $c | incidr($from; $c)) end) as $ok

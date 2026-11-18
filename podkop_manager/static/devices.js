@@ -102,10 +102,12 @@ const place = (e) => (e && !e.error && e.ip ? `${e.country ? e.country + " · " 
 export function routeAnswer(r) {
   const lines = [];
   const m = r.match, rule = r.rule;
-  if (m && rule) {
+  if (m && rule && rule.type === "excluded") {
+    lines.push(["", "This device is in \u201cIPs never routed\u201d: everything it sends goes direct, the rules do not apply."]);
+  } else if (m && rule) {
     const by = rule.by === "domains" ? "its own domains" : rule.by === "subnets" ? "its own addresses"
       : rule.by === "community" ? `the community list ${rule.list}` : m.every ? "everything this device sends" : rule.list ? `the list ${rule.list}` : "an entry of the rule";
-    lines.push(["ok", `Rule ${rule.section} takes it (${by}).`]);
+    lines.push([rule.type === "block" ? "bad" : "ok", `Rule ${rule.section} takes it (${by}).`]);
     if (rule.type === "vpn") lines.push(["", "It goes through the VPN interface of that rule."]);
     else if (rule.type === "block") lines.push(["bad", "That rule blocks it."]);
     else if (rule.type === "exclusion") lines.push(["", "That rule sends it direct, past the other rules."]);

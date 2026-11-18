@@ -18,7 +18,7 @@ from podkop_manager.web import create_app
 
 playwright = pytest.importorskip("playwright.sync_api")
 ROOT = Path(__file__).resolve().parents[1]
-PAGES = ["#/settings", "#/r/1", "#/r/1/usage", "#/r/1/rules", "#/r/1/global", "#/r/1/configs",
+PAGES = ["#/settings", "#/r/1", "#/r/1/usage", "#/r/1/rules", "#/r/1/global", "#/r/1/configs", "#/r/1/devices",
          "#/r/1/reliability", "#/r/1/vpn", "#/r/1/logs", "#/r/1/history"]
 
 
@@ -272,6 +272,87 @@ def test_vpn_page_shows_the_tunnel_sets_its_dns_and_saves_devices(tmp_path):
             page.goto(f"{base}/#/r/1/rules/vpn_1")
             page.wait_for_selector("text=Review and apply")           # the DNS went into the draft
             assert not errors, errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)
+
+
+class DevicesAgent(OnlineAgent):
+    """agent 0.28: the device list and "where does it go"."""
+    async def call(self, name, *args, payload=None, **kwargs):
+        if name == "status":
+            st = await super().call(name)
+            st["agent"]["capabilities"] += ["devices", "route"]
+            st["protected"], st["safe_mode"] = [], {"on": False}
+            return st
+        if name == "devices":
+            return {"devices": [{"ip": "192.168.1.20", "mac": "aa:bb:cc:00:00:20", "name": "tv", "fixed": False, "lease": True}]}
+        if name == "route":
+            return {"target": payload["target"], "kind": "domain", "from": "", "final": "direct-out", "unread": [], "nft_set": None,
+                    "seen": None, "dns": {"address": "198.18.0.5", "fakeip": True},
+                    "match": {"rule": 3, "outbound": "main-out", "list": "main-user-domains-ruleset", "every": False}}
+        return await super().call(name, *args, payload=payload, **kwargs)
+
+
+def test_devices_page_and_where_does_it_go(tmp_path):
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+
+    class DevicesHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = DevicesAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    hub = DevicesHub(db, tmp_path / "id_ed25519", ROOT)
+    app = create_app(db, hub, "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/devices")
+            page.wait_for_selector("text=tv")
+            page.select_option("[aria-label='Traffic of tv']", "main")
+            page.wait_for_selector("text=address from DHCP, it may change")
+            page.screenshot(path=str(tmp_path / "devices.png"), full_page=True)
+            page.goto(f"{base}/#/r/1/rules")          # at once: the draft is saved half a second later
+            page.wait_for_selector("text=Where does it go?")
+            for _ in range(40):
+                d = db.draft(1)
+                if d and d["config"]["sections"][1]["options"].get("fully_routed_ips"):
+                    break
+                time.sleep(0.1)
+            assert db.draft(1)["config"]["sections"][1]["options"]["fully_routed_ips"] == ["192.168.1.20"]
+            page.click("text=Where does it go?")
+            page.fill("[aria-label='Name or address']", "a.com")
+            page.click("text=Ask the router")
+            page.wait_for_selector("text=Rule main takes it (its own domains).")
+            page.screenshot(path=str(tmp_path / "route.png"))
+            assert errors == [], errors
             browser.close()
     finally:
         srv.should_exit = True
