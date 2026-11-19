@@ -55,7 +55,8 @@ class Scrub:
         if host and (m := re.match(r"\[?[^\]/?]*\]?:(\d+)", tail)):
             port = ":" + m.group(1)
         query = "?" + tail.split("?", 1)[1] if "?" in tail else ""
-        return f"{proto}://…@{self.host(host) or '…'}{port}{_SECRET_PARAM.sub(r'\1…', query)}"
+        query = _SECRET_PARAM.sub(r"\1…", query)
+        return f"{proto}://…@{self.host(host) or '…'}{port}{query}"
 
     def text(self, text: str) -> str:
         for x in self.hide:
