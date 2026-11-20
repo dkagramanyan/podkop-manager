@@ -22,21 +22,25 @@ export function zapretTag(rt, s) {
 
 const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)} s` : `${x} ms`);
 
-// the rule page's part; w.zapret holds what GET .../zapret said (loaded once per page)
-export function zapretField(w, s, redraw) {
+// the rule page's parts: the switch (at the top of the page), a one-line summary and
+// the settings (in a panel that can be closed); w.zapret holds what GET .../zapret
+// said (loaded once per page)
+export function zapretParts(w, s, redraw) {
   const rt = S.routers[w.id];
   if (!zapretSupported(rt) || (s.options || {}).connection_type !== "proxy") return null;
-  const box = h("div", { class: "stack", style: "gap: 10px", "aria-label": "Zapret first" });
   const z = w.zapret;
+  const only = (text, cls) => ({ toggle: h("div", { class: "check", "aria-label": "Zapret first" },
+    h("input", { type: "checkbox", role: "switch", disabled: true }),
+    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Zapret first"), h("span", { class: cls }, text))), summary: text, body: null });
   if (!z) {
     if (!w.zapretLoading) {
       w.zapretLoading = api("GET", `/api/routers/${w.id}/zapret`)
         .then((r) => { w.zapret = r; }).catch((e) => { w.zapret = { error: e.message }; })
         .finally(() => { w.zapretLoading = null; redraw(); });
     }
-    return h("span", { class: "small muted" }, "Zapret first: …");
+    return only("…", "");
   }
-  if (z.error) return h("span", { class: "small bad-text" }, `Zapret first: ${z.error}`);
+  if (z.error) return only(z.error, "bad-text");
   const st = z.router;
   const on = st.rules[s.name];
   const known = z.rules.find((r) => r.name === s.name);       // the rule is on the router (not only in the draft)
@@ -91,9 +95,9 @@ export function zapretField(w, s, redraw) {
 
   // sing-box tests the new group within a minute; until then it may sit on the servers
   const checking = on && st.using[s.name] !== "zapret" && ui.since && Date.now() - ui.since < 120e3;
-  const state = on ? (st.using[s.name] === "zapret" ? h("span", { class: "pill ok" }, "Now: direct, through zapret")
-    : checking || !st.using[s.name] ? h("span", { class: "pill" }, "Checking whether zapret opens its sites…")
-      : h("span", { class: "pill warn" }, "Now: on its servers (zapret's check fails)")) : null;
+  const now = !on ? null : st.using[s.name] === "zapret" ? ["ok", "Now: direct, through zapret"]
+    : checking || !st.using[s.name] ? ["", "Checking whether zapret opens its sites…"] : ["warn", "Now: on its servers (zapret's check fails)"];
+  const state = now ? h("span", { class: `pill ${now[0]}` }, now[1]) : null;
   // while the page shows this rule: look again until zapret carries it (and now and then after)
   if (on && !running && !w.zapretTimer) {
     w.zapretTimer = setTimeout(() => {
@@ -120,22 +124,27 @@ export function zapretField(w, s, redraw) {
   const sel = h("select", { class: "input mid", "aria-label": "Service", disabled: running,
     onchange: (e) => { ui.service = e.target.value; redraw(); } },
   ZAPRET_SERVICES.map(([k, label]) => h("option", { value: k, selected: k === ui.service }, label)));
+  const searching = running && run ? (job && job.trying ? `Searching: trying ${job.trying.name}…` : "Searching…") : null;
+  const toggle = h("label", { class: "check", "aria-label": "Zapret first" },
+    h("input", { type: "checkbox", role: "switch", checked: !!on || (running && !!run), disabled: refused || !known || running,
+      onchange: async (e) => {
+        if (e.target.checked) { await search(e); return; }
+        e.target.disabled = true;
+        const rest = current(); delete rest[s.name];
+        await setRules(rest, `${s.name}: through its servers only`);
+      } }),
+    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Zapret first"),
+      h("span", {}, searching || (refused ? "Not with a kill switch or Protected on"
+        : !known ? "Apply the rule first: zapret works on rules the router has"
+          : now ? now[1] : outcome && !outcome.on ? outcome.why : "Web traffic direct through zapret2; its servers when that fails"))));
+  const service = on && (ZAPRET_SERVICES.find(([k]) => k === (on.service || "other")) || ["other", "Other"])[1];
+  const summary = searching || (refused ? "not with a kill switch or Protected" : !known ? "apply the rule first"
+    : on ? `on · ${service} · ${on.name || "own strategy"}` : "off");
+  const box = h("div", { class: "stack", style: "gap: 10px", "aria-label": "Zapret settings" });
   put(box,
-    h("label", { class: "check" },
-      h("input", { type: "checkbox", role: "switch", checked: !!on || (running && !!run), disabled: refused || !known || running,
-        onchange: async (e) => {
-          if (e.target.checked) { await search(e); return; }
-          e.target.disabled = true;
-          const rest = current(); delete rest[s.name];
-          await setRules(rest, `${s.name}: through its servers only`);
-        } }),
-      h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Zapret first"),
-        h("span", {}, refused ? "Not with a kill switch or Protected on: this rule's traffic must stay on its servers"
-          : !known ? "Apply the rule first: zapret works on rules the router has"
-            : on ? `Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Strategy: ${on.name || on.args.join(" ")}`
-              : "Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Turning it on tries the strategy list on the router and keeps the fastest that opens the addresses below"))),
-    h("div", { class: "row" }, state, running && run ? h("span", { class: "small" },
-      job && job.trying ? `Trying ${job.trying.name}…` : "Searching…") : null),
+    h("p", { class: "small muted" }, on ? `Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Strategy: ${on.name || on.args.join(" ")}`
+      : "Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Turning it on tries the strategy list on the router and keeps the fastest that opens the addresses below"),
+    state || searching ? h("div", { class: "row" }, state, searching ? h("span", { class: "small" }, searching) : null) : null,
     outcome && !outcome.on ? h("p", { class: "small muted" }, outcome.why) : null,
     h("div", { class: "form-grid" },
       h("label", { class: "lbl" }, "Service"), h("div", { class: "ctl" }, sel,
@@ -149,7 +158,7 @@ export function zapretField(w, s, redraw) {
       st.installed ? h("span", { class: "xs muted" }, `zapret2 ${st.installed} on this router · sites see the router's own address · QUIC refused there, so apps use TCP`)
         : h("span", { class: "xs muted" }, "zapret2 is installed on the router first (about 0.4 MB)")) : null,
     results);
-  return box;
+  return { toggle, summary, body: box };
 }
 
 // Settings: how often zapret rules are checked, and the strategy list every search tries (all routers)

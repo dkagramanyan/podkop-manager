@@ -415,6 +415,7 @@ def test_rule_servers_show_flags_and_sort_by_ping(tmp_path):
             page.click("button[type=submit]")
             page.wait_for_selector("#side a")
             page.goto(f"{base}/#/r/1/rules/main")
+            page.click("details[data-panel=probe] > summary")          # closed at first: its summary shows the filter
             page.wait_for_selector("text=Matches now: 3 servers")
             rows = lambda: page.locator(".servers table tr td:first-child").all_inner_texts()      # noqa: E731
             picked = rows()
@@ -507,6 +508,10 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             assert page.locator("#side a:has-text('Zapret')").count() == 0          # no menu of its own
             page.goto(f"{base}/#/r/1/rules/meta")
             page.wait_for_selector("text=Zapret first")
+            # the switch is at the top, with the rule's other switches; its settings are in a panel
+            assert page.locator(".editor .switches [aria-label='Zapret first']").count() == 1
+            assert page.locator("details[data-panel=zapret] .panel-sum").inner_text() == "off"
+            page.click("details[data-panel=zapret] > summary")
             assert page.locator("select[aria-label=Service]").input_value() == "meta"     # the rule's service, by its name
             assert "https://www.instagram.com/" in page.locator("textarea[aria-label='Check addresses']").input_value()
             page.click("button:has-text('Find a strategy and turn on')")
@@ -519,6 +524,7 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             page.click("summary:has-text('Strategies tried')")
             page.click("button:has-text('Use this')")
             page.wait_for_selector("text=Strategy: slow one")
+            assert "slow one" in page.locator("details[data-panel=zapret] .panel-sum").text_content()      # (hidden while open)
             # the rules list shows it (after the next status)
             page.goto(f"{base}/#/r/1")
             page.wait_for_timeout(300)
@@ -532,6 +538,16 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             page.click("label.check:has-text('Zapret first') input")
             page.wait_for_selector("text=through its servers only")
             assert sets[-1] == {"rules": {}, "interval": 30}
+            # a closed part stays closed, on other rules and after a reload; "Expand all" opens every one
+            page.click("details[data-panel=matches] > summary")
+            page.wait_for_function("JSON.parse(localStorage.getItem('podkop-rule-panels') || '{}').matches === false")
+            page.reload()
+            page.wait_for_selector("details[data-panel=matches]")
+            assert not page.locator("details[data-panel=matches]").evaluate("d => d.open")
+            assert page.locator("details[data-panel=zapret]").evaluate("d => d.open")
+            page.click("button:has-text('Expand all')")
+            assert page.locator("details.panel").evaluate_all("ds => ds.every(d => d.open)")
+            page.wait_for_selector("button:has-text('Collapse all')")
             # the strategy list lives in Settings
             page.goto(f"{base}/#/settings")
             page.wait_for_selector("textarea[aria-label='Zapret strategies']")

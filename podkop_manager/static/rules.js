@@ -2,7 +2,7 @@
 
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
   tokenField, touch, userListField, workChanges, workFor } from "./draft.js";
-import { bySection, destChip, optionDef, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
+import { bySection, destChip, optionDef, ruleDest, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
@@ -10,7 +10,7 @@ import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDet
 import { EUROPE, busyClick, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
-import { zapretField, zapretTag } from "./zapret.js";
+import { zapretParts, zapretTag } from "./zapret.js";
 
 // --- routing rules -----------------------------------------------------------------------------------------
 
@@ -30,7 +30,7 @@ export async function viewRules(main, id, sub) {
   put(main, page);
   const bar = draftBar(w);
   const listBox = h("section", { "aria-label": "Rules", class: "stack", style: "flex: 1 1 400px; min-width: 0; gap: 10px" });
-  const editBox = h("div", { style: "flex: 1.3 1 520px; min-width: 0" });
+  const editBox = h("div", { class: "edit-col", style: "flex: 1.3 1 520px; min-width: 0" });
   put(page, pageHead("Routing rules", null, h("button", { type: "button", class: "btn", onclick: () => openRoute(id, true) }, "Where does it go?")),
     bar, h("div", { class: "split" }, listBox, editBox));
 
@@ -104,7 +104,12 @@ export async function viewRules(main, id, sub) {
 
   drawList(); drawEditor();
   let probeState;
+  // from one rule to another: the list stays where it was (the page beside it stays in sight);
+  // on a narrow screen, where the page is under the list, it opens at the rule
+  const wide = window.matchMedia("(min-width: 1100px)").matches;
+  const was = S.from === `${id}/rules` ? window.scrollY : 0;
   S.view = {
+    scroll: () => (wide ? was : sub ? editBox.getBoundingClientRect().top + window.scrollY - 12 : 0),
     leave: () => { w.drawBar = null; },
     onRouter: (r) => {
       if (r.id !== id || !r.status) return;
@@ -124,6 +129,26 @@ export async function viewRules(main, id, sub) {
 // "Proxy, PL servers, 4"
 export const autoDest = (rule, sec) => `Proxy, fastest ${asList((sec.options || {}).urltest_proxy_links).length} from probe${
   rule.countries.length ? ", " + countriesText(rule.countries) : ""}`;
+
+// A part of a rule's page that can be closed, with a one-line summary when it is.
+// Open or closed is kept for every rule (in this browser).
+const PANELS = "podkop-rule-panels";
+const panelState = () => { try { return JSON.parse(localStorage.getItem(PANELS) || "{}") || {}; } catch { return {}; } };
+function savePanel(key, open) {
+  try { localStorage.setItem(PANELS, JSON.stringify(Object.assign(panelState(), { [key]: open }))); } catch { /* not kept: fine */ }
+}
+export function panel(key, title, summary, body, open = true) {
+  const kept = panelState()[key], first = kept === undefined ? open : kept;
+  return h("details", { class: "panel", "data-panel": key, open: first,
+    // (drawn open, the browser says "toggle" too: only a change is kept, so a default stays a default)
+    ontoggle: (e) => {
+      const d = e.currentTarget;
+      if (d.open !== first || panelState()[key] !== undefined) savePanel(key, d.open);
+      d.closest(".editor")?.dispatchEvent(new Event("panels"));
+    } },
+  h("summary", {}, icon("right", 14, { width: 1.6, class: "chev" }), h("h3", {}, title), h("span", { class: "panel-sum" }, summary)),
+  h("div", { class: "panel-body" }, body));
+}
 
 export function ruleEditor(w, s, { onRename }) {
   const defs = S.schema.section;
@@ -211,9 +236,8 @@ export function ruleEditor(w, s, { onRename }) {
   const extraCount = extraLists.reduce((n, k) => n + asList(o[k]).length, 0);
   const extraUi = w.ui[`${s.name}:extra`] || (w.ui[`${s.name}:extra`] = { open: extraCount > 0 });
 
-  const matches = h("div", { class: "part" },
-    h("div", { class: "part-head" }, h("h3", {}, "Matches"),
-      index > 0 ? h("span", {}, `Unless rule${index > 1 ? "s" : ""} 1${index > 1 ? "–" + index : ""} above catch${index > 1 ? "" : "es"} it first`) : null),
+  const matches = panel("matches", "Matches", ruleMatches(s) || "nothing yet", [
+    index > 0 ? h("span", { class: "xs muted" }, `Unless rule${index > 1 ? "s" : ""} 1${index > 1 ? "–" + index : ""} above catch${index > 1 ? "" : "es"} it first`) : null,
     h("div", { class: "field" },
       h("span", { class: "label" }, b.changed("community_lists") ? h("span", { class: "dot sm accent" }) : null, "Community lists"),
       h("div", { class: "row", style: "gap: 6px" },
@@ -235,13 +259,14 @@ export function ruleEditor(w, s, { onRename }) {
         h("button", { type: "button", class: "link-btn", onclick: () => { extraUi.open = false; w.redraw(); } }, "Hide")),
       [["remote_domain_lists", "Domain lists from URLs", "https://… list URL, Enter"], ["remote_subnet_lists", "Subnet lists from URLs", "https://… list URL, Enter"],
         ["local_domain_lists", "Domain list files on the router", "/path/to/file, Enter"], ["local_subnet_lists", "Subnet list files on the router", "/path/to/file, Enter"]]
-        .map(([opt, text, ph]) => h("div", { class: "field" }, lbl(b, opt, text), tokenField(b, opt, { placeholder: ph, splitter: /[\s,]+/ }), b.problemEls(opt)))) : null);
+        .map(([opt, text, ph]) => h("div", { class: "field" }, lbl(b, opt, text), tokenField(b, opt, { placeholder: ph, splitter: /[\s,]+/ }), b.problemEls(opt)))) : null]);
 
   const advanced = proxyAdvanced(w, b, s, ct, pt);
   const sendsHelp = ct === "exclusion" ? "Not through podkop" : null;
 
-  const sends = h("div", { class: "part" },
-    h("div", { class: "part-head" }, h("h3", {}, "Sends to"), sendsHelp ? h("span", {}, sendsHelp) : null),
+  const via = ct === "proxy" && pt === "outbound" ? viaRule(w, s) : null;
+  const sends = panel("sends", "Sends to", auto ? autoDest(auto, s) : via ? `through ${via.name}` : ruleDest(s)[0], [
+    sendsHelp ? h("span", { class: "xs muted" }, sendsHelp) : null,
     h("div", { class: "row", style: "gap: 14px 24px; align-items: flex-start" },
       h("div", { class: "field", role: "group", "aria-label": "Connection" }, h("span", { class: "label xs muted", style: "font-size: 12px" }, b.dot("connection_type"), "Connection"),
         seg(CONNECTIONS, ct, (v) => {
@@ -262,10 +287,6 @@ export function ruleEditor(w, s, { onRename }) {
       h("input", { type: "checkbox", role: "switch", checked: !!auto, onchange: (e) => toggleAuto(w, s, e.target.checked) }),
       h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Take links from probe"),
         auto ? null : h("span", {}, "The probe tests your keys and picks servers by region, ping and speed"))) : null,
-    ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
-    ct === "proxy" && (pt === "urltest" || (pt === "outbound" && viaRule(w, s))) ? strictField(w, s) : null,
-    protectField(w, s),
-    zapretField(w, s, () => w.redraw && w.redraw()),
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
     ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,
@@ -282,20 +303,39 @@ export function ruleEditor(w, s, { onRename }) {
     ct === "vpn" ? flagField(b, "domain_resolver_enabled", "Resolve this rule's domains through its own DNS server") : null,
     ct === "vpn" && b.val("domain_resolver_enabled") === "1" ? h("div", { class: "form-grid" },
       h("span", { class: "lbl" }, b.dot("domain_resolver_dns_type"), "DNS protocol"), h("div", { class: "ctl" }, segField(b, "domain_resolver_dns_type", ["doh", "dot", "udp"], ["DoH", "DoT", "UDP"])),
-      lbl(b, "domain_resolver_dns_server", "DNS server"), h("div", { class: "ctl" }, comboField(b, "domain_resolver_dns_server", optionDef("x", "domain_resolver_dns_server").values), b.was("domain_resolver_dns_server"))) : null,
-    advanced);
+      lbl(b, "domain_resolver_dns_server", "DNS server"), h("div", { class: "ctl" }, comboField(b, "domain_resolver_dns_server", optionDef("x", "domain_resolver_dns_server").values), b.was("domain_resolver_dns_server"))) : null]);
 
-  return h("section", { class: "editor", "aria-label": `Edit rule ${s.name}` },
+  // the switches saved on the router at once, at the top: no scrolling to reach them
+  const zp = zapretParts(w, s, () => w.redraw && w.redraw());
+  const switches = [ct === "proxy" && (pt === "urltest" || via) ? strictField(w, s) : null, protectField(w, s), zp && zp.toggle].filter(Boolean);
+  const probe = ct === "proxy" && pt === "urltest" && auto ? panel("probe", "Probe", probeSummary(auto), autoRuleEditor(w, s, auto), false) : null;
+  const zapret = zp && zp.body ? panel("zapret", "Zapret first", zp.summary, zp.body, false) : null;
+
+  const allOpen = () => [...ed.querySelectorAll("details.panel")].every((d) => d.open);
+  const fold = h("button", { type: "button", class: "btn", onclick: () => {
+    const open = !allOpen();
+    for (const d of ed.querySelectorAll("details.panel")) d.open = open;
+  } });
+  const ed = h("section", { class: "editor", "aria-label": `Edit rule ${s.name}`, onpanels: () => { fold.textContent = allOpen() ? "Collapse all" : "Expand all"; } },
+
     h("div", { class: "top" },
       h("div", { class: "field", style: "flex: 1 1 220px" },
         h("label", { for: "rule-name", class: "xs muted", style: "font-size: 12px" }, "Rule name"),
         h("input", { id: "rule-name", class: "input mono", style: "height: 38px; font-size: 15px; font-weight: 500", value: s.name,
           onchange: (e) => rename(e.target.value), onkeydown: (e) => { if (e.key === "Enter") e.target.blur(); } })),
       h("div", { class: "row", style: "gap: 6px" },
+        fold,
         h("button", { type: "button", class: "btn", onclick: duplicate }, "Duplicate"),
         h("button", { type: "button", class: "btn danger", onclick: remove }, "Delete rule"))),
-    matches, sends);
+    switches.length ? h("div", { class: "switches", role: "group", "aria-label": "Switches" }, switches) : null,
+    matches, sends, probe, zapret, advanced);
+  fold.textContent = allOpen() ? "Collapse all" : "Expand all";
+  return ed;
 }
+
+// "PL, DE · vless · keep 5 + 2"
+const probeSummary = (r) => [r.countries.length ? countriesText(r.countries) : "any country", r.protocols.length ? r.protocols.join(", ") : "any protocol",
+  `keep ${r.top} + ${r.fallback}`].join(" · ");
 
 export function oneLinkField(b) {
   const l = b.get("proxy_string") || "";
@@ -318,11 +358,9 @@ export function proxyAdvanced(w, b, s, ct, pt) {
     "enable_udp_over_tcp", "resolve_real_ip_for_routing", "mixed_proxy_enabled", "mixed_proxy_port", "fully_routed_ips"];
   const changed = opts.filter((k) => b.changed(k)).length;
   const nondef = opts.filter((k) => o[k] !== undefined).length;
-  const ui = w.ui[`${s.name}:adv`] || (w.ui[`${s.name}:adv`] = { open: changed > 0 });
   const isUt = ct === "proxy" && pt === "urltest";
-  const det = h("details", { class: "adv", open: ui.open, ontoggle: (e) => { ui.open = e.currentTarget.open; } },
-    h("summary", {}, icon("right", 14, { width: 1.6, class: "chev" }), h("span", {}, isUt ? "Testing and proxy options" : "Proxy options"),
-      h("span", {}, changed ? `${changed} changed${nondef > changed ? ", others set" : ", others default"}` : nondef ? `${nondef} set` : "all default")),
+  return panel("options", isUt ? "Testing and proxy options" : "Proxy options",
+    changed ? `${changed} changed${nondef > changed ? ", others set" : ", others default"}` : nondef ? `${nondef} set` : "all default",
     h("div", { class: "adv-body" },
       isUt ? h("div", { class: "field" }, h("span", { class: "label xs" }, b.dot("urltest_check_interval"), "Check every"),
         segField(b, "urltest_check_interval", ["30s", "1m", "3m", "5m"]), b.was("urltest_check_interval")) : null,
@@ -346,8 +384,7 @@ export function proxyAdvanced(w, b, s, ct, pt) {
         tokenField(b, "fully_routed_ips", { placeholder: "Device IP or subnet, Enter" }),
         h("span", { class: "help" }, "All traffic of these devices goes through this rule")),
       other.length ? h("div", { class: "field", style: "grid-column: 1 / -1" }, h("span", { class: "label" }, "Other options, kept as they are"),
-        other.map((k) => h("span", { class: "mono xs muted" }, `${k} = ${asList(o[k]).join(", ")}`))) : null));
-  return det;
+        other.map((k) => h("span", { class: "mono xs muted" }, `${k} = ${asList(o[k]).join(", ")}`))) : null), changed > 0);
 }
 
 // --- URLTest rules that take the servers of chosen keys (subscriptions) ---------------------------------------------------
@@ -484,10 +521,11 @@ function strictField(w, s) {
       catch (err) { toast(err.message, true); }
       finally { w.redraw(); }
     } }),
-    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Kill switch"),
-      h("span", {}, off ? `Needs self-heal on for ${watched}, or agent 0.17 (Connection health)`
-        : via ? `Through ${via.name}'s servers or nowhere: connections refused at once while none of them answers (even if ${via.name} borrowed servers), its sites blocked on the router while podkop is down`
-          : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down (works with self-heal off too)")));
+    h("span", { class: "col", title: off ? null : via ? `Through ${via.name}'s servers or nowhere: connections refused at once while none of them answers (even if ${via.name} borrowed servers), its sites blocked on the router while podkop is down`
+      : "Through its own servers or nowhere: no borrowed servers, connections refused at once while none of its servers answers, its sites blocked on the router while podkop is down (works with self-heal off too)" },
+    h("span", { style: "font-weight: 500" }, "Kill switch"),
+    h("span", {}, off ? `Needs self-heal on for ${watched}, or agent 0.17 (Connection health)`
+      : via ? `Through ${via.name}'s servers or nowhere` : "Through its own servers or nowhere")));
 }
 
 // Protected: the agent never changes this rule at run time, and the router
@@ -506,9 +544,10 @@ function protectField(w, s) {
       } catch (err) { toast(err.message, true); }
       finally { w.redraw(); }
     } }),
-    h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Protected"),
-      h("span", {}, "podkop-agent leaves this rule exactly as podkop builds it: no borrowed servers, none of its servers kept out. "
-        + "If it stops working for 5 minutes while the provider's line is up, the router tries plain podkop (safe mode) and keeps it only if that helps")));
+    h("span", { class: "col", title: "podkop-agent leaves this rule exactly as podkop builds it: no borrowed servers, none of its servers kept out. "
+        + "If it stops working for 5 minutes while the provider's line is up, the router tries plain podkop (safe mode) and keeps it only if that helps" },
+    h("span", { style: "font-weight: 500" }, "Protected"),
+    h("span", {}, "The agent leaves it as podkop builds it")));
 }
 
 export async function toggleAuto(w, s, on) {

@@ -3,6 +3,26 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.56.0 — 2026-11-20
+
+A rule's page in fewer screens (manager 0.43.0; the agent is unchanged).
+
+- **The switches are at the top**: Kill switch, Protected and Zapret first
+  sit under the rule's name, each with a one-line state ("Now: direct,
+  through zapret", "Searching: trying …"); the long explanations moved to
+  their tooltips and to the Zapret panel.
+- **Every part can be closed**: Matches, Sends to, Probe (its filter, the
+  servers it matches now and the nightly probe), Zapret first (service,
+  check addresses, strategies tried) and Testing and proxy options. A closed
+  part shows a summary ("community meta, 33 domains, 17 subnets", "PL, DE ·
+  vless · keep 5 + 2", "on · YouTube · fake md5 + multidisorder"). Open or
+  closed stays for every rule, in this browser; "Expand all" / "Collapse
+  all" next to Duplicate. Probe and Zapret start closed.
+- **The list keeps its place**: from one rule to another the page no longer
+  jumps to the top; on a wide screen the rule's page stays in sight beside
+  the list (it scrolls on its own when taller than the window), and on a
+  phone a rule opens at its page instead of at the top of the list.
+
 ## 1.55.1 — 2026-11-20
 
 - **One check interval for zapret rules**, set in Settings → Zapret (15 s,

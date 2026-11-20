@@ -130,7 +130,8 @@ export async function render() {
   main.classList.remove("busy");
   main.replaceChildren(...slot.childNodes);
   S.shown = S.view;
-  window.scrollTo(0, 0);
+  // a page may say where it opens (a rule's page: where the list was, or at the rule on a phone)
+  window.scrollTo(0, (S.view && S.view.scroll && S.view.scroll()) || 0);
 }
 
 // --- sidebar ---------------------------------------------------------------------------
