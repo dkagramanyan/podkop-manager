@@ -10,6 +10,7 @@ import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDet
 import { EUROPE, busyClick, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
+import { zapretField, zapretTag } from "./zapret.js";
 
 // --- routing rules -----------------------------------------------------------------------------------------
 
@@ -78,7 +79,7 @@ export async function viewRules(main, id, sub) {
         h("span", { class: "grip" }, icon("grip", 18)),
         h("span", { class: "n" }, i + 1),
         h("div", { class: "col grow", style: "gap: 6px" },
-          h("div", { class: "row" }, h("span", { class: "name" }, s.name), tag,
+          h("div", { class: "row" }, h("span", { class: "name" }, s.name), tag, zapretTag(S.routers[id], s),
             auto ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, "from probe")
               : keyRule(w, s) ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, `from ${keyLabels(w, s.name)}`) : null),
           h("div", { class: "what" }, h("span", {}, ruleMatches(s)), icon("arrow", 14, { stroke: "var(--muted)" }),
@@ -264,6 +265,7 @@ export function ruleEditor(w, s, { onRename }) {
     ct === "proxy" && pt === "urltest" && auto ? autoRuleEditor(w, s, auto) : null,
     ct === "proxy" && (pt === "urltest" || (pt === "outbound" && viaRule(w, s))) ? strictField(w, s) : null,
     protectField(w, s),
+    zapretField(w, s, () => w.redraw && w.redraw()),
     ct === "proxy" && pt === "url" ? oneLinkField(b) : null,
     ct === "proxy" && pt === "selector" ? serversField(w, b, "selector_proxy_links", { title: "Servers" }) : null,
     ct === "proxy" && pt === "urltest" && !auto ? (keyRule(w, s) ? keyServers(w, s) : serversField(w, b, "urltest_proxy_links", { title: "Servers" })) : null,

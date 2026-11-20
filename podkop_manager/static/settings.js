@@ -6,6 +6,7 @@ import { drawSide, pageHead, routerList, routerState } from "./shell.js";
 import { S } from "./state.js";
 import { api, h, longWhen, modal, put, shortWhen, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
+import { strategiesCard } from "./zapret.js";
 
 // --- settings (the manager's) -------------------------------------------------------------------------------
 
@@ -190,8 +191,10 @@ export async function viewSettings(main) {
             h("a", { class: "btn", href: "/api/backup", download: "" }, "Download backup"),
             h("button", { type: "button", class: "btn", onclick: restore }, "Restore…")),
           savedBackups()),
-        notifyCard()));
+        notifyCard(),
+        zapCard || (zapCard = strategiesCard())));
   };
+  let zapCard = null;      // kept across redraws (its text may be in the middle of an edit)
 
   // where alerts go; loaded once, edits live in notifyS until saved
   let notifyS = null;
@@ -207,7 +210,7 @@ export async function viewSettings(main) {
     };
     return h("section", { class: "card pad", "aria-labelledby": "s-ntf", style: "gap: 12px" },
       h("h2", { id: "s-ntf" }, "Notifications"),
-      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a kill switch closes or opens, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes."),
+      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a kill switch closes or opens, a zapret rule falls back to its servers, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes."),
       field("telegram_token", "Telegram bot token", "password", "from @BotFather"),
       field("telegram_chat", "Telegram chat id", "text", "your id or a group's, e.g. 123456789"),
       field("webhook_url", "Webhook URL (JSON POST)", "url", "https://…"),

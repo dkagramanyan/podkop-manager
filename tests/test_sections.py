@@ -46,6 +46,7 @@ def conn(host, chains, dst=""):
 CONNS = {"connections": [
     conn("www.youtube.com", ["youtube-1-out", "youtube-urltest-out", "youtube-out"]),
     conn("api.github.com", ["github-out"]),
+    conn("www.instagram.com", ["meta-zapret-direct", "meta-zapret-out"]),   # zapret first (agent 0.29): still the rule meta
     conn("", ["meta-2-out", "meta-out"], dst="157.240.1.35"),         # subnet list: address, no name
     conn("example.org", ["direct-out"]),                                # excluded: not a section
     conn("odd.example", ["main-out"], dst="198.18.0.99"),               # FakeIP is never a real address
@@ -62,7 +63,7 @@ def learn(tmp_path, conns=CONNS):
 def test_learns_hosts_real_addresses_and_fakeips(tmp_path):
     m = learn(tmp_path)
     assert {h: v["s"] for h, v in m["hosts"].items()} == {
-        "www.youtube.com": "youtube", "api.github.com": "github", "odd.example": "main"}
+        "www.youtube.com": "youtube", "api.github.com": "github", "www.instagram.com": "meta", "odd.example": "main"}
     assert m["hosts"]["www.youtube.com"]["f"] == "198.18.0.40"
     assert m["hosts"]["odd.example"]["f"] == "-"         # podkop's DNS gave a real address: none to map
     assert {d: v["s"] for d, v in m["dsts"].items()} == {"157.240.1.35": "meta"}

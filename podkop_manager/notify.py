@@ -31,6 +31,8 @@ TEXT = {
     "recovery_gave_up": lambda d: "watchdog gave up after 3 tries in an hour",
     "vpn_down": lambda d: "VPN is down" + (f": {d['last']}" if d.get("last") else "") + ("" if d.get("running") else " (OpenVPN is not running)"),
     "vpn_up": lambda d: "VPN is up again",
+    "zapret_servers": lambda d: f"{d.get('section')}: zapret does not open its sites now, the rule uses its servers",
+    "zapret_direct": lambda d: f"{d.get('section')}: back on zapret (direct)",
     "group_stuck": lambda d: f"{d.get('section')}: sing-box kept {d.get('server')}, which does not answer, although another server did; podkop is restarted",
     "clash_api_silent": lambda d: "sing-box runs but does not answer; podkop is restarted",
     "reverted": lambda d: f"a change was reverted: {d.get('reason') or d.get('message') or ''}",

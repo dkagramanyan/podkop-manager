@@ -704,7 +704,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, f"{name}: nfqws2 --options expected")
         if not re.fullmatch(r"https?://[!-~]{1,290}", url):
             raise HTTPException(400, f"{name}: the test address must be an http(s) URL")
-        return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120]}
+        service = str(r.get("service") or "")
+        if service and service not in zapret.DEFAULTS["services"] and service != "other":
+            raise HTTPException(400, f"{name}: unknown service {service!r}")
+        return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120], "service": service}
 
     def zapret_urls(name: str, urls) -> list[str]:
         if not isinstance(urls, list) or not urls or len(urls) > 10 or not all(
@@ -722,9 +725,15 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         cfg = hub.cached_config(rt) or await hub.config(rid)
         run = zapret_runs.get(rid)
         return {"router": st, "rules": zapret.rules_view(cfg["config"]),
+                "services": {k: {f: v.get(f) for f in ("urls", "test", "note")} for k, v in zapret.DEFAULTS["services"].items()},
                 "strategies": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
                 "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
                 "run": {k: v for k, v in run.items() if k != "task"} if run else None}
+
+    @app.get("/api/zapret/strategies", dependencies=[api])
+    async def zapret_strategies_get():
+        return {"text": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
+                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies())}
 
     @app.put("/api/zapret/strategies", dependencies=[api])
     async def zapret_strategies_set(body: dict):
@@ -792,7 +801,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             test = str(r.get("test") or "") or urls[0]
             if not re.fullmatch(r"https?://[!-~]{1,290}", test):
                 raise HTTPException(400, f"{name}: bad test address")
-            rules.append({"name": name, "urls": urls, "test": test})
+            service = str(r.get("service") or "")
+            if service and service not in zapret.DEFAULTS["services"] and service != "other":
+                raise HTTPException(400, f"{name}: unknown service {service!r}")
+            rules.append({"name": name, "urls": urls, "test": test, "service": service})
         strategies = zapret_strategies()
         if body.get("strategies"):        # only some of the list (the page's own pick)
             names = set(body["strategies"]) if isinstance(body["strategies"], list) else set()
@@ -804,7 +816,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         async def go():
             try:
                 cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
-                cur = {k: {f: v[f] for f in ("args", "url", "name") if f in v} for k, v in cur.items()}
+                cur = {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in cur.items()}
                 new = await zapret.auto(rt.agent, rules, strategies, cur, state)
                 if apply and new != cur:
                     state["now"] = "turning zapret on"

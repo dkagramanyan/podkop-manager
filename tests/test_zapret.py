@@ -213,7 +213,7 @@ def test_search_turns_zapret_on_with_the_fastest_working_strategy(tmp_path, monk
                 break
             time.sleep(0.02)
         assert run["state"] == "done", run["error"]
-        assert rt.agent.rules == {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast"}}
+        assert rt.agent.rules == {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast", "service": ""}}
         assert run["outcome"]["meta"] == {"on": True, "strategy": "fast"}
         # a strategy list sent by the page
         bad = c.put("/api/routers/1/zapret", headers=H, json={"rules": {"meta": {"args": ["rm"], "url": "https://x/"}}})
@@ -283,3 +283,39 @@ def test_a_route_rule_with_its_own_ports_stays_on_the_servers(tmp_path):
     (tmp_path / "in.json").write_text(json.dumps(sb))
     out = _filter(tmp_path)
     assert [r["outbound"] for r in out["route"]["rules"] if r["outbound"].startswith("meta")] == ["meta-out"]
+
+
+def test_watch_tells_a_move_to_the_servers_and_back_once_it_holds(tmp_path):
+    _setup(tmp_path, rules={"meta": RULES["meta"]})
+    now = tmp_path / "now"
+    body = '''
+TAB=$(printf '\\t')
+event() { echo "$1 $2" >> "$RUN/events"; }
+proxies() { printf '{"proxies": {"meta-zapret-out": {"now": "%s"}}}' "$(cat "$RUN/now")"; }
+zapret_watch'''
+    seq = ["meta-out", "meta-zapret-direct", "meta-zapret-direct", "meta-out", "meta-out", "meta-out", "meta-zapret-direct", "meta-zapret-direct"]
+    told = []
+    for n in seq:
+        now.write_text(n)
+        p = _sh(tmp_path, body)
+        assert p.returncode == 0, p.stderr
+        ev = tmp_path / "events"
+        told.append(ev.read_text().splitlines() if ev.exists() else [])
+    # the first moment on the servers (sing-box's first test) is not told; a held move is, once
+    assert told[2] == []
+    assert told[4] == ['zapret_servers {"section":"meta"}'] and told[5] == told[4]
+    assert told[7] == ['zapret_servers {"section":"meta"}', 'zapret_direct {"section":"meta"}']
+
+
+def test_watch_tests_each_direct_path_itself(tmp_path):
+    # sing-box tests a URLTest only while it carries connections; the agent does it every 4 rounds
+    _setup(tmp_path, rules={"meta": RULES["meta"]})
+    p = _sh(tmp_path, '''
+TAB=$(printf '\\t')
+event() { :; }
+proxies() { echo '{"proxies": {}}'; }
+clash_get() { echo "$*" >> "$RUN/probes"; }
+zapret_watch; zapret_watch; zapret_watch; zapret_watch; zapret_watch''')
+    assert p.returncode == 0, p.stderr
+    probes = (tmp_path / "probes").read_text().splitlines()
+    assert probes == ["/proxies/meta-zapret-direct/delay --data-urlencode url=https://www.instagram.com/ --data timeout=6000"] * 2

@@ -226,7 +226,8 @@ async def auto(agent, rules: list[dict], strategies: list[dict], current: dict, 
         elif not pick:
             state["outcome"][r["name"]] = {"on": False, "why": "no strategy opened every test address; the rule stays on its servers"}
         else:
-            new[r["name"]] = {"args": pick["args"], "url": r["test"] or r["urls"][0], "name": pick.get("name") or ""}
+            new[r["name"]] = {"args": pick["args"], "url": r["test"] or r["urls"][0], "name": pick.get("name") or "",
+                              "service": r.get("service") or ""}
             state["outcome"][r["name"]] = {"on": True, "strategy": pick.get("name") or ""}
     state["now"] = None
     return new

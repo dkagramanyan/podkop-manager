@@ -1580,7 +1580,7 @@ run_vpn_install() {
 # not under $ETC: nfqws2 drops its root rights after the start and must still
 # read its Lua and fake files
 ZAPRET_DIR=/etc/podkop-zapret
-ZAPRET_RULES=$ZAPRET_DIR/rules.json   # {"<rule>": {"args": [...], "url", "name", "n"}}
+ZAPRET_RULES=$ZAPRET_DIR/rules.json   # {"<rule>": {"args": [...], "url", "name", "service", "n"}}
 ZAPRET_INIT=/etc/init.d/podkop-zapret
 ZAPRET_BASE=134217728                 # 0x08000000: a rule's mark is base + n, its queue 300 + n
 ZAPRET_TEST=99                        # n of the strategy search
@@ -1710,11 +1710,44 @@ zapret_running() {
     jq -c '[.["podkop-zapret"].instances // {} | to_entries[] | select(.value.running) | .key]' 2>/dev/null | grep . || echo '[]'
 }
 
-# zapret_watch, every daemon round: the table is back after anything removed it
+# zapret_watch, every daemon round: the table is back after anything removed
+# it; a rule that moved to its servers (zapret's check fails) or back gives an
+# event once the move has held for two rounds (a moment on the servers while
+# sing-box's first test after a reload runs is not a move)
 zapret_watch() {
-  [ -s "$ZAPRET_RULES" ] && zapret_installed || return 0
-  zapret_table && return 0
-  zapret_nft && logger -t podkop-agent "zapret: firewall table was missing, added again"
+  if [ ! -s "$ZAPRET_RULES" ] || ! zapret_installed; then rm -rf "$RUN/zapret"; return 0; fi
+  zapret_table || { zapret_nft && logger -t podkop-agent "zapret: firewall table was missing, added again"; }
+  # sing-box tests a URLTest only while connections use it: with no traffic a
+  # failing zapret path would stay chosen (and the next connection fail), so
+  # each rule's direct path is tested here every 4 rounds (about a minute)
+  _zwt=$(( (${_zwt:-0} + 1) % 4 ))
+  if [ "$_zwt" = 1 ] && command -v clash_get >/dev/null 2>&1; then
+    _wps=""
+    for _wr in $(jq -r 'keys[]' "$ZAPRET_RULES" 2>/dev/null); do
+      _wurl=$(jq -r --arg r "$_wr" '.[$r].url' "$ZAPRET_RULES")
+      clash_get "/proxies/$_wr-zapret-direct/delay" --data-urlencode "url=$_wurl" --data "timeout=6000" >/dev/null 2>&1 &
+      _wps="$_wps $!"
+    done
+    # their own pids only: a bare wait would wait for the guard's watcher too
+    for _wpid in $_wps; do wait "$_wpid" 2>/dev/null; done
+  fi
+  _wp=$(proxies 2>/dev/null); [ -n "$_wp" ] || return 0
+  mkdir -p "$RUN/zapret"
+  printf '%s' "$_wp" | jq -r --argjson r "$(zapret_rules_json)" '.proxies as $p | $r | keys[]
+    | . as $k | ($p[$k + "-zapret-out"].now // "") | select(. != "")
+    | "\($k)\t\(if endswith("-zapret-direct") then "zapret" else "servers" end)"' 2>/dev/null |
+  while IFS="$TAB" read -r _wr _wu; do
+    _wf="$RUN/zapret/$_wr"
+    # first look: assumed on zapret, so a rule that stays on its servers is told
+    read -r _wold _wn _wtold 2>/dev/null < "$_wf" || { _wold=$_wu; _wn=0; _wtold=zapret; }
+    if [ "$_wu" = "$_wold" ]; then _wn=$((_wn + 1)); else _wn=1; fi
+    if [ "$_wn" -ge 2 ] && [ "$_wu" != "$_wtold" ]; then
+      _wtold=$_wu
+      if [ "$_wu" = servers ]; then event zapret_servers "$(jq -nc --arg s "$_wr" '{section: $s}')"
+      else event zapret_direct "$(jq -nc --arg s "$_wr" '{section: $s}')"; fi
+    fi
+    echo "$_wu $_wn $_wtold" > "$_wf"
+  done
 }
 
 zapret_status() {
@@ -1844,18 +1877,19 @@ zapret_install() {
   reply "$(zapret_status)"
 }
 
-# set: stdin {"rules": {"<rule>": {"args", "url", "name"}}} (all of them;
+# set: stdin {"rules": {"<rule>": {"args", "url", "name", "service"}}} (all of them;
 # {} turns zapret off); a rule keeps its number, so its mark and queue
 zapret_set() {
   _zq=$(head -c 262144)
   printf '%s' "$_zq" | jq -e --argjson deny "$ZAPRET_DENY" '.rules | type == "object" and length <= 50 and all(to_entries[];
       (.key | length > 0 and length <= 64 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
       and ((.value.name // "") | type == "string" and length <= 120 and (contains("\n") | not))
+      and ((.value.service // "") | type == "string" and length <= 32 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 97 and . <= 122))))
       and (.value.args | '"$ZAPRET_ARGS_OK"')
       and (.value.url | type == "string" and (startswith("https://") or startswith("http://")) and length <= 300
            and (explode | all(. >= 33 and . <= 126))))' >/dev/null 2>&1 ||
     fail bad_request 'expected {"rules": {"<rule>": {"args": ["--..."], "url": "https://...", "name"}}}'
-  _zn=$(printf '%s' "$_zq" | jq -c '.rules | with_entries(.value |= {args, url, name: (.name // "")})')
+  _zn=$(printf '%s' "$_zq" | jq -c '.rules | with_entries(.value |= {args, url, name: (.name // ""), service: (.service // "")})')
   if [ "$_zn" != '{}' ]; then
     ! safe_mode || fail safe_mode "safe mode: the router runs plain podkop; leave safe mode first"
     zapret_installed || fail not_installed "zapret2 is not installed on the router"
@@ -2469,7 +2503,8 @@ sections_learn() {
   _t=$(date +%s)
   jq -c --argjson t "$_t" --argjson max "$SECTIONS_MAX" --argjson keep "$SECTIONS_KEEP" --slurpfile m "$_sd/map.json" '
     # (no regular expressions: the jq of OpenWrt is built without them)
-    def sec: (.chains // []) | (last // "") | rtrimstr("-out");
+    # a zapret rule sends its web traffic to "<rule>-zapret-out" (names have no "-")
+    def sec: (.chains // []) | (last // "") | rtrimstr("-out") | rtrimstr("-zapret");
     def fake: startswith("198.18.") or startswith("198.19.");
     def trim: with_entries(select(.value.t > $t - $keep)) | to_entries | sort_by(-.value.t) | .[:$max] | from_entries;
     $m[0] as $m

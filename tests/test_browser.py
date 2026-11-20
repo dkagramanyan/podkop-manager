@@ -431,18 +431,18 @@ def test_rule_servers_show_flags_and_sort_by_ping(tmp_path):
         t.join(timeout=10)
 
 
-def test_zapret_page_ticks_the_usual_services_and_turns_zapret_on(tmp_path):
+def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp_path):
     import copy
     import uvicorn
     from playwright.sync_api import sync_playwright
     from podkop_manager import zapret
 
     zapret.POLL = 0.05
-    sets = []
+    sets, checks = [], []
 
     class ZapretAgent(OnlineAgent):
         config = copy.deepcopy(OnlineAgent.config)
-        for n in ("meta", "youtube", "telegram", "github"):
+        for n in ("meta", "github"):
             config["sections"].append({"name": n, "type": "section", "anonymous": False, "options": {
                 "connection_type": "proxy", "proxy_config_type": "outbound", "user_domain_list_type": "dynamic", "user_domains": [f"{n}.example"]}})
         rules = {}
@@ -451,15 +451,18 @@ def test_zapret_page_ticks_the_usual_services_and_turns_zapret_on(tmp_path):
             if name == "status":
                 st = await super().call(name, *args, payload=payload, **kwargs)
                 st["agent"] = {"version": "0.29.0", "capabilities": ["zapret"]}
+                st["proxies"] = {"groups": [{"name": f"{k}-zapret-out", "now": f"{k}-zapret-direct", "all": []} for k in self.rules], "servers": []}
                 return st
             if name == "zapret" and args[0] == "status":
                 return {"arch": "aarch64", "installed": "v1.0.7", "queue": True, "table": bool(self.rules), "rules": self.rules,
                         "running": list(self.rules), "refused": [], "using": {k: "zapret" for k in self.rules}}
             if name == "zapret" and args[0] == "check":
+                checks.append(payload)
                 return {"job": "1-1"}
             if name == "job":
                 return {"state": "done", "baseline": [{"url": "u", "ok": False}],
-                        "results": [{"name": "fake md5", "args": ["--payload=tls_client_hello"], "ok": True, "urls": [{"ok": True, "ms": 300}]}]}
+                        "results": [{"name": "fake md5", "args": ["--payload=tls_client_hello"], "ok": True, "urls": [{"ok": True, "ms": 300}]},
+                                    {"name": "slow one", "args": ["--payload=tls_client_hello", "--x=1"], "ok": True, "urls": [{"ok": True, "ms": 900}]}]}
             if name == "zapret" and args[0] == "set":
                 sets.append(payload)
                 self.rules = {k: dict(v, n=i + 1) for i, (k, v) in enumerate(payload["rules"].items())}
@@ -501,15 +504,37 @@ def test_zapret_page_ticks_the_usual_services_and_turns_zapret_on(tmp_path):
             page.fill("#pw", "secret-pass")
             page.click("button[type=submit]")
             page.wait_for_selector("#side a")
-            page.goto(f"{base}/#/r/1/zapret")
-            page.wait_for_selector("text=zapret2 v1.0.7")
-            ticked = page.eval_on_selector_all("input[type=checkbox]", "els => els.filter(e => e.checked).map(e => e.closest('.card').querySelector('a').textContent)")
-            assert sorted(ticked) == ["meta", "telegram", "youtube"]          # github and main are not services
-            page.click("button:has-text('Find and turn on')")
-            page.wait_for_selector("text=Turned on with fake md5")
-            assert sorted(sets[-1]["rules"]) == ["meta", "telegram", "youtube"]
-            assert sets[-1]["rules"]["youtube"]["url"] == "https://www.youtube.com/generate_204"
-            page.wait_for_selector("text=direct, through zapret")
+            assert page.locator("#side a:has-text('Zapret')").count() == 0          # no menu of its own
+            page.goto(f"{base}/#/r/1/rules/meta")
+            page.wait_for_selector("text=Zapret first")
+            assert page.locator("select[aria-label=Service]").input_value() == "meta"     # the rule's service, by its name
+            assert "https://www.instagram.com/" in page.locator("textarea[aria-label='Check addresses']").input_value()
+            page.click("button:has-text('Find a strategy and turn on')")
+            page.wait_for_selector("text=Now: direct, through zapret", timeout=20000)
+            assert "null" not in page.locator("[aria-label='Zapret first']").inner_text()
+            assert checks[-1]["urls"][0] == "https://www.instagram.com/"
+            assert sets[-1]["rules"] == {"meta": {"args": ["--payload=tls_client_hello"], "url": "https://www.instagram.com/",
+                                                  "name": "fake md5", "service": "meta"}}
+            # the other working strategy can be picked by hand
+            page.click("summary:has-text('Strategies tried')")
+            page.click("button:has-text('Use this')")
+            page.wait_for_selector("text=Strategy: slow one")
+            # the rules list shows it (after the next status)
+            page.goto(f"{base}/#/r/1")
+            page.wait_for_timeout(300)
+            page.goto(f"{base}/#/r/1/rules/github")
+            page.wait_for_selector(".rule .tag:has-text('zapret')", timeout=20000)
+            # github has no service: "Other", no addresses until one is given
+            assert page.locator("select[aria-label=Service]").input_value() == "other"
+            # turning it off
+            page.goto(f"{base}/#/r/1/rules/meta")
+            page.wait_for_selector("text=Strategy: slow one")
+            page.click("label.check:has-text('Zapret first') input")
+            page.wait_for_selector("text=through its servers only")
+            assert sets[-1] == {"rules": {}}
+            # the strategy list lives in Settings
+            page.goto(f"{base}/#/settings")
+            page.wait_for_selector("textarea[aria-label='Zapret strategies']")
             assert not errors, errors
             browser.close()
     finally:

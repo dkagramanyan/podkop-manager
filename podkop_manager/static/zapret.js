@@ -1,161 +1,176 @@
 // zapret.js: part of podkop-manager's web interface (see app.js)
 
-import { pageHead } from "./shell.js";
+import { S } from "./state.js";
 import { api, h, put, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 
-// --- zapret on the router (agent 0.29): sites without a server first, the rule's servers as fallback ---
+// --- zapret first (agent 0.29): a rule's web traffic goes out direct through
+// zapret2 while that opens its sites, and through its servers otherwise ---
 
-export async function viewZapret(main, id) {
-  const page = h("div", { class: "page" });
-  put(main, page);
-  let z, timer = null;
-  const picked = new Map();      // rule -> checked for the search
-  const urls = new Map();        // rule -> test addresses typed on the page
+export const ZAPRET_SERVICES = [["youtube", "YouTube"], ["meta", "Meta"], ["twitter", "X"], ["telegram", "Telegram"],
+  ["discord", "Discord"], ["other", "Other"]];
 
-  const load = async () => {
-    try { z = await api("GET", `/api/routers/${id}/zapret`); }
-    catch (e) {
-      put(page, pageHead("Zapret"), h("div", { class: "card empty" }, /too old|unknown command/.test(e.message)
-        ? "This router's agent has no zapret support yet. Update it first: Settings → Update agent (agent 0.29 or newer)."
-        : e.message));
-      return;
+export const zapretSupported = (rt) => ((((rt || {}).status || {}).agent || {}).capabilities || []).includes("zapret");
+
+// the rules list: a rule on zapret, or one zapret's check moved to its servers
+export function zapretTag(rt, s) {
+  const g = (((rt || {}).proxies || {}).groups || []).find((x) => x.name === `${s.name}-zapret-out`);
+  if (!g) return null;
+  return g.now === `${s.name}-zapret-direct` ? h("span", { class: "tag ok", title: "Its web traffic goes out direct, through zapret2" }, "zapret")
+    : h("span", { class: "tag warn", title: "zapret does not open its sites now: the rule uses its servers" }, "zapret → servers");
+}
+
+const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)} s` : `${x} ms`);
+
+// the rule page's part; w.zapret holds what GET .../zapret said (loaded once per page)
+export function zapretField(w, s, redraw) {
+  const rt = S.routers[w.id];
+  if (!zapretSupported(rt) || (s.options || {}).connection_type !== "proxy") return null;
+  const box = h("div", { class: "stack", style: "gap: 10px", "aria-label": "Zapret first" });
+  const z = w.zapret;
+  if (!z) {
+    if (!w.zapretLoading) {
+      w.zapretLoading = api("GET", `/api/routers/${w.id}/zapret`)
+        .then((r) => { w.zapret = r; }).catch((e) => { w.zapret = { error: e.message }; })
+        .finally(() => { w.zapretLoading = null; redraw(); });
     }
-    for (const r of z.rules) {
-      if (!picked.has(r.name)) picked.set(r.name, r.default && !z.router.rules[r.name]);
-      if (!urls.has(r.name)) urls.set(r.name, (z.router.rules[r.name] ? [z.router.rules[r.name].url] : r.urls).join("\n"));
+    return h("span", { class: "small muted" }, "Zapret first: …");
+  }
+  if (z.error) return h("span", { class: "small bad-text" }, `Zapret first: ${z.error}`);
+  const st = z.router;
+  const on = st.rules[s.name];
+  const known = z.rules.find((r) => r.name === s.name);       // the rule is on the router (not only in the draft)
+  const refused = (st.refused || []).includes(s.name);
+  const run = z.run && z.run.rules.includes(s.name) ? z.run : null;
+  const running = !!(z.run && z.run.state === "running");
+  w.ui = w.ui || {};
+  const ui = w.ui[`${s.name}:zapret`] = w.ui[`${s.name}:zapret`] || {};
+  const guess = (known && known.service) || "other";
+  ui.service = ui.service || (on && on.service) || guess;
+  const svc = z.services[ui.service] || { urls: [], test: "", note: "" };
+  if (ui.urls === undefined || ui.forService !== ui.service) {
+    ui.urls = (on && (on.service || "other") === ui.service && ui.service === "other" ? [on.url] : svc.urls).join("\n");
+    ui.forService = ui.service;
+  }
+  const urls = () => ui.urls.split(/\s+/).filter(Boolean);
+
+  const reload = async () => { try { w.zapret = await api("GET", `/api/routers/${w.id}/zapret`); } catch (e) { toast(e.message, true); } redraw(); };
+  const follow = async () => {
+    for (let i = 0; i < 1200; i++) {
+      await new Promise((r) => setTimeout(r, 3000));
+      await reload();
+      if (!w.zapret.run || w.zapret.run.state !== "running") return;
     }
-    draw();
-    clearTimeout(timer);
-    if (z.run && z.run.state === "running" && page.isConnected) timer = setTimeout(load, 3000);
   };
-
-  const installed = () => z.router.installed !== null;
-
-  const install = busyClick(async () => {
-    toast("Downloading zapret2 and sending it to the router…");
-    try { await api("POST", `/api/routers/${id}/zapret/install`); toast("zapret2 installed"); }
-    catch (e) { toast(e.message, true); }
-    await load();
-  });
-
   const setRules = async (rules, msg) => {
-    try { await api("PUT", `/api/routers/${id}/zapret`, { rules }); toast(msg); }
-    catch (e) { toast(e.message, true); }
-    await load();
+    try { await api("PUT", `/api/routers/${w.id}/zapret`, { rules }); toast(msg); ui.since = Date.now(); } catch (e) { toast(e.message, true); }
+    await reload();
   };
-  const current = () => Object.fromEntries(Object.entries(z.router.rules).map(([k, v]) =>
-    [k, { args: v.args, url: v.url, name: v.name || "" }]));
+  const current = () => Object.fromEntries(Object.entries(st.rules).map(([k, v]) =>
+    [k, { args: v.args, url: v.url, name: v.name || "", service: v.service || "" }]));
 
-  const ruleUrls = (name) => urls.get(name).split(/\s+/).filter(Boolean);
-  const search = (apply, names) => busyClick(async () => {
-    const list = names.map((n) => {
-      const r = z.rules.find((x) => x.name === n);
-      return { name: n, urls: ruleUrls(n), test: r && r.test && ruleUrls(n)[0] === r.urls[0] ? r.test : ruleUrls(n)[0] };
-    });
-    if (!list.length) { toast("Tick at least one rule", true); return; }
-    try { await api("POST", `/api/routers/${id}/zapret/search`, { rules: list, apply }); }
-    catch (e) { toast(e.message, true); return; }
-    toast(apply ? "Searching; rules where a strategy works get zapret on" : "Searching…");
-    await load();
+  const search = busyClick(async () => {
+    if (!urls().length) { toast("Give at least one address that zapret should open", true); return; }
+    try {
+      if (st.installed === null) {
+        toast("Installing zapret2 on the router…");
+        await api("POST", `/api/routers/${w.id}/zapret/install`);
+      }
+      const test = ui.service !== "other" && urls()[0] === svc.urls[0] && svc.test ? svc.test : urls()[0];
+      await api("POST", `/api/routers/${w.id}/zapret/search`, { apply: true, rules: [{ name: s.name, urls: urls(), test, service: ui.service }] });
+    } catch (e) { toast(e.message, true); await reload(); return; }
+    toast(`Trying zapret strategies for ${s.name} on the router…`);
+    await reload();
+    await follow();
+    ui.since = Date.now();
+    redraw();
+    const out = w.zapret.run && w.zapret.run.outcome[s.name];
+    if (out) toast(out.on ? `${s.name}: zapret first, with ${out.strategy}` : `${s.name}: ${out.why}`, !out.on);
   });
+  if (running && !w.zapretFollow) { w.zapretFollow = follow().finally(() => { w.zapretFollow = null; }); }
 
-  const card = (title, sub, ...body) => h("section", { class: "card sect", "aria-label": title },
-    h("div", { class: "col" }, h("h2", {}, title), sub ? h("span", {}, sub) : null), body);
+  // sing-box tests the new group within a minute; until then it may sit on the servers
+  const checking = on && st.using[s.name] !== "zapret" && ui.since && Date.now() - ui.since < 120e3;
+  const state = on ? (st.using[s.name] === "zapret" ? h("span", { class: "pill ok" }, "Now: direct, through zapret")
+    : checking || !st.using[s.name] ? h("span", { class: "pill" }, "Checking whether zapret opens its sites…")
+      : h("span", { class: "pill warn" }, "Now: on its servers (zapret's check fails)")) : null;
+  // while the page shows this rule: look again until zapret carries it (and now and then after)
+  if (on && !running && !w.zapretTimer) {
+    w.zapretTimer = setTimeout(() => {
+      w.zapretTimer = null;
+      if (/\/rules(\/[A-Za-z0-9_]+)?$/.test(location.hash) && document.querySelector("[aria-label='Zapret first']")) reload();
+    }, checking ? 5000 : 30000);
+  }
+  const job = run && run.jobs[s.name];
+  const results = job && (job.results || []).length ? h("details", {},
+    h("summary", { class: "small" }, `Strategies tried: ${job.results.filter((r) => r.ok).length} of ${job.results.length} opened every address`),
+    (job.baseline || []).length ? h("p", { class: "xs muted" }, "Without zapret: ",
+      job.baseline.map((b) => `${b.url} ${b.ok ? "opens" : "does not open"}`).join(", ")) : null,
+    h("div", { class: "scroll-x" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Strategy"), h("th", {}, "Result"), h("th", {}, ""))),
+      h("tbody", {}, job.results.map((r) => h("tr", {},
+        h("td", { class: "small", title: r.args.join(" ") }, r.name),
+        h("td", { class: "small" }, r.ok ? h("span", { class: "pill ok" }, `opens, ${ms(r.urls.reduce((a, u) => a + (u.ms || 0), 0))}`)
+          : h("span", { class: "muted" }, r.error || (r.urls.find((u) => !u.ok) || {}).detail || "does not open")),
+        h("td", {}, r.ok && !(on && on.name === r.name) ? h("button", { type: "button", class: "btn xs", disabled: running,
+          onclick: busyClick(() => setRules({ ...current(), [s.name]: { args: r.args, url: urls()[0], name: r.name, service: ui.service } },
+            `${s.name}: zapret first, with ${r.name}`)) }, "Use this") : null))))))) : null;
+  const outcome = run && run.outcome[s.name];
 
-  const using = (name) => {
-    const u = z.router.using[name];
-    return u === "zapret" ? h("span", { class: "pill ok" }, "direct, through zapret")
-      : u === "servers" ? h("span", { class: "pill warn" }, "on its servers (zapret's test fails)")
-        : z.router.rules[name] ? h("span", { class: "pill" }, "waiting for sing-box") : h("span", { class: "pill" }, "servers only");
-  };
+  const sel = h("select", { class: "input mid", "aria-label": "Service", disabled: running,
+    onchange: (e) => { ui.service = e.target.value; redraw(); } },
+  ZAPRET_SERVICES.map(([k, label]) => h("option", { value: k, selected: k === ui.service }, label)));
+  put(box,
+    h("label", { class: "check" },
+      h("input", { type: "checkbox", role: "switch", checked: !!on || (running && !!run), disabled: refused || !known || running,
+        onchange: async (e) => {
+          if (e.target.checked) { await search(e); return; }
+          e.target.disabled = true;
+          const rest = current(); delete rest[s.name];
+          await setRules(rest, `${s.name}: through its servers only`);
+        } }),
+      h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Zapret first"),
+        h("span", {}, refused ? "Not with a kill switch or Protected on: this rule's traffic must stay on its servers"
+          : !known ? "Apply the rule first: zapret works on rules the router has"
+            : on ? `Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Strategy: ${on.name || on.args.join(" ")}`
+              : "Web traffic goes out without a server, through zapret2, while that opens its sites; otherwise through its servers. Turning it on tries the strategy list on the router and keeps the fastest that opens the addresses below"))),
+    h("div", { class: "row" }, state, running && run ? h("span", { class: "small" },
+      job && job.trying ? `Trying ${job.trying.name}…` : "Searching…") : null),
+    outcome && !outcome.on ? h("p", { class: "small muted" }, outcome.why) : null,
+    h("div", { class: "form-grid" },
+      h("label", { class: "lbl" }, "Service"), h("div", { class: "ctl" }, sel,
+        svc.note ? h("span", { class: "xs muted" }, svc.note) : null),
+      h("label", { class: "lbl" }, "Check addresses"), h("div", { class: "ctl" },
+        h("textarea", { class: "input mono xs", rows: 2, spellcheck: "false", disabled: running, "aria-label": "Check addresses",
+          placeholder: "https://example.com/", oninput: (e) => { ui.urls = e.target.value; } }, ui.urls),
+        h("span", { class: "xs muted" }, "Sites that must open through zapret; the first one is checked every minute"))),
+    known && !refused ? h("div", { class: "row" },
+      h("button", { type: "button", class: "btn", disabled: running, onclick: search }, on ? "Find the best strategy again" : "Find a strategy and turn on"),
+      st.installed ? h("span", { class: "xs muted" }, `zapret2 ${st.installed} on this router · sites see the router's own address · QUIC refused there, so apps use TCP`)
+        : h("span", { class: "xs muted" }, "zapret2 is installed on the router first (about 0.4 MB)")) : null,
+    results);
+  return box;
+}
 
-  const ms = (x) => (x === null || x === undefined ? "" : x >= 1000 ? `${(x / 1000).toFixed(1)} s` : `${x} ms`);
-  const jobView = (name) => {
-    const j = z.run && z.run.jobs[name];
-    if (!j) return null;
-    const res = j.results || [];
-    const pickNow = (r) => setRules({ ...current(), [name]: { args: r.args, url: ruleUrls(name)[0], name: r.name || "" } },
-      `zapret on for ${name}: ${r.name}`);
-    return h("details", { open: z.run.state === "running" },
-      h("summary", { class: "small" }, `Search: ${res.filter((r) => r.ok).length} working of ${res.length} tried`,
-        j.trying ? ` · trying ${j.trying.name}` : "", j.state === "failed" ? ` · ${j.message}` : ""),
-      (j.baseline || []).length ? h("p", { class: "xs muted" }, "Without zapret: ",
-        j.baseline.map((b) => `${b.url} ${b.ok ? "opens" : "fails"}`).join(", ")) : null,
-      h("div", { class: "scroll-x" }, h("table", {},
-        h("thead", {}, h("tr", {}, h("th", {}, "Strategy"), h("th", {}, "Result"), h("th", {}, ""))),
-        h("tbody", {}, res.map((r) => h("tr", {},
-          h("td", { class: "small", title: r.args.join(" ") }, r.name),
-          h("td", { class: "small" }, r.ok ? h("span", { class: "pill ok" }, `opens, ${ms(r.urls.reduce((a, u) => a + (u.ms || 0), 0))}`)
-            : h("span", { class: "muted" }, r.error || (r.urls.find((u) => !u.ok) || {}).detail || "fails")),
-          h("td", {}, r.ok ? h("button", { type: "button", class: "btn ghost", onclick: busyClick(() => pickNow(r)) }, "Use") : null)))))));
-  };
-
-  const draw = () => {
-    const running = z.run && z.run.state === "running";
-    const rows = z.rules.map((r) => {
-      const on = z.router.rules[r.name];
-      const out = z.run && z.run.outcome[r.name];
-      const refused = (z.router.refused || []).includes(r.name);
-      return h("div", { class: "card", style: "padding: 12px; display: grid; gap: 8px" },
-        h("div", { class: "row" },
-          h("label", { class: "check" }, h("input", { type: "checkbox", checked: picked.get(r.name), disabled: refused || running,
-            onchange: (e) => { picked.set(r.name, e.target.checked); } }),
-          h("a", { class: "mono", href: `#/r/${id}/rules/${r.name}` }, r.name)),
-          r.service ? h("span", { class: "pill" }, r.service) : null,
-          using(r.name),
-          on ? h("span", { class: "xs muted", title: on.args.join(" ") }, on.name || on.args.join(" ")) : null,
-          on ? h("button", { type: "button", class: "btn ghost", disabled: running, onclick: busyClick(() => {
-            const rest = current(); delete rest[r.name];
-            return setRules(rest, `${r.name}: servers only`);
-          }) }, "Servers only") : null),
-        refused ? h("p", { class: "xs muted" }, "Kill switch or Protected is on for this rule: zapret is not used on it.") : null,
-        r.note ? h("p", { class: "xs muted" }, r.note) : null,
-        out ? h("p", { class: `small ${out.on ? "" : "muted"}` }, out.on ? `Turned on with ${out.strategy}` : out.why) : null,
-        h("label", { class: "field" }, h("span", { class: "label xs" }, "Test addresses (the first one is also the live check)"),
-          h("textarea", { class: "input mono xs", rows: 2, spellcheck: "false", disabled: running,
-            oninput: (e) => { urls.set(r.name, e.target.value); } }, urls.get(r.name))),
-        h("div", { class: "row" }, h("button", { type: "button", class: "btn ghost", disabled: running || refused || !installed(),
-          onclick: search(false, [r.name]) }, "Find strategies")),
-        jobView(r.name));
-    });
-    const strat = h("textarea", { class: "input mono xs", rows: 10, spellcheck: "false",
-      "aria-label": "Strategies" }, z.strategies);
-    put(page,
-      pageHead("Zapret", "Sites of chosen rules go out without a server, through zapret; when that fails they use the rule's servers"),
-      card("On the router", null,
-        h("div", { class: "row" },
-          installed() ? h("span", { class: "pill ok" }, `zapret2 ${z.router.installed || ""}`)
-            : h("span", { class: "pill warn" }, "Not installed"),
-          z.router.table ? h("span", { class: "pill" }, "firewall rules on") : null,
-          h("button", { type: "button", class: installed() ? "btn ghost" : "btn primary", onclick: install },
-            installed() ? "Update" : "Install zapret2")),
-        h("p", { class: "xs muted" }, "nfqws2 from bol-van/zapret2's latest GitHub release, about 0.4 MB of flash. "
-          + "Sites on a zapret rule see the router's own address. QUIC is refused there, so apps use TCP.")),
-      card("Rules", "Ticked: rules for “Find and turn on”. Meta, X, YouTube and Telegram are ticked by default.",
-        h("div", { class: "row" },
-          h("button", { type: "button", class: "btn primary", disabled: running || !installed(),
-            onclick: search(true, z.rules.filter((r) => picked.get(r.name)).map((r) => r.name)) }, "Find and turn on"),
-          running ? h("span", { class: "small" }, `Searching${z.run.now ? `: ${z.run.now}` : ""}…`) : null,
-          z.run && z.run.state === "failed" ? h("span", { class: "small bad-text" }, z.run.error) : null,
-          Object.keys(z.router.rules).length ? h("button", { type: "button", class: "btn ghost", disabled: running,
-            onclick: busyClick(() => setRules({}, "zapret off on every rule")) }, "Turn zapret off everywhere") : null),
-        h("p", { class: "xs muted" }, `Each rule: its test addresses without zapret first, then the ${z.count} strategies below in order, `
-          + "until three open every address; the fastest is used. A rule where none works stays on its servers."),
-        z.rules.length ? h("div", { class: "stack", style: "gap: 8px" }, rows) : h("p", { class: "small muted" }, "No proxy rules.")),
-      card("Strategies", z.custom ? "Your list (all routers)" : "The default list (all routers): from zapret2's docs and blockcheck2, and Flowseal's lists ported to zapret2",
-        h("p", { class: "xs muted" }, "One nfqws2 strategy per line: name | options. Fake files are named plainly, like tls_clienthello_www_google_com.bin."),
-        strat,
-        h("div", { class: "row" },
-          h("button", { type: "button", class: "btn", onclick: busyClick(async () => {
-            try { await api("PUT", "/api/zapret/strategies", { text: strat.value }); toast("Strategies saved"); }
-            catch (e) { toast(e.message, true); }
-            await load();
-          }) }, "Save"),
-          z.custom ? h("button", { type: "button", class: "btn ghost", onclick: busyClick(async () => {
-            await api("PUT", "/api/zapret/strategies", { text: "" }); toast("Back to the default list"); await load();
-          }) }, "Back to defaults") : null)));
-  };
-
-  await load();
+// Settings: the strategy list every search tries (all routers)
+export function strategiesCard() {
+  const card = h("section", { class: "card pad", "aria-labelledby": "s-zap", style: "gap: 12px" },
+    h("h2", { id: "s-zap" }, "Zapret strategies"), h("span", { class: "small muted" }, "…"));
+  api("GET", "/api/zapret/strategies").then((z) => {
+    const ta = h("textarea", { class: "input mono xs", rows: 8, spellcheck: "false", "aria-label": "Zapret strategies" }, z.text);
+    const sub = h("span", { class: "small muted" }, z.custom ? `Your list, ${z.count} strategies.` : `The default list, ${z.count} strategies: zapret2's docs and blockcheck2, and Flowseal's lists ported to zapret2.`);
+    card.replaceChildren(h("h2", { id: "s-zap" }, "Zapret strategies"), sub,
+      h("span", { class: "small muted" }, "Tried in this order when a rule turns on “Zapret first”. One nfqws2 strategy per line: name | options. Fake files are named plainly, like tls_clienthello_www_google_com.bin."),
+      ta,
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "btn primary", onclick: busyClick(async () => {
+          try { const r = await api("PUT", "/api/zapret/strategies", { text: ta.value }); toast(`Saved: ${r.count} strategies`); }
+          catch (e) { toast(e.message, true); }
+        }) }, "Save"),
+        h("button", { type: "button", class: "btn", onclick: busyClick(async () => {
+          await api("PUT", "/api/zapret/strategies", { text: "" });
+          const d = await api("GET", "/api/zapret/strategies"); ta.value = d.text; toast("Back to the default list");
+        }) }, "Back to defaults")));
+  }).catch(() => card.remove());
+  return card;
 }

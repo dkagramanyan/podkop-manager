@@ -7,10 +7,15 @@ podkop-agent and podkop-manager.
 
 zapret2 in front of a rule's servers (manager 0.42.0, agent 0.29.0).
 
-- **Zapret page** (per router): installs nfqws2 from bol-van/zapret2's
-  latest release (checked against its sha256sum.txt, the router's CPU only,
-  about 0.4 MB of flash in /etc/podkop-zapret). zapret (the first version)
-  is not used: it is no longer developed.
+- **Zapret first**, a switch on a rule's page (Routing → Rules, proxy rules):
+  pick the rule's service (YouTube, Meta, X, Telegram, Discord or Other:
+  each brings its own check addresses, which can be edited) and turn it on.
+  The first time, nfqws2 is installed on the router from bol-van/zapret2's
+  latest release (checked against GitHub's SHA-256 of the release file and
+  the release's sha256sum.txt, the router's CPU only, about 0.4 MB of flash
+  in /etc/podkop-zapret). zapret (the first version) is not used: it is no
+  longer developed. No menu of its own: the rules list tags a rule "zapret"
+  or "zapret → servers", Overview shows "direct, through zapret".
 - **A zapret rule's web traffic goes out direct first**: sing-box gets a
   direct outbound with the rule's own mark and a URLTest of it whose
   fallback is the rule's usual servers; TCP 80/443 sniffed as TLS or HTTP
@@ -23,14 +28,22 @@ zapret2 in front of a rule's servers (manager 0.42.0, agent 0.29.0).
   addresses in podkop's subnet lists don't loop back into sing-box. After a
   podkop restart the daemon puts it back. Kill-switch and protected rules
   are left alone.
-- **Strategy search** ("Find strategies", "Find and turn on"): the router
-  tries each address without zapret, then each strategy of the list with a
-  fresh nfqws2, and keeps the fastest of the first three that open every
-  address; a rule where none works stays on its servers. The list is data
-  (Zapret page, all routers; defaults from zapret2's docs and blockcheck2
-  and Flowseal's lists ported to nfqws2), not code. Meta, X, YouTube and
-  Telegram rules are ticked by default; Telegram is blocked by address in
-  Russia and is expected to stay on its servers.
+- **Strategy search** (turning it on, or "Find the best strategy again"):
+  the router tries each check address without zapret, then each strategy
+  of the list with a fresh nfqws2, and keeps the fastest of the first three
+  that open every address (any other working one can be picked by hand); a
+  rule where none works stays on its servers. The list is data (Settings →
+  Zapret strategies, all routers; defaults from zapret2's docs and
+  blockcheck2 and Flowseal's lists ported to nfqws2), not code. On
+  openwrt-reserv's line YouTube, Meta and X open through zapret2; Telegram
+  is blocked by address there and stays on its servers.
+- **Alerts**: "zapret does not open its sites now, the rule uses its
+  servers" and "back on zapret" (History, notifications), once a move has
+  held for two daemon rounds. sing-box tests a URLTest only while
+  connections use it, so the agent tests each zapret path itself about once
+  a minute: a broken path is left before the next connection needs it.
+- **`sections`** (the OpenVPN server's per-rule traffic) names a zapret
+  rule's web traffic after the rule, not "<rule>-zapret".
 - **Where does it go?** names the zapret rule and says whether it goes out
   through zapret now.
 
