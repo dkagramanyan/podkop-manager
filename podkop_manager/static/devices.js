@@ -111,7 +111,9 @@ export function routeAnswer(r) {
     if (rule.type === "vpn") lines.push(["", "It goes through the VPN interface of that rule."]);
     else if (rule.type === "block") lines.push(["bad", "That rule blocks it."]);
     else if (rule.type === "exclusion") lines.push(["", "That rule sends it direct, past the other rules."]);
+    else if (rule.zapret) lines.push(["", "Server now: none. It goes out direct through zapret, so the site sees the router's own address."]);
     else if (rule.server) lines.push(["", `Server now: ${rule.server}${place(rule.exit) ? `, comes out at ${place(rule.exit)}` : ""}.`]);
+    if (rule.zapret === false) lines.push(["", "zapret is on for this rule, but its check fails now, so the rule uses its servers."]);
     if (rule.kill_switch) lines.push(["", "The rule has a kill switch: with none of its servers answering, the connection is refused."]);
   } else if (r.kind === "domain" && r.dns && r.dns.fakeip && r.unread.length) {
     lines.push(["warn", `podkop routes this name (the router's DNS answers with a FakeIP address), by one of the lists that could not be read just now: ${r.unread.map((x) => x.replace(/-community-ruleset$/, "")).join(", ")}. Ask again in a minute.`]);

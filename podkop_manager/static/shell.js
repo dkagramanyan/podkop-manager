@@ -13,6 +13,7 @@ import { ago, h, icon, plural, put, shortWhen, store } from "./ui.js";
 import { viewUsage } from "./usage.js";
 import { viewDevices } from "./devices.js";
 import { viewVpn } from "./vpn.js";
+import { viewZapret } from "./zapret.js";
 
 // --- routers ------------------------------------------------------------------------
 
@@ -67,6 +68,7 @@ export const SECTIONS = {
   devices: { title: "Devices", view: (m, id) => viewDevices(m, id) },
   reliability: { title: "Connection health", view: (m, id) => viewReliability(m, id) },
   vpn: { title: "VPN", view: (m, id) => viewVpn(m, id) },
+  zapret: { title: "Zapret", view: (m, id) => viewZapret(m, id) },
   logs: { title: "Logs", view: (m, id) => viewLogs(m, id) },
   history: { title: "History", view: (m, id) => viewHistory(m, id) },
 };
@@ -162,6 +164,7 @@ export function drawSide() {
       h("a", { href: `#/r/${rt.id}/configs`, class: "sub", "aria-current": cur("configs") }, "Configs"),
       link("reliability", "Connection health", "probe"),
       link("vpn", "VPN", "shield"),
+      link("zapret", "Zapret", "arrow"),
       link("logs", "Logs", "logs"),
       link("history", "History", "history")) : null,
     h("div", { class: "nav nav-bottom" },

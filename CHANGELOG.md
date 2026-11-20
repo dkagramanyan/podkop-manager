@@ -3,6 +3,33 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.55.0 — 2026-11-20
+
+zapret2 in front of a rule's servers (manager 0.42.0, agent 0.29.0).
+
+- **Zapret page** (per router): installs nfqws2 from bol-van/zapret2's
+  latest release (checked against its sha256sum.txt, the router's CPU only,
+  about 0.4 MB of flash in /etc/podkop-zapret). zapret (the first version)
+  is not used: it is no longer developed.
+- **A zapret rule goes out direct first**: sing-box gets a direct outbound
+  with the rule's own mark and a URLTest of it whose fallback is the rule's
+  usual servers; when the rule's check address fails through zapret, the
+  rule uses its servers until it passes again (on openwrt-reserv: servers
+  after 41 s, back after 46 s). nfqws2 sees only the first packets of those
+  connections; they then carry podkop's own mark, so addresses in podkop's
+  subnet lists don't loop back into sing-box. QUIC is refused on the direct
+  path (apps fall back to TCP). Kill-switch and protected rules are left alone.
+- **Strategy search** ("Find strategies", "Find and turn on"): the router
+  tries each address without zapret, then each strategy of the list with a
+  fresh nfqws2, and keeps the fastest of the first three that open every
+  address; a rule where none works stays on its servers. The list is data
+  (Zapret page, all routers; defaults from zapret2's docs and blockcheck2
+  and Flowseal's lists ported to nfqws2), not code. Meta, X, YouTube and
+  Telegram rules are ticked by default; Telegram is blocked by address in
+  Russia and is expected to stay on its servers.
+- **Where does it go?** names the zapret rule and says whether it goes out
+  through zapret now.
+
 ## Manager 0.41.1 — 2026-11-20
 
 Only the manager (no new router files, so no release of its own).

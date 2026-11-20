@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop, reliability, notify, report, usage
+from . import __version__, backup, configs, podkop, reliability, notify, report, usage, zapret
 from .agent import (AgentError, connection_support, forward_line, install_command, pair,
                     parse_pairing, release_tag, require_connection_support, upgrade_command)
 from .db import DB
@@ -457,7 +457,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                            "list": lst, "type": "block" if m["outbound"] == "reject" else "exclusion" if lst else "excluded",
                            "server": None, "exit": None, "kill_switch": False}
         elif m:
-            section = re.sub(r"(-strict)?-out$", "", m["outbound"])
+            section = re.sub(r"(-strict|-zapret)?-out$", "", m["outbound"])
+            zg = next((g for g in ((rt.proxies or {}).get("groups") or []) if g.get("name") == f"{section}-zapret-out"), None)
             cfg = (rt.config or {}).get("config") or {"sections": []}
             sec = podkop.sections_by_name(cfg).get(section)
             tag = reliability.selections(cfg, rt.proxies).get(section) if sec else None
@@ -467,7 +468,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             out["rule"] = {"section": section, "known": bool(sec), "type": (sec or {}).get("options", {}).get("connection_type", "proxy"),
                            "by": kind, "list": lst[len(section) + 1:-len("-community-ruleset")] if kind == "community" else lst,
                            "server": (rt.names or {}).get(tag) or tag, "exit": (rt.exits or {}).get(section),
-                           "kill_switch": section in (((rt.status or {}).get("heal") or {}).get("strict") or [])}
+                           "kill_switch": section in (((rt.status or {}).get("heal") or {}).get("strict") or []),
+                           # zapret rule (agent 0.29): out direct through zapret now, or on its servers
+                           "zapret": None if not zg else zg.get("now") == f"{section}-zapret-direct"}
         return out
 
     @app.get("/api/routers/{rid}/support-report", dependencies=[api])
@@ -683,6 +686,140 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if not re.fullmatch(r"[0-9]+-[0-9]+", job):
             raise HTTPException(400, "bad job id")
         return await router_or_404(rid).agent.call("job", job, timeout=30)
+
+    # --- zapret (agent 0.29): the direct path first, the rule's servers as fallback ---
+    zapret_runs: dict[int, dict] = {}       # router -> the running or last strategy search
+
+    def zapret_strategies() -> list[dict]:
+        text = db.get_setting("zapret_strategies")
+        return zapret.parse_strategies(text) if text else zapret.default_strategies()
+
+    def zapret_rule(name: str, r) -> dict:
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name) or not isinstance(r, dict):
+            raise HTTPException(400, f"bad rule {name!r}")
+        args = r.get("args")
+        args = args.split() if isinstance(args, str) else args
+        url = str(r.get("url") or "")
+        if not isinstance(args, list) or not args or not all(isinstance(a, str) and zapret.ARG.fullmatch(a) for a in args):
+            raise HTTPException(400, f"{name}: nfqws2 --options expected")
+        if not re.fullmatch(r"https?://[!-~]{1,290}", url):
+            raise HTTPException(400, f"{name}: the test address must be an http(s) URL")
+        return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120]}
+
+    def zapret_urls(name: str, urls) -> list[str]:
+        if not isinstance(urls, list) or not urls or len(urls) > 10 or not all(
+                isinstance(u, str) and re.fullmatch(r"https?://[!-~]{1,290}", u) for u in urls):
+            raise HTTPException(400, f"{name}: 1 to 10 http(s) test addresses expected")
+        return urls
+
+    @app.get("/api/routers/{rid}/zapret", dependencies=[api])
+    async def zapret_state(rid: int):
+        """zapret on the router, the rules it can serve (with their service and
+        default test addresses), the strategy list, the last search."""
+        rt = router_or_404(rid)
+        needs(rt, "zapret", "0.29")
+        st = await rt.agent.call("zapret", "status", timeout=30)
+        cfg = hub.cached_config(rt) or await hub.config(rid)
+        run = zapret_runs.get(rid)
+        return {"router": st, "rules": zapret.rules_view(cfg["config"]),
+                "strategies": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
+                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
+                "run": {k: v for k, v in run.items() if k != "task"} if run else None}
+
+    @app.put("/api/zapret/strategies", dependencies=[api])
+    async def zapret_strategies_set(body: dict):
+        """The nfqws2 strategies every search tries, one per line ("name |
+        --options"); empty text goes back to the defaults."""
+        text = str(body.get("text") or "").strip()
+        if text:
+            try:
+                n = len(zapret.parse_strategies(text))
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from None
+            if not 0 < n <= 200:
+                raise HTTPException(400, "1 to 200 strategies expected")
+        db.set_setting("zapret_strategies", text or None)
+        return {"count": len(zapret_strategies()), "custom": bool(text)}
+
+    @app.post("/api/routers/{rid}/zapret/install", dependencies=[api])
+    async def zapret_install(rid: int):
+        """nfqws2 from bol-van/zapret2's latest release (checked against its
+        sha256sum.txt), for the router's CPU."""
+        rt = router_or_404(rid)
+        needs(rt, "zapret", "0.29")
+        st = await rt.agent.call("zapret", "status", timeout=30)
+        try:
+            return await zapret.install(rt.agent, hub.key.parent / "zapret", st.get("arch") or "")
+        except (ValueError, OSError) as e:
+            raise HTTPException(502, f"zapret2 could not be installed: {e}") from None
+
+    @app.put("/api/routers/{rid}/zapret", dependencies=[api])
+    async def zapret_set(rid: int, body: dict):
+        """All zapret rules of the router: {"rules": {rule: {args, url, name}}};
+        {} turns zapret off everywhere."""
+        rt = router_or_404(rid)
+        needs(rt, "zapret", "0.29")
+        rules = body.get("rules")
+        if not isinstance(rules, dict):
+            raise HTTPException(400, "rules must be {rule: {args, url, name}}")
+        run = zapret_runs.get(rid)
+        if run and run.get("state") == "running":
+            raise HTTPException(409, "a strategy search is running on this router")
+        out = await rt.agent.call("zapret", "set", payload={"rules": {k: zapret_rule(k, v) for k, v in rules.items()}}, timeout=120)
+        await hub.refresh(rt)
+        return out
+
+    @app.post("/api/routers/{rid}/zapret/search", dependencies=[api])
+    async def zapret_search(rid: int, body: dict):
+        """Try the strategy list for each rule ({"rules": [{"name", "urls",
+        "test"}], "apply": bool}): with apply, each rule where a strategy opened
+        every test address gets zapret on with the fastest one. Runs in the
+        background; GET .../zapret shows how far it is."""
+        rt = router_or_404(rid)
+        needs(rt, "zapret", "0.29")
+        run = zapret_runs.get(rid)
+        if run and run.get("state") == "running":
+            raise HTTPException(409, "a strategy search is already running on this router")
+        items = body.get("rules")
+        if not isinstance(items, list) or not items or len(items) > 20:
+            raise HTTPException(400, "rules must be a list of {name, urls, test}")
+        rules = []
+        for r in items:
+            name = str((r or {}).get("name") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name):
+                raise HTTPException(400, f"bad rule {name!r}")
+            urls = zapret_urls(name, r.get("urls"))
+            test = str(r.get("test") or "") or urls[0]
+            if not re.fullmatch(r"https?://[!-~]{1,290}", test):
+                raise HTTPException(400, f"{name}: bad test address")
+            rules.append({"name": name, "urls": urls, "test": test})
+        strategies = zapret_strategies()
+        if body.get("strategies"):        # only some of the list (the page's own pick)
+            names = set(body["strategies"]) if isinstance(body["strategies"], list) else set()
+            strategies = [s for s in strategies if s["name"] in names] or strategies
+        apply = bool(body.get("apply"))
+        state = {"state": "running", "started": time.time(), "now": None, "rules": [r["name"] for r in rules],
+                 "apply": apply, "jobs": {}, "outcome": {}, "error": ""}
+
+        async def go():
+            try:
+                cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
+                cur = {k: {f: v[f] for f in ("args", "url", "name") if f in v} for k, v in cur.items()}
+                new = await zapret.auto(rt.agent, rules, strategies, cur, state)
+                if apply and new != cur:
+                    state["now"] = "turning zapret on"
+                    await rt.agent.call("zapret", "set", payload={"rules": new}, timeout=120)
+                    await hub.refresh(rt)
+                state["state"] = "done"
+            except Exception as e:        # noqa: BLE001 - shown on the page
+                state.update(state="failed", error=str(e))
+            finally:
+                state["now"] = None
+                state["finished"] = time.time()
+
+        zapret_runs[rid] = state
+        state["task"] = asyncio.create_task(go())
+        return {k: v for k, v in state.items() if k != "task"}
 
     @app.put("/api/routers/{rid}/ipv6", dependencies=[api])
     async def ipv6_block(rid: int, body: dict):

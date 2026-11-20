@@ -283,7 +283,7 @@ class DevicesAgent(OnlineAgent):
     async def call(self, name, *args, payload=None, **kwargs):
         if name == "status":
             st = await super().call(name)
-            st["agent"]["capabilities"] += ["devices", "route"]
+            st["agent"]["capabilities"] += ["devices", "route", "zapret"]
             st["protected"], st["safe_mode"] = [], {"on": False}
             return st
         if name == "devices":
@@ -429,3 +429,90 @@ def test_rule_servers_show_flags_and_sort_by_ping(tmp_path):
     finally:
         srv.should_exit = True
         t.join(timeout=10)
+
+
+def test_zapret_page_ticks_the_usual_services_and_turns_zapret_on(tmp_path):
+    import copy
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+    from podkop_manager import zapret
+
+    zapret.POLL = 0.05
+    sets = []
+
+    class ZapretAgent(OnlineAgent):
+        config = copy.deepcopy(OnlineAgent.config)
+        for n in ("meta", "youtube", "telegram", "github"):
+            config["sections"].append({"name": n, "type": "section", "anonymous": False, "options": {
+                "connection_type": "proxy", "proxy_config_type": "outbound", "user_domain_list_type": "dynamic", "user_domains": [f"{n}.example"]}})
+        rules = {}
+
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "status":
+                st = await super().call(name, *args, payload=payload, **kwargs)
+                st["agent"] = {"version": "0.29.0", "capabilities": ["zapret"]}
+                return st
+            if name == "zapret" and args[0] == "status":
+                return {"arch": "aarch64", "installed": "v1.0.7", "queue": True, "table": bool(self.rules), "rules": self.rules,
+                        "running": list(self.rules), "refused": [], "using": {k: "zapret" for k in self.rules}}
+            if name == "zapret" and args[0] == "check":
+                return {"job": "1-1"}
+            if name == "job":
+                return {"state": "done", "baseline": [{"url": "u", "ok": False}],
+                        "results": [{"name": "fake md5", "args": ["--payload=tls_client_hello"], "ok": True, "urls": [{"ok": True, "ms": 300}]}]}
+            if name == "zapret" and args[0] == "set":
+                sets.append(payload)
+                self.rules = {k: dict(v, n=i + 1) for i, (k, v) in enumerate(payload["rules"].items())}
+                return {}
+            return await super().call(name, *args, payload=payload, **kwargs)
+
+    class ZapretHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = ZapretAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    hub = ZapretHub(db, tmp_path / "id_ed25519", ROOT)
+    app = create_app(db, hub, "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page(viewport={"width": 1280, "height": 1100})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/zapret")
+            page.wait_for_selector("text=zapret2 v1.0.7")
+            ticked = page.eval_on_selector_all("input[type=checkbox]", "els => els.filter(e => e.checked).map(e => e.closest('.card').querySelector('a').textContent)")
+            assert sorted(ticked) == ["meta", "telegram", "youtube"]          # github and main are not services
+            page.click("button:has-text('Find and turn on')")
+            page.wait_for_selector("text=Turned on with fake md5")
+            assert sorted(sets[-1]["rules"]) == ["meta", "telegram", "youtube"]
+            assert sets[-1]["rules"]["youtube"]["url"] == "https://www.youtube.com/generate_204"
+            page.wait_for_selector("text=direct, through zapret")
+            assert not errors, errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)
+        zapret.POLL = 3.0

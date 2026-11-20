@@ -1,0 +1,271 @@
+"""zapret2 (agent 0.29, manager 0.42): the agent's sing-box and nft parts,
+the strategy list, services, the release payload and the search."""
+import base64
+import io
+import json
+import subprocess
+import tarfile
+import time
+from pathlib import Path
+
+import pytest
+
+from podkop_manager import zapret
+from test_web import H, FakeHub, FakeRouter, client
+
+AGENT = Path(__file__).resolve().parents[1] / "router/podkop-agent"
+
+
+def _code():
+    return subprocess.run(["sed", "-n", "/^# --- zapret: DPI bypass/,/^# --- commands/p", str(AGENT)],
+                          capture_output=True, text=True, check=True).stdout
+
+
+STUBS = '''
+RUN="$1"; ETC="$1/etc"; mkdir -p "$ETC"
+reply() { printf '%s\\n' "$1"; exit 0; }
+fail() { echo "$1: $2" >&2; exit 1; }
+nft() { [ -f "$RUN/table" ]; }
+'''
+
+
+def _sh(tmp_path, body, stdin=""):
+    code = STUBS + _code().replace("ZAPRET_DIR=/etc/podkop-zapret", 'ZAPRET_DIR="$RUN/zapret"') + body
+    return subprocess.run(["sh", "-c", code, "sh", str(tmp_path)], input=stdin, capture_output=True, text=True, timeout=20)
+
+
+SB = {"outbounds": [
+    {"type": "vless", "tag": "main-1-out"},
+    {"type": "urltest", "tag": "main-urltest-out", "outbounds": ["main-1-out"]},
+    {"type": "selector", "tag": "main-out", "outbounds": ["main-1-out", "main-urltest-out"], "default": "main-urltest-out"},
+    {"type": "selector", "tag": "meta-out", "outbounds": ["main-out"]},
+    {"type": "selector", "tag": "youtube-out", "outbounds": ["main-out"]},
+    {"type": "direct", "tag": "direct-out"}],
+    "route": {"rules": [
+        {"action": "route", "inbound": "tproxy-in", "outbound": "youtube-out", "rule_set": "youtube-community"},
+        {"action": "route", "inbound": "tproxy-in", "outbound": "meta-out", "rule_set": ["meta-user-domains", "meta-user-subnets"]},
+        {"action": "route", "inbound": "tproxy-in", "outbound": "main-out", "rule_set": "main-community"}],
+        "final": "direct-out"}}
+RULES = {"meta": {"args": ["--payload=tls_client_hello", "--lua-desync=fake:blob=fake_default_tls"], "url": "https://www.instagram.com/", "name": "a", "n": 1},
+         "youtube": {"args": ["--lua-desync=multisplit:pos=1"], "url": "https://www.youtube.com/generate_204", "name": "b", "n": 2}}
+
+
+def _setup(tmp_path, rules=RULES, table=True, strict=""):
+    (tmp_path / "zapret").mkdir(exist_ok=True)
+    nf = tmp_path / "zapret/nfqws2"
+    nf.write_text("#!/bin/sh\n")
+    nf.chmod(0o755)
+    (tmp_path / "zapret/rules.json").write_text(json.dumps(rules))
+    if table:
+        (tmp_path / "table").write_text("")
+    (tmp_path / "etc").mkdir(exist_ok=True)
+    (tmp_path / "etc/strict").write_text(strict)
+    (tmp_path / "in.json").write_text(json.dumps(SB))
+
+
+def _filter(tmp_path, src="in.json"):
+    p = _sh(tmp_path, f'\nzapret_filter "$RUN/{src}" "$RUN/out.json" && cat "$RUN/out.json"')
+    assert p.returncode == 0, p.stderr
+    return json.loads(p.stdout)
+
+
+def test_filter_puts_zapret_first_and_the_rules_servers_behind(tmp_path):
+    _setup(tmp_path)
+    out = _filter(tmp_path)
+    tags = {o["tag"]: o for o in out["outbounds"]}
+    assert tags["meta-zapret-direct"] == {"type": "direct", "tag": "meta-zapret-direct", "routing_mark": 0x08000001}
+    g = tags["meta-zapret-out"]
+    assert g["type"] == "urltest" and g["outbounds"] == ["meta-zapret-direct"] and g["fallbacks"] == ["meta-out"]
+    assert g["url"] == "https://www.instagram.com/"
+    assert tags["youtube-zapret-direct"]["routing_mark"] == 0x08000002
+    outs = [r["outbound"] for r in out["route"]["rules"]]
+    assert outs == ["youtube-zapret-out", "meta-zapret-out", "main-out"]
+    # run again on its own output: the same config (health_on reads the live one)
+    (tmp_path / "again.json").write_text(json.dumps(out))
+    assert _filter(tmp_path, "again.json") == out
+
+
+def test_filter_takes_everything_back_without_rules_or_table_and_skips_kill_switch(tmp_path):
+    _setup(tmp_path)
+    out = _filter(tmp_path)
+    (tmp_path / "again.json").write_text(json.dumps(out))
+    (tmp_path / "table").unlink()          # no firewall table: zapret traffic would loop, so none
+    assert _filter(tmp_path, "again.json") == SB
+    _setup(tmp_path, strict="meta\n")
+    out = _filter(tmp_path)
+    assert "meta-zapret-out" not in {o["tag"] for o in out["outbounds"]}
+    assert "youtube-zapret-out" in {o["tag"] for o in out["outbounds"]}
+
+
+def test_nft_table_queues_each_rule_and_the_search_and_gives_podkops_mark(tmp_path):
+    p = _sh(tmp_path, "\nzapret_nft_text \"$(cat)\"", json.dumps(RULES))
+    assert p.returncode == 0, p.stderr
+    t = p.stdout
+    for n in (1, 2, 99):
+        assert f"meta mark {0x08000000 + n} tcp dport {{ 80, 443 }} ct original packets 1-20 queue num {300 + n} bypass" in t
+        assert f"ct mark {0x08000000 + n} tcp sport {{ 80, 443 }} ct reply packets 1-10 queue num {300 + n} bypass" in t
+    assert "type filter hook output priority -160" in t and "type route hook output priority -155" in t
+    assert "ct mark & 0xff000000 == 0x08000000 meta mark set 0x00200000" in t
+    assert "udp dport 443 reject" in t
+
+
+def test_exec_passes_each_option_as_one_argument(tmp_path):
+    rule = {"args": ["--lua-desync=luaexec:code=desync.pat=tls_mod(fake_default_tls,'rnd,dupsid',desync.reasm_data)",
+                     "--payload=tls_client_hello"], "n": 3}
+    p = _sh(tmp_path, '\nzapret_run() { for a in "$@"; do echo "[$a]"; done; }\nzapret_exec "$(cat)"', json.dumps(rule))
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.splitlines() == ["[3]", f"[{rule['args'][0]}]", "[--payload=tls_client_hello]"]
+
+
+@pytest.mark.parametrize("args", [["--qnum=5"], ["--fwmark=1"], ["--lua-init=@/etc/x"], ["plain"], ["--a=b c"], []])
+def test_options_of_ours_or_odd_ones_are_refused(tmp_path, args):
+    p = _sh(tmp_path, '\nprintf "%s" "$(cat)" | jq -e --argjson deny "$ZAPRET_DENY" "$ZAPRET_ARGS_OK"', json.dumps(args))
+    assert p.returncode != 0
+
+
+# --- manager side ------------------------------------------------------------------
+
+def test_strategy_lines_parse_and_bad_ones_name_their_line():
+    got = zapret.parse_strategies("# mine\nfast | --payload=tls_client_hello --lua-desync=fake:blob=0x00\n\n")
+    assert got == [{"name": "fast", "args": ["--payload=tls_client_hello", "--lua-desync=fake:blob=0x00"]}]
+    with pytest.raises(ValueError, match="line 2"):
+        zapret.parse_strategies("a | --x=1\nb | rm -rf /")
+    with pytest.raises(ValueError, match="line 1"):
+        zapret.parse_strategies("just options --x=1")
+    d = zapret.default_strategies()
+    assert len(d) >= 8 and all(a.startswith("--") for s in d for a in s["args"])
+    assert zapret.parse_strategies(zapret.strategies_text(d)) == d
+
+
+def sec(name, **o):
+    return {"name": name, "type": "section", "options": {"connection_type": "proxy", **o}}
+
+
+def test_services_by_name_or_by_their_own_lists_only():
+    assert zapret.service_of(sec("meta")) == "meta"
+    assert zapret.service_of(sec("yt", community_lists=["youtube"])) == "youtube"
+    assert zapret.service_of(sec("twitter")) == "twitter"
+    assert zapret.service_of(sec("main", community_lists=["youtube", "russia_inside"])) is None
+    view = zapret.rules_view({"sections": [{"name": "settings", "type": "settings", "options": {}}, sec("telegram"), sec("discord"),
+                                           {"name": "vpn_1", "type": "section", "options": {"connection_type": "vpn"}}]})
+    assert [(r["name"], r["default"]) for r in view] == [("telegram", True), ("discord", False)]
+    assert view[0]["urls"] and view[0]["note"]
+
+
+def test_payload_takes_the_routers_binary_lua_and_fake_files(tmp_path):
+    tgz = tmp_path / "z.tar.gz"
+    with tarfile.open(tgz, "w:gz") as tf:
+        for name, data in [("zapret2-v9/binaries/linux-arm64/nfqws2", b"ARM"), ("zapret2-v9/binaries/linux-x86_64/nfqws2", b"X86"),
+                           ("zapret2-v9/lua/zapret-lib.lua.gz", b"L"), ("zapret2-v9/lua/zapret-tests.lua.gz", b"T"),
+                           ("zapret2-v9/files/fake/tls_clienthello_www_google_com.bin", b"F"), ("zapret2-v9/files/fake/bitcoin.bin", b"B")]:
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            tf.addfile(ti, io.BytesIO(data))
+    body = zapret.payload("v9", tgz, "linux-arm64")
+    assert sorted(body["files"]) == ["fake/tls_clienthello_www_google_com.bin", "lua/zapret-lib.lua.gz", "nfqws2"]
+    assert base64.b64decode(body["files"]["nfqws2"]) == b"ARM" and body["version"] == {"nfqws2": "v9"}
+    assert zapret.arch_dirs("aarch64") == ["linux-arm64"] and zapret.arch_dirs("mips")[0] == "linux-mipsel"
+
+
+class ZapretAgent:
+    def __init__(self):
+        self.calls, self.rules = [], {}
+
+    async def call(self, *args, payload=None, timeout=60):
+        self.calls.append((args, payload))
+        if args[:2] == ("zapret", "status"):
+            return {"installed": "v1.0.7", "rules": self.rules, "using": {}, "refused": [], "arch": "aarch64"}
+        if args[:2] == ("zapret", "check"):
+            return {"job": "1-1"}
+        if args[0] == "job":
+            return {"state": "done", "baseline": [{"url": "u", "ok": False}], "results": [
+                {"name": "slow", "args": ["--a=1"], "ok": True, "urls": [{"ok": True, "ms": 900}]},
+                {"name": "fast", "args": ["--b=1"], "ok": True, "urls": [{"ok": True, "ms": 200}]},
+                {"name": "bad", "args": ["--c=1"], "ok": False, "urls": [{"ok": False, "ms": 8000}]}]}
+        if args[:2] == ("zapret", "set"):
+            self.rules = payload["rules"]
+            return {"rules": self.rules}
+        raise AssertionError(args)
+
+
+def test_search_turns_zapret_on_with_the_fastest_working_strategy(tmp_path, monkeypatch):
+    monkeypatch.setattr(zapret, "POLL", 0)
+    monkeypatch.setattr(FakeHub, "cached_config", lambda self, r: None, raising=False)
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        rt = FakeRouter()
+        rt.agent, rt.status = ZapretAgent(), {"agent": {"capabilities": ["zapret"]}}
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        r = c.get("/api/routers/1/zapret", headers=H)
+        assert r.status_code == 200, r.text
+        assert [x["name"] for x in r.json()["rules"]] == ["main"] and r.json()["count"] >= 8
+        r = c.post("/api/routers/1/zapret/search", headers=H, json={"apply": True, "rules": [
+            {"name": "meta", "urls": ["https://www.instagram.com/"], "test": "https://www.instagram.com/"}]})
+        assert r.status_code == 200, r.text
+        for _ in range(100):
+            run = c.get("/api/routers/1/zapret", headers=H).json()["run"]
+            if run["state"] != "running":
+                break
+            time.sleep(0.02)
+        assert run["state"] == "done", run["error"]
+        assert rt.agent.rules == {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast"}}
+        assert run["outcome"]["meta"] == {"on": True, "strategy": "fast"}
+        # a strategy list sent by the page
+        bad = c.put("/api/routers/1/zapret", headers=H, json={"rules": {"meta": {"args": ["rm"], "url": "https://x/"}}})
+        assert bad.status_code == 400
+        assert c.put("/api/zapret/strategies", headers=H, json={"text": "x | nope"}).status_code == 400
+        assert c.put("/api/zapret/strategies", headers=H, json={"text": "mine | --lua-desync=fake"}).json() == {"count": 1, "custom": True}
+
+
+SET_STUBS = '''
+safe_mode() { return 1; }
+zapret_installed() { return 1; }
+'''
+
+
+@pytest.mark.parametrize("rules, ok", [
+    ({"youtube": {"args": ["--payload=tls_client_hello"], "url": "https://www.youtube.com/generate_204", "name": "a b"}}, True),
+    ({"bad name": {"args": ["--x=1"], "url": "https://a/"}}, False),
+    ({"yt": {"args": ["--qnum=1"], "url": "https://a/"}}, False),
+    ({"yt": {"args": ["--x=1"], "url": "ftp://a/"}}, False),
+    ({"yt": {"args": ["--x=1"], "url": "https://a/", "name": "two\nlines"}}, False)])
+def test_set_checks_its_input_before_anything_else(tmp_path, rules, ok):
+    p = _sh(tmp_path, SET_STUBS + "\nzapret_set", json.dumps({"rules": rules}))
+    # a good request gets as far as "not installed" (the stub); a bad one stops at the check
+    assert ("not_installed" in p.stderr) == ok and ("bad_request" in p.stderr) == (not ok), p.stderr
+
+
+@pytest.mark.parametrize("body, ok", [
+    ({"urls": ["https://x.com/"], "strategies": [{"name": "a", "args": ["--x=1"]}]}, True),
+    ({"urls": [], "strategies": [{"name": "a", "args": ["--x=1"]}]}, False),
+    ({"urls": ["https://x.com/"], "strategies": [{"name": "a", "args": ["--fwmark=1"]}]}, False)])
+def test_check_checks_its_input(tmp_path, body, ok):
+    (tmp_path / "zapret").mkdir()
+    nf = tmp_path / "zapret/nfqws2"
+    nf.write_text("#!/bin/sh\n")
+    nf.chmod(0o755)
+    p = _sh(tmp_path, '\njob_new() { echo 1-1; }\nspawn() { :; }\ncmd_zapret check', json.dumps(body))
+    assert (p.returncode == 0 and '"job"' in p.stdout) == ok, p.stderr
+
+
+def test_install_checks_file_names(tmp_path):
+    for files, ok in [({"nfqws2": "AA==", "lua/zapret-lib.lua.gz": "AA=="}, True), ({"lua/../x": "AA=="}, False), ({"nfqws": "AA=="}, False)]:
+        p = _sh(tmp_path, '\nzapret_install', json.dumps({"files": files}))
+        assert ("expected {" not in p.stderr) == ok, (files, p.stderr)
+
+
+def test_where_does_it_go_names_the_rule_and_says_zapret(tmp_path, monkeypatch):
+    class RouteAgent:
+        async def call(self, *args, payload=None, timeout=60):
+            return {"target": "instagram.com", "kind": "domain", "match": {"rule": 3, "outbound": "meta-zapret-out", "list": "meta-user-domains-ruleset"}}
+
+    rt = FakeRouter()
+    rt.agent, rt.status = RouteAgent(), {"agent": {"capabilities": ["route"]}}
+    rt.config, rt.names, rt.exits = {"config": {"sections": [sec("meta")]}}, {}, {}
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        for now, want in (("meta-zapret-direct", True), ("meta-out", False)):
+            rt.proxies = {"groups": [{"name": "meta-zapret-out", "now": now}], "servers": []}
+            rule = c.post("/api/routers/1/route", headers=H, json={"target": "instagram.com"}).json()["rule"]
+            assert rule["section"] == "meta" and rule["by"] == "domains" and rule["zapret"] is want

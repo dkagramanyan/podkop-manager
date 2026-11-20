@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.28.0"
+AGENT_VERSION="0.29.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -476,6 +476,10 @@ hot_apply() {
     fi
     sing-box check -c "$_hb" >/dev/null 2>&1 || { rm -f "$_hb" "$_hb.base"; echo "invalid filtered config"; return 1; }
   fi
+  # last: the filters above find each rule's route rules by "<rule>-out"
+  if ! { zapret_filter "$_hb" "$_hb.z" && mv "$_hb.z" "$_hb" && sing-box check -c "$_hb" >/dev/null 2>&1; }; then
+    rm -f "$_hb" "$_hb.z" "$_hb.base" "$_hb.err"; echo "invalid zapret rules"; return 1
+  fi
   if ! protect_ok "$_hb.base" "$_hb"; then rm -f "$_hb" "$_hb.base" "$_hb.err"; echo "the change would alter a protected rule"; return 1; fi
   rm -f "$_hb.base"
   logger -t podkop-agent "$1"
@@ -541,6 +545,9 @@ health_on() {
   fi
   if command -v reliability_filter >/dev/null 2>&1; then
     reliability_filter "$RUN/health.json" "$RUN/health.filtered" && mv "$RUN/health.filtered" "$RUN/health.json" || return 0
+  fi
+  if ! { zapret_filter "$RUN/health.json" "$RUN/health.z" && mv "$RUN/health.z" "$RUN/health.json"; }; then
+    rm -f "$RUN/health.json" "$RUN/health.z"; return 0
   fi
   if [ "$(jq -c . "$RUN/health.json")" = "$(jq -c . "$_ic")" ]; then rm -f "$RUN/health.json"; return 0; fi
   if ! { protect_ok "$_ic" "$RUN/health.json" && sing-box check -c "$RUN/health.json" >/dev/null 2>&1 &&
@@ -1006,6 +1013,7 @@ tidy() {
     [ "$_pp" = 1 ] || continue
     case "$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null)" in
       "sing-box run -c $RUN/check."*) kill "${_p#/proc/}" 2>/dev/null && logger -t podkop-agent "ended a leftover connection check" ;;
+      *"/nfqws2 --qnum=$((300 + ZAPRET_TEST)) "*) kill "${_p#/proc/}" 2>/dev/null && logger -t podkop-agent "ended a leftover zapret search" ;;
     esac
   done
   find "$RUN" -maxdepth 1 \( -name 'exits.*' -o -name 'check.*' -o -name 'hot.*' -o -name 'status.*' \) -mmin +30 \
@@ -1043,6 +1051,7 @@ daemon() {
     fi
     [ "$_w" -lt 15 ] && continue     # woken by a service event: the guard only
     vpn_watch
+    zapret_watch
     [ -n "$(singbox_pid)" ] && traffic_poll
     if [ -f "$ETC/paused" ] || ! podkop_enabled; then _down=0; continue; fi
     # a change or a recovery holds the lock; podkop's own start takes a while
@@ -1548,6 +1557,361 @@ run_vpn_install() {
     _m=$(grep -iE 'error|unable|not found' "$_vl" | tail -n 1); [ -n "$_m" ] || _m=$(tail -n 1 "$_vl")
     job_end "$_id" failed "${_m:-the packages could not be installed}"
   fi
+}
+
+# --- zapret: DPI bypass on the direct path, the rule's servers as fallback --------------
+
+# A zapret rule tries its sites without a server first. sing-box gets two
+# outbounds for it: "<rule>-zapret-direct" (direct, with the rule's own mark)
+# and "<rule>-zapret-out", a URLTest of that one whose fallback is the rule's
+# usual "<rule>-out"; the rule's route rules send to the URLTest. nfqws2
+# (bol-van/zapret2) gets the first packets of the marked connections only
+# (nft table podkop_zapret) and changes them so the provider's filter lets
+# them pass. When the test URL fails through zapret,
+# the rule uses its servers until the test passes again.
+#
+# podkop lets the router's own traffic past its rules only with its mark
+# 0x00200000 (exactly): connections to addresses of its subnet lists would
+# go back into sing-box. So once nfqws2 has seen them, the packets of a zapret
+# connection (and the ones nfqws2 makes) get that mark, before podkop's chain
+# (priority mangle, -150). QUIC is refused on the direct path, so apps use
+# TCP, which zapret handles. The table stays while there are zapret rules
+# (the daemon puts it back): without it their traffic would loop.
+# not under $ETC: nfqws2 drops its root rights after the start and must still
+# read its Lua and fake files
+ZAPRET_DIR=/etc/podkop-zapret
+ZAPRET_RULES=$ZAPRET_DIR/rules.json   # {"<rule>": {"args": [...], "url", "name", "n"}}
+ZAPRET_INIT=/etc/init.d/podkop-zapret
+ZAPRET_BASE=134217728                 # 0x08000000: a rule's mark is base + n, its queue 300 + n
+ZAPRET_TEST=99                        # n of the strategy search
+ZAPRET_FAKE=0x40000000                # nfqws2's mark on the packets it makes (its default)
+# options a strategy may not set: ours, or ones that leave the process unwatched
+ZAPRET_DENY='["--qnum","--fwmark","--daemon","--pidfile","--user","--uid","--debug","--chdir","--writable","--intercept","--dry-run","--version","--lua-init"]'
+ZAPRET_ARGS_OK='type == "array" and length > 0 and length <= 40 and all(.[]; type == "string" and length > 2 and length <= 600
+  and startswith("--") and (explode | all(. >= 33 and . <= 126)) and ((split("=")[0]) as $o | $deny | index($o) | not))'
+
+zapret_installed() { [ -x "$ZAPRET_DIR/nfqws2" ]; }
+zapret_rules_json() { if [ -s "$ZAPRET_RULES" ]; then cat "$ZAPRET_RULES"; else echo '{}'; fi; }
+zapret_table() { nft list table inet podkop_zapret >/dev/null 2>&1; }
+
+# zapret_nft_text <rules json>: the table for these rules and the search
+zapret_nft_text() {
+  printf '%s' "$1" | jq -r --argjson base "$ZAPRET_BASE" --argjson t "$ZAPRET_TEST" '
+    ([.[] | .n] + [$t]) as $ns
+    | "table inet podkop_zapret {",
+      "  chain predefrag {", "    type filter hook output priority -401; policy accept;",
+      "    meta mark & 0x40000000 != 0 tcp flags ! syn,rst,ack notrack", "  }",
+      "  chain out_q {", "    type filter hook output priority -160; policy accept;",
+      "    meta mark & 0xff000000 == 0x08000000 ct mark set meta mark",
+      "    meta mark & 0xff000000 == 0x08000000 udp dport 443 reject",
+      ($ns[] | "    meta mark \($base + .) tcp dport { 80, 443 } ct original packets 1-20 queue num \(300 + .) bypass"),
+      "  }",
+      "  chain out_fix {", "    type route hook output priority -155; policy accept;",
+      "    ct mark & 0xff000000 == 0x08000000 meta mark set 0x00200000",
+      "    meta mark & 0x40000000 != 0 meta mark set 0x00200000", "  }",
+      "  chain in_q {", "    type filter hook input priority -160; policy accept;",
+      "    icmp type time-exceeded ct mark & 0xff000000 == 0x08000000 drop",
+      ($ns[] | "    ct mark \($base + .) tcp sport { 80, 443 } ct reply packets 1-10 queue num \(300 + .) bypass"),
+      "  }", "}"'
+}
+
+# zapret_nft on|off: the table as the rules say (in one step), or none
+zapret_nft() {
+  if [ "${1:-on}" = off ]; then nft delete table inet podkop_zapret 2>/dev/null; return 0; fi
+  { echo "table inet podkop_zapret"; echo "delete table inet podkop_zapret"; zapret_nft_text "$(zapret_rules_json)"; } | nft -f -
+}
+
+# zapret_run <n> <args...>: becomes nfqws2 on the queue of n; its directory
+# is $ZAPRET_DIR/fake, so a strategy names fake files plainly
+zapret_run() {
+  _zq=$((300 + $1)); shift
+  cd "$ZAPRET_DIR/fake" 2>/dev/null || cd "$ZAPRET_DIR" || exit 1
+  _zl=""
+  for _zf in zapret-lib zapret-antidpi zapret-auto; do
+    { [ -f "$ZAPRET_DIR/lua/$_zf.lua.gz" ] || [ -f "$ZAPRET_DIR/lua/$_zf.lua" ]; } && _zl="$_zl --lua-init=@$ZAPRET_DIR/lua/$_zf.lua"
+  done
+  # shellcheck disable=SC2086   # our own paths, no spaces
+  exec "$ZAPRET_DIR/nfqws2" --qnum="$_zq" --fwmark="$ZAPRET_FAKE" $_zl "$@"
+}
+
+# zapret_exec <rule json>: zapret_run with its options, one argument each
+# (no shell word splitting or quoting: they were checked, one per line)
+zapret_exec() {
+  _zj=$1; _zn=$(printf '%s' "$_zj" | jq -r .n)
+  set --
+  while IFS= read -r _za; do [ -n "$_za" ] && set -- "$@" "$_za"; done <<EOF_ZA
+$(printf '%s' "$_zj" | jq -r '.args[]')
+EOF_ZA
+  zapret_run "$_zn" "$@"
+}
+
+zapret_init_text() {
+  cat <<'EOF'
+#!/bin/sh /etc/rc.common
+# podkop-zapret: nfqws2 of podkop-agent's zapret rules (podkop-manager, Zapret page)
+START=95
+USE_PROCD=1
+R=/etc/podkop-zapret/rules.json
+start_service() {
+  [ -s "$R" ] || return 0
+  # (an internal command: not when started from the manager's SSH session)
+  env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_ORIGINAL_COMMAND /usr/bin/podkop-agent _zapret-nft || return 1
+  for r in $(jq -r 'keys[]' "$R"); do
+    procd_open_instance "$r"
+    procd_set_param command /usr/bin/podkop-agent _zapret-run "$r"
+    procd_set_param respawn 3600 5 5
+    procd_set_param stderr 1
+    procd_close_instance
+  done
+}
+EOF
+}
+
+zapret_init() {
+  zapret_init_text > "$RUN/podkop-zapret.init"
+  if ! cmp -s "$RUN/podkop-zapret.init" "$ZAPRET_INIT"; then
+    { cp "$RUN/podkop-zapret.init" "$ZAPRET_INIT.t" && chmod 755 "$ZAPRET_INIT.t" && mv "$ZAPRET_INIT.t" "$ZAPRET_INIT"; } || return 1
+  fi
+  rm -f "$RUN/podkop-zapret.init"
+  "$ZAPRET_INIT" enabled 2>/dev/null || "$ZAPRET_INIT" enable
+}
+
+# zapret_filter <sing-box config> <out>: the zapret rules' outbounds and route
+# rules (what an earlier round added goes first, so it can run again on its
+# own output); kill-switch and protected rules are left as they are
+ZAPRET_JQ='
+  def strip: .outbounds |= map(select((.tag // "") | (endswith("-zapret-out") or endswith("-zapret-direct")) | not))
+    | if (.route.rules | type) == "array" then .route.rules |= map(
+        if ((.outbound // "") | endswith("-zapret-out")) then .outbound = (.outbound[:-11] + "-out") else . end) else . end;
+  strip | [.outbounds[]?.tag] as $tags
+  | reduce ($z | to_entries[] | select(.key as $k | ($skip | index($k) | not) and ($tags | index($k + "-out")))) as $r (.;
+      .outbounds += [{type: "direct", tag: ($r.key + "-zapret-direct"), routing_mark: ($base + $r.value.n)},
+                     {type: "urltest", tag: ($r.key + "-zapret-out"), outbounds: [$r.key + "-zapret-direct"],
+                      fallbacks: [$r.key + "-out"], url: $r.value.url, interval: "1m", interrupt_exist_connections: true}]
+      | if (.route.rules | type) == "array" then .route.rules |= map(
+          if .outbound == ($r.key + "-out") then .outbound = ($r.key + "-zapret-out") else . end) else . end)'
+zapret_skip_json() { cat "$ETC/strict" "$ETC/protected" 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != ""))'; }
+zapret_filter() {
+  _zz='{}'
+  if [ -s "$ZAPRET_RULES" ] && zapret_installed && zapret_table; then _zz=$(zapret_rules_json); fi
+  jq --argjson z "$_zz" --argjson skip "$(zapret_skip_json)" --argjson base "$ZAPRET_BASE" "$ZAPRET_JQ" "$1" > "$2"
+}
+
+zapret_running() {
+  ubus call service list '{"name":"podkop-zapret"}' 2>/dev/null |
+    jq -c '[.["podkop-zapret"].instances // {} | to_entries[] | select(.value.running) | .key]' 2>/dev/null | grep . || echo '[]'
+}
+
+# zapret_watch, every daemon round: the table is back after anything removed it
+zapret_watch() {
+  [ -s "$ZAPRET_RULES" ] && zapret_installed || return 0
+  zapret_table && return 0
+  zapret_nft && logger -t podkop-agent "zapret: firewall table was missing, added again"
+}
+
+zapret_status() {
+  _zp=$(proxies 2>/dev/null); [ -n "$_zp" ] || _zp=null
+  jq -nc --argjson r "$(zapret_rules_json)" --arg arch "$(uname -m)" \
+    --argjson ver "$(cat "$ZAPRET_DIR/version.json" 2>/dev/null || echo '{}')" \
+    --arg e2 "$([ -x "$ZAPRET_DIR/nfqws2" ] && echo 1)" \
+    --arg tbl "$(zapret_table && echo 1)" --argjson run "$(zapret_running)" --argjson px "$_zp" \
+    --argjson skip "$(zapret_skip_json)" \
+    --arg q "$(lsmod 2>/dev/null | grep -c '^nft_queue ')" \
+    '{arch: $arch, installed: (if $e2 == "1" then ($ver.nfqws2 // "") else null end),
+      queue: ($q != "0"), table: ($tbl == "1"), rules: $r, running: $run, refused: $skip,
+      using: ($r | with_entries(.value = (($px.proxies[.key + "-zapret-out"].now? // null)
+               | if . == null then null elif endswith("-zapret-direct") then "zapret" else "servers" end)))}'
+}
+
+# zapret_fetch <config> <url> <seconds> -> "ok <ms> <bytes>" | "fail <ms> <reason>"
+zapret_fetch() {
+  _f0=$(cut -d ' ' -f 1 /proc/uptime | tr -d .)
+  sing-box tools fetch -c "$1" "$2" > "$1.body" 2> "$1.err" &
+  _fp=$!; _fw=0
+  while kill -0 "$_fp" 2>/dev/null && [ "$_fw" -lt "$(( $3 * 4 ))" ]; do sleep 0.25; _fw=$((_fw + 1)); done
+  if kill "$_fp" 2>/dev/null; then wait "$_fp" 2>/dev/null; _fr=124; else wait "$_fp" 2>/dev/null; _fr=$?; fi
+  _fms=$(( ($(cut -d ' ' -f 1 /proc/uptime | tr -d .) - _f0) * 10 ))
+  if [ "$_fr" = 0 ]; then echo "ok $_fms $(wc -c < "$1.body")"
+  elif [ "$_fr" = 124 ]; then echo "fail $_fms no answer in $3 s"
+  else echo "fail $_fms $(tail -n 1 "$1.err" | sed 's/\x1b\[[0-9;]*m//g; s/^FATAL\[[0-9]*\] //' | cut -c 1-200)"; fi
+  rm -f "$1.body" "$1.err"
+}
+
+# zapret_test_end: the search's nfqws2 (queue 399) is gone, whoever started it
+zapret_test_end() {
+  for _p in /proc/[0-9]*; do
+    case "$(tr '\0' ' ' < "$_p/cmdline" 2>/dev/null)" in
+      *"/nfqws2 --qnum=$((300 + ZAPRET_TEST)) "*) kill "${_p#/proc/}" 2>/dev/null ;;
+    esac
+  done
+}
+
+# the strategy search; input in jobs/<id>.in: {"urls": [...], "strategies":
+# [{"name", "args"}], "timeout": s, "want": n}. Each URL without zapret
+# first (one that opens bare proves nothing), then each strategy with a fresh
+# nfqws2 on the test queue until "want" of them opened every URL
+run_zapret_check() {
+  _id=$1; _ji="$RUN/jobs/$_id.in"; _jc="$RUN/zapret-check.$$"
+  exec 7> "$RUN/zapret-check.lock"
+  flock -n 7 || { job_end "$_id" failed "another strategy search is running"; return; }
+  job_set "$_id" '.state = "running" | .baseline = [] | .results = []'
+  _to=$(jq -r '.timeout // 8' "$_ji"); _want=$(jq -r '.want // 3' "$_ji")
+  _bd=$(uci -q get podkop.settings.bootstrap_dns_server)
+  jq -nc --arg d "${_bd:-77.88.8.8}" --argjson m "$((ZAPRET_BASE + ZAPRET_TEST))" '{log: {disabled: true},
+    dns: {servers: [{type: "udp", tag: "d", server: $d}]},
+    outbounds: [{type: "direct", tag: "z", routing_mark: $m, domain_resolver: "d"}],
+    route: {final: "z", default_domain_resolver: "d"}}' > "$_jc.json"
+  _own=0; zapret_table || { zapret_nft && _own=1; } || { job_end "$_id" failed "could not add the firewall table"; return; }
+  _zpid=""
+  trap 'kill "$_zpid" 2>/dev/null; zapret_test_end; [ "$_own" = 1 ] && [ ! -s "$ZAPRET_RULES" ] && zapret_nft off; rm -f "$_jc".*' EXIT
+  trap 'exit 1' TERM INT
+  jq -r '.urls[]' "$_ji" > "$_jc.urls"
+  while IFS= read -r _u; do
+    # shellcheck disable=SC2046   # "ok|fail <ms> <words>"
+    set -- $(zapret_fetch "$_jc.json" "$_u" "$_to")
+    job_set "$_id" '.baseline += [{url: $u, ok: ($r == "ok"), ms: ($ms | tonumber), detail: $d}]' \
+      --arg u "$_u" --arg r "$1" --arg ms "$2" --arg d "$(shift 2; echo "$*")"
+  done < "$_jc.urls"
+  _n=$(jq '.strategies | length' "$_ji"); _i=0; _good=0
+  while [ "$_i" -lt "$_n" ] && [ "$_good" -lt "$_want" ]; do
+    jq -c --argjson i "$_i" '.strategies[$i]' "$_ji" > "$_jc.s"; _i=$((_i + 1))
+    job_set "$_id" '.trying = $s' --argjson s "$(cat "$_jc.s")"
+    jq -c --argjson t "$ZAPRET_TEST" '. + {n: $t}' "$_jc.s" > "$_jc.r"
+    ( zapret_exec "$(cat "$_jc.r")" ) > "$_jc.log" 2>&1 7>&- &
+    _zpid=$!; sleep 1
+    if ! kill -0 "$_zpid" 2>/dev/null; then
+      job_set "$_id" '.results += [$s + {ok: false, error: $e, urls: []}]' --argjson s "$(cat "$_jc.s")" \
+        --arg e "$( { grep -iE 'error|invalid|unknown|bad |cannot|could not|check ' "$_jc.log"; grep -v '^$' "$_jc.log" | tail -n 1; } | head -n 1 | cut -c 1-200)"
+      continue
+    fi
+    _ok=true; : > "$_jc.res"
+    while IFS= read -r _u; do
+      # shellcheck disable=SC2046
+      set -- $(zapret_fetch "$_jc.json" "$_u" "$_to")
+      jq -nc --arg u "$_u" --arg r "$1" --arg ms "$2" --arg d "$(shift 2; echo "$*")" \
+        '{url: $u, ok: ($r == "ok"), ms: ($ms | tonumber), detail: $d}' >> "$_jc.res"
+      [ "$1" = ok ] || { _ok=false; break; }
+    done < "$_jc.urls"
+    kill "$_zpid" 2>/dev/null; wait "$_zpid" 2>/dev/null; _zpid=""; zapret_test_end
+    [ "$_ok" = true ] && _good=$((_good + 1))
+    job_set "$_id" '.results += [$s + {ok: $ok, urls: $u}]' --argjson s "$(cat "$_jc.s")" \
+      --argjson ok "$_ok" --argjson u "$(jq -sc . "$_jc.res")"
+  done
+  job_set "$_id" 'del(.trying)'
+  job_end "$_id" "done" "$_good working of $_i tried"
+}
+
+# install: stdin {"files": {"nfqws2"|"lua/<name>"|"fake/<name>": base64},
+# "version": {"nfqws2": "v1.0.7"}}; files that differ are written (flash),
+# nfqws2 must start. -> status
+zapret_install() {
+  _zi="$RUN/zapret-in.$$"; head -c 8388608 > "$_zi"
+  jq -e '(.files | type == "object" and length > 0 and all(keys[];
+      . == "nfqws2" or ((startswith("lua/") or startswith("fake/"))
+        and (.[(index("/") + 1):] | length > 0 and (startswith(".") | not) and (explode | all(. == 45 or . == 46 or . == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122)))))))
+      and ((.version // {}) | type == "object")' "$_zi" >/dev/null 2>&1 ||
+    { rm -f "$_zi"; fail bad_request 'expected {"files": {"nfqws2": base64, "lua/<file>": base64, ...}, "version": {...}}'; }
+  mkdir -p "$ZAPRET_DIR/lua" "$ZAPRET_DIR/fake" "$RUN/zapret-new"
+  for _zk in $(jq -r '.files | keys[]' "$_zi"); do
+    jq -j --arg k "$_zk" '.files[$k]' "$_zi" | base64 -d > "$RUN/zapret-new/x" 2>/dev/null ||
+      { rm -rf "$_zi" "$RUN/zapret-new"; fail bad_request "$_zk is not base64"; }
+    case "$_zk" in nfqws2)
+      chmod 755 "$RUN/zapret-new/x"
+      "$RUN/zapret-new/x" --version >/dev/null 2>&1 || "$RUN/zapret-new/x" --help 2>&1 | grep -q qnum ||
+        { rm -rf "$_zi" "$RUN/zapret-new"; fail bad_request "nfqws2 does not run on this router ($(uname -m))"; } ;;
+    esac
+    if ! cmp -s "$RUN/zapret-new/x" "$ZAPRET_DIR/$_zk"; then
+      { cp "$RUN/zapret-new/x" "$ZAPRET_DIR/$_zk.t" && mv "$ZAPRET_DIR/$_zk.t" "$ZAPRET_DIR/$_zk"; } ||
+        { rm -rf "$_zi" "$RUN/zapret-new"; fail error "could not write $_zk"; }
+    fi
+  done
+  # nfqws2 drops its privileges after the start: what it reads later must be readable
+  chmod 755 "$ZAPRET_DIR" "$ZAPRET_DIR/lua" "$ZAPRET_DIR/fake"; chmod -R a+rX "$ZAPRET_DIR"
+  jq -c '.version // {}' "$_zi" > "$RUN/zapret-new/v"
+  cmp -s "$RUN/zapret-new/v" "$ZAPRET_DIR/version.json" || cp "$RUN/zapret-new/v" "$ZAPRET_DIR/version.json"
+  rm -rf "$_zi" "$RUN/zapret-new"
+  zapret_init || fail error "could not write $ZAPRET_INIT"
+  [ ! -s "$ZAPRET_RULES" ] || "$ZAPRET_INIT" restart >/dev/null 2>&1 7>&- 8>&- 9>&-
+  event zapret_installed "$(jq -c . "$ZAPRET_DIR/version.json")"
+  reply "$(zapret_status)"
+}
+
+# set: stdin {"rules": {"<rule>": {"args", "url", "name"}}} (all of them;
+# {} turns zapret off); a rule keeps its number, so its mark and queue
+zapret_set() {
+  _zq=$(head -c 262144)
+  printf '%s' "$_zq" | jq -e --argjson deny "$ZAPRET_DENY" '.rules | type == "object" and length <= 50 and all(to_entries[];
+      (.key | length > 0 and length <= 64 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
+      and ((.value.name // "") | type == "string" and length <= 120 and (contains("\n") | not))
+      and (.value.args | '"$ZAPRET_ARGS_OK"')
+      and (.value.url | type == "string" and (startswith("https://") or startswith("http://")) and length <= 300
+           and (explode | all(. >= 33 and . <= 126))))' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"rules": {"<rule>": {"args": ["--..."], "url": "https://...", "name"}}}'
+  _zn=$(printf '%s' "$_zq" | jq -c '.rules | with_entries(.value |= {args, url, name: (.name // "")})')
+  if [ "$_zn" != '{}' ]; then
+    ! safe_mode || fail safe_mode "safe mode: the router runs plain podkop; leave safe mode first"
+    zapret_installed || fail not_installed "zapret2 is not installed on the router"
+    _bad=$(seen_json | jq -r --argjson z "$_zn" --argjson skip "$(zapret_skip_json)" '
+      [.sections[] | select(.type == "section") | {key: .name, value: .options}] | from_entries as $s
+      | $z | keys[] | select(($s[.] == null) or (($s[.].connection_type // "") != "proxy") or ($skip | index(.)))' | head -n 1)
+    [ -z "$_bad" ] || fail bad_request "$_bad: zapret works only on proxy rules without kill switch or protection"
+  fi
+  # numbers: kept for rules that stay, the smallest free one for new ones
+  _zn=$(jq -nc --argjson new "$_zn" --argjson old "$(zapret_rules_json)" --argjson t "$ZAPRET_TEST" '
+    reduce ($new | keys[]) as $k ({};
+      ([.[] | .n] + [$new | keys[] | $old[.].n // empty]) as $used
+      | . + {($k): ($new[$k] + {n: ($old[$k].n // ([range(1; $t)] - $used | first))})})')
+  mkdir -p "$ZAPRET_DIR"
+  printf '%s\n' "$_zn" | jq -cS . > "$RUN/zapret.rules"
+  if cmp -s "$RUN/zapret.rules" "$ZAPRET_RULES" || { [ "$_zn" = '{}' ] && [ ! -e "$ZAPRET_RULES" ]; }; then
+    rm -f "$RUN/zapret.rules"; reply "$(zapret_status)"
+  fi
+  exec 9> "$RUN/apply.lock"; flock -n 9 || { rm -f "$RUN/zapret.rules"; fail busy "an apply is in progress"; }
+  if [ "$_zn" = '{}' ]; then
+    # sing-box first: its zapret outbounds must be gone before the table is
+    rm -f "$ZAPRET_RULES" "$RUN/zapret.rules"
+    if [ -n "$(singbox_pid)" ]; then _zh=$(hot_apply "zapret turned off") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_zh"; }; fi
+    [ ! -x "$ZAPRET_INIT" ] || "$ZAPRET_INIT" stop >/dev/null 2>&1 7>&- 8>&- 9>&-
+    zapret_nft off
+  else
+    { cp "$RUN/zapret.rules" "$ZAPRET_RULES.t" && mv "$ZAPRET_RULES.t" "$ZAPRET_RULES"; } || { exec 9>&-; fail error "could not write the rules"; }
+    rm -f "$RUN/zapret.rules"
+    zapret_init || { exec 9>&-; fail error "could not write $ZAPRET_INIT"; }
+    # the table and nfqws2 first, then sing-box sends to them
+    "$ZAPRET_INIT" restart >/dev/null 2>&1 7>&- 8>&- 9>&-
+    zapret_table || zapret_nft || { exec 9>&-; fail error "could not add the firewall table (kmod-nft-queue missing?)"; }
+    if [ -n "$(singbox_pid)" ]; then _zh=$(hot_apply "zapret rules changed") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_zh"; }; fi
+  fi
+  exec 9>&-
+  event zapret "$(jq -nc --argjson r "$(zapret_rules_json)" '{rules: ($r | keys)}')"
+  reply "$(zapret_status)"
+}
+
+# zapret status | install | set | check (job) | uninstall
+cmd_zapret() {
+  case "${1:-status}" in
+    status) reply "$(zapret_status)" ;;
+    install) zapret_install ;;
+    set) zapret_set ;;
+    check)
+      zapret_installed || fail not_installed "zapret2 is not installed on the router"
+      mkdir -p "$RUN/jobs"; _zc="$RUN/zapret-check-in.$$"; head -c 262144 > "$_zc"
+      jq -e --argjson deny "$ZAPRET_DENY" '(.urls | type == "array" and length > 0 and length <= 10 and all(.[]; type == "string"
+          and (startswith("https://") or startswith("http://")) and length <= 300 and (explode | all(. >= 33 and . <= 126))))
+        and (.strategies | type == "array" and length > 0 and length <= 200 and all(.[];
+          (.args | '"$ZAPRET_ARGS_OK"') and ((.name // "") | type == "string" and length <= 120)))
+        and ((.timeout // 8) | type == "number" and . >= 2 and . <= 30) and ((.want // 3) | type == "number" and . >= 1)' "$_zc" >/dev/null 2>&1 ||
+        { rm -f "$_zc"; fail bad_request 'expected {"urls": [...], "strategies": [{"name", "args"}], "timeout", "want"}'; }
+      _id=$(job_new zapret-check); mv "$_zc" "$RUN/jobs/$_id.in"; spawn _run-zapret-check "$_id"
+      reply "$(jq -nc --arg id "$_id" '{job: $id}')" ;;
+    uninstall)
+      [ ! -s "$ZAPRET_RULES" ] || fail bad_request "turn zapret off on every rule first"
+      [ ! -x "$ZAPRET_INIT" ] || { "$ZAPRET_INIT" disable; "$ZAPRET_INIT" stop >/dev/null 2>&1 7>&- 8>&- 9>&-; }
+      zapret_nft off; rm -rf "$ZAPRET_DIR" "$ZAPRET_INIT"
+      event zapret_removed
+      reply "$(zapret_status)" ;;
+    *) fail bad_request "usage: zapret status|install|set|check|uninstall" ;;
+  esac
 }
 
 # --- commands ---------------------------------------------------------------------
@@ -2341,6 +2705,7 @@ case "$_cmd" in
   ipv6)          cmd_ipv6 "$@" ;;
   dns-guard)     cmd_dns_guard "$@" ;;
   vpn)           cmd_vpn "$@" ;;
+  zapret)        cmd_zapret "$@" ;;
   upgrade)       cmd_upgrade ;;
   safe-mode)     cmd_safe_mode "$@" ;;
   protect)       cmd_protect ;;
@@ -2371,18 +2736,21 @@ case "$_cmd" in
     reply '{"uninstalling":true}' ;;
   version)       reply "$(jq -nc --arg v "$AGENT_VERSION" --argjson p "$PROTO" --argjson caps "$(capabilities)" \
                    '{version: $v, protocol: $p, capabilities: $caps}')" ;;
-  daemon|_event|_run-apply|_run-probe|_run-upgrade|_run-vpn-install)
+  daemon|_event|_run-apply|_run-probe|_run-upgrade|_run-vpn-install|_run-zapret-check|_zapret-nft|_zapret-run)
     [ "$REMOTE" = 0 ] || fail forbidden "$_cmd can't be run over SSH"
     case "$_cmd" in
       daemon) daemon ;;
       _event) event "${1:-}" "${2:-}" ;;        # podkop-sentinel's
       _run-vpn-install) run_vpn_install "$1" ;;
+      _run-zapret-check) run_zapret_check "$1" ;;
+      _zapret-nft) zapret_nft "${1:-on}" ;;
+      _zapret-run) _zr=$(jq -c --arg r "${1:-}" '.[$r] // empty' "$ZAPRET_RULES" 2>/dev/null); [ -n "$_zr" ] || exit 1; zapret_exec "$_zr" ;;
       _run-apply) run_apply "$1" ;;
       _run-probe) run_probe ;;
       _run-upgrade) run_upgrade "$1" ;;
     esac ;;
   help|-h|--help)
-    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic sections diagnostics eligibility heal heal-off heal-links strict protect safe-mode resolve ipv6 vpn upgrade uninstall version" ;;
+    echo "podkop-agent $AGENT_VERSION: status config-get validate apply job pin proxies exit-ip exit-ips delays logs watch service probe-start probe-status probe-config probe-cron sub-info probe-nodes traffic sections diagnostics eligibility heal heal-off heal-links strict protect safe-mode resolve ipv6 vpn zapret upgrade uninstall version" ;;
   *) fail bad_request "unknown command $_cmd" ;;
 esac
 # end of podkop-agent

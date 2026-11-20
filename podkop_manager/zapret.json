@@ -1,0 +1,110 @@
+{
+ "_about": "Defaults for the Zapret page (zapret2, nfqws2 only). Strategies are tried in this order; the Zapret page can replace the list (kept in the manager's database). Sources: bol-van/zapret2 v1.0.7 config.default, docs/readme and blockcheck2.d lists; Flowseal/zapret-discord-youtube 1.10.4 and remittor/zapret-openwrt (nfqws args ported to nfqws2 by the zapret2 docs' porting rules, untested where marked 'ported'). File names (tls_clienthello_*.bin) are fake files of the zapret2 release.",
+ "strategies": [
+  {
+   "name": "fake md5 + multidisorder (zapret2 default)",
+   "args": "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000 --lua-desync=multidisorder:pos=1,midsld"
+  },
+  {
+   "name": "fake x11 google sni + multidisorder",
+   "args": "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=11:tls_mod=rnd,dupsid,sni=www.google.com --lua-desync=multidisorder:pos=1,midsld"
+  },
+  {
+   "name": "multisplit seqovl google pattern (Flowseal, ported)",
+   "args": "--blob=tls_google:@tls_clienthello_www_google_com.bin --payload=tls_client_hello --lua-desync=multisplit:pos=1:seqovl=#tls_google:seqovl_pattern=tls_google"
+  },
+  {
+   "name": "tcpseg seqovl",
+   "args": "--payload=tls_client_hello --lua-desync=tcpseg:pos=0,-1:seqovl=1 --lua-desync=drop"
+  },
+  {
+   "name": "fake ts",
+   "args": "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000"
+  },
+  {
+   "name": "hostfakesplit google (Flowseal, ported)",
+   "args": "--payload=tls_client_hello --lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-600000"
+  },
+  {
+   "name": "fake x6 seq + multidisorder midsld",
+   "args": "--payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6 --lua-desync=multidisorder:pos=midsld"
+  },
+  {
+   "name": "multisplit sniext",
+   "args": "--payload=tls_client_hello --lua-desync=multisplit:pos=1,sniext+1"
+  },
+  {
+   "name": "multidisorder midsld",
+   "args": "--payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld"
+  },
+  {
+   "name": "zero fake + google fake + multisplit",
+   "args": "--payload=tls_client_hello --lua-desync=fake:blob=0x00000000:tcp_md5:repeats=1 --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2"
+  }
+ ],
+ "services": {
+  "youtube": {
+   "names": [
+    "youtube"
+   ],
+   "default": true,
+   "urls": [
+    "https://www.youtube.com/",
+    "https://redirector.googlevideo.com/report_mapping"
+   ],
+   "test": "https://www.youtube.com/generate_204"
+  },
+  "meta": {
+   "names": [
+    "meta",
+    "instagram",
+    "facebook",
+    "whatsapp"
+   ],
+   "default": true,
+   "urls": [
+    "https://www.instagram.com/",
+    "https://www.facebook.com/"
+   ],
+   "test": "https://www.instagram.com/",
+   "note": "Partly blocked by address: it depends on the addresses DNS gives and on the provider."
+  },
+  "twitter": {
+   "names": [
+    "twitter",
+    "x"
+   ],
+   "default": true,
+   "urls": [
+    "https://x.com/",
+    "https://abs.twimg.com/"
+   ],
+   "test": "https://x.com/",
+   "note": "Some providers block X by address; then no strategy helps."
+  },
+  "telegram": {
+   "names": [
+    "telegram"
+   ],
+   "default": true,
+   "urls": [
+    "https://web.telegram.org/",
+    "https://telegram.org/"
+   ],
+   "test": "https://web.telegram.org/",
+   "note": "Telegram is slowed or blocked by address in Russia (zapret's author: DPI tricks don't help); expect it to stay on servers."
+  },
+  "discord": {
+   "names": [
+    "discord"
+   ],
+   "default": false,
+   "urls": [
+    "https://discord.com/",
+    "https://gateway.discord.gg/"
+   ],
+   "test": "https://discord.com/",
+   "note": "Voice uses UDP, which stays on the servers."
+  }
+ }
+}
