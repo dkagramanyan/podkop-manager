@@ -820,8 +820,8 @@ class Hub:
                 self.db.set_setting(f"rule_keys_base:{rt.id}", None)
                 self.db.set_setting(f"rule_links_base:{rt.id}", None)
                 rt.draft = None
-                if self.db.get_setting(f"zapret_pending:{rt.id}"):
-                    self.zapret_pending_now(rt)
+                if self.db.get_setting(f"zapret_pending:{rt.id}") or self.db.get_setting(f"router_pending:{rt.id}"):
+                    self.after_apply_now(rt)
         rt.wake.set()
         return data
 
@@ -1393,8 +1393,10 @@ class Hub:
                 self._event(rt, "stale_probe_not_used", {"message": "the last probe is older than a day: the file's "
                                                          "servers are kept; run the probe to pick new ones"})
         self.db.set_draft(rid, config, (rt.status or {}).get("fingerprint") or "")
-        # its zapret first: turned on once this draft is applied (the router needs the rules first)
+        # its zapret first and the router's switches: set once this draft is applied (the router
+        # needs the rules first)
         self.db.set_setting(f"zapret_pending:{rid}", saved.get("zapret") or None)
+        self.db.set_setting(f"router_pending:{rid}", saved.get("router") or None)
         self.update_draft(rt)
         self.publish({"type": "router", "router": rt.snapshot()})
         return config
@@ -1415,11 +1417,40 @@ class Hub:
         await self.refresh(rt)
         return {"rules": sorted(rules), "refused": sorted(set(rules) & set((out or {}).get("refused") or [])), "installed": installed}
 
-    def zapret_pending_now(self, rt: RouterRuntime) -> None:
-        """The loaded config's zapret first, in the background (its event tells how it went)."""
-        task = asyncio.create_task(self._zapret_after_apply(rt))
+    def after_apply_now(self, rt: RouterRuntime) -> None:
+        """The loaded config's switches and zapret first, in the background (events tell how it went)."""
+        task = asyncio.create_task(self._after_apply(rt))
         self.jobs.add(task)
         task.add_done_callback(self.jobs.discard)
+
+    async def _after_apply(self, rt: RouterRuntime) -> None:
+        await self._router_after_apply(rt)
+        await self._zapret_after_apply(rt)
+
+    async def _router_after_apply(self, rt: RouterRuntime) -> None:
+        """A loaded config's kill switches, Protected rules, self-heal off and
+        nightly probe settings (the router's lists are replaced; what the
+        file leaves out stays). Each one on its own: one refused, the others go on."""
+        part = self.db.get_setting(f"router_pending:{rt.id}") or {}
+        self.db.set_setting(f"router_pending:{rt.id}", None)
+        if not part:
+            return
+        done, failed = [], []
+        if "probe" in part and part["probe"]:
+            self.db.set_probe_settings(rt.id, **part["probe"])
+            done.append("nightly probe")
+        for key, command, what in (("heal_off", "heal-off", "self-heal off"), ("protected", "protect", "Protected"),
+                                   ("kill_switch", "strict", "kill switch")):
+            if key not in part:
+                continue
+            try:
+                await rt.agent.call(command, payload={"sections": part[key]}, timeout=60)
+                done.append(f"{what}: {', '.join(part[key]) or 'none'}")
+            except AgentError as e:
+                failed.append(f"{what}: {e.message}")
+        with contextlib.suppress(AgentError):
+            await self.refresh(rt)
+        self._event(rt, "settings_failed" if failed else "settings_on", {"done": done, "failed": failed})
 
     async def _zapret_after_apply(self, rt: RouterRuntime) -> None:
         """A loaded config's zapret first, now that its rules are on the router."""

@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.29.1"
+AGENT_VERSION="0.29.2"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -1903,7 +1903,7 @@ zapret_set() {
     zapret_installed || fail not_installed "zapret2 is not installed on the router"
     _bad=$(seen_json | jq -r --argjson z "$_zn" --argjson skip "$(zapret_skip_json)" '
       [.sections[] | select(.type == "section") | {key: .name, value: .options}] | from_entries as $s
-      | $z | keys[] | select(($s[.] == null) or (($s[.].connection_type // "") != "proxy") or ($skip | index(.)))' | head -n 1)
+      | $z | keys[] | . as $k | select(($s[$k] == null) or (($s[$k].connection_type // "") != "proxy") or ($skip | index($k)))' | head -n 1)
     [ -z "$_bad" ] || fail bad_request "$_bad: zapret works only on proxy rules without kill switch or protection"
   fi
   # numbers: kept for rules that stay, the smallest free one for new ones

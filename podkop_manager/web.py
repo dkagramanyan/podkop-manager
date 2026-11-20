@@ -1224,7 +1224,25 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     def config_row(c: dict) -> dict:
         rules = [s for s in c["config"]["sections"] if s["type"] == "section"]
         return {k: c[k] for k in ("id", "name", "t", "source", "podkop")} | {
-            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"]), "zapret": sorted(c.get("zapret") or {})}
+            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"]), "zapret": sorted(c.get("zapret") or {}),
+            "router": c.get("router") or {}}
+
+    def router_part(rt, config: dict) -> dict:
+        """The router's own switches for this config's rules and its nightly
+        probe settings (keys stay here, in the manager), as a config keeps them."""
+        st = rt.status or {}
+        names = {s["name"] for s in config["sections"] if s["type"] == "section"}
+        heal = st.get("heal")
+        out = {}
+        if heal is not None and isinstance(heal.get("strict"), list):
+            out["kill_switch"] = sorted(set(heal["strict"]) & names)
+        if isinstance(st.get("protected"), list):
+            out["protected"] = sorted(set(st["protected"]) & names)
+        if heal is not None:
+            out["heal_off"] = sorted(set(heal.get("off") or []) & (names | {"*"}))
+        ps = db.probe_settings(rt.id)
+        out["probe"] = {k: ps[k] for k in configs.PROBE_FIELDS if k in ps}
+        return out
 
     def config_name(name, fallback: str) -> str:
         name = str(name or "").strip()[:80]
@@ -1262,8 +1280,12 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
                 have = {r["name"] for r in zapret.rules_view(config)}
                 zap = {k: zapret.check_rule(k, v) for k, v in cur.items() if k in have}
+        router = router_part(rt, config)
+        # a rule with a kill switch or Protected has no zapret first (the router refuses it)
+        guarded = set(router.get("kill_switch", [])) | set(router.get("protected", []))
+        zap = {k: v for k, v in zap.items() if k not in guarded}
         cid = db.add_config(config_name(body.get("name"), f"{source} {time.strftime('%Y-%m-%d %H:%M')}"),
-                            config, rules, source, version, zap)
+                            config, rules, source, version, zap, router)
         return config_row(config_or_404(cid))
 
     @app.post("/api/configs/import", dependencies=[api])
@@ -1275,13 +1297,13 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, str(e)) from None
         file = str(body.get("file") or "").strip()[:120]
         cid = db.add_config(config_name(body.get("name") or f["name"], file or "Imported"),
-                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"], f["zapret"])
+                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"], f["zapret"], f["router"])
         return config_row(config_or_404(cid))
 
     @app.get("/api/configs/{cid}/file", dependencies=[api])
     async def export_config(cid: int):
         c = config_or_404(cid)
-        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"], c.get("zapret"))
+        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"], c.get("zapret"), c.get("router"))
         fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", c["name"]).strip("-")[:60] or "config"
         return Response(json.dumps(data, ensure_ascii=False, indent=1), media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="podkop-{fname}.json"'})
@@ -1301,17 +1323,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.post("/api/routers/{rid}/configs/{cid}/load", dependencies=[api])
     async def load_config(rid: int, cid: int):
         """Puts a saved config into the router's draft, to review and apply.
-        Its zapret first follows the apply; when the router runs these very
-        settings already (nothing to apply), it is turned on now."""
+        Its zapret first and the router's switches follow the apply; when the
+        router runs these very settings already (nothing to apply), they are set now."""
         rt = router_or_404(rid)
         saved = config_or_404(cid)
         config = hub.load_config(rid, saved)
-        if saved.get("zapret"):
+        if saved.get("zapret") or saved.get("router"):
             with contextlib.suppress(AgentError):
                 cur = hub.cached_config(rt) or await hub.config(rid)
                 if not podkop.diff(cur["config"], config):
-                    hub.zapret_pending_now(rt)
-                    return {"ok": True, "zapret": "now"}
+                    hub.after_apply_now(rt)
+                    return {"ok": True, "zapret": "now", "now": True}
         return {"ok": True}
 
     # --- the whole manager: backup and restore ---------------------------------------------

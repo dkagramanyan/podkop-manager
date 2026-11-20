@@ -157,6 +157,22 @@ def test_services_by_name_or_by_their_own_lists_only():
     assert view[0]["urls"] and view[0]["note"]
 
 
+def test_a_release_downloaded_before_does_when_github_refuses(tmp_path, monkeypatch):
+    import urllib.error
+
+    def refused(url, timeout=0):
+        raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+    monkeypatch.setattr(zapret, "_get", refused)
+    with pytest.raises(OSError, match="rate limit"):
+        zapret.release(tmp_path)                     # nothing kept: the error says why
+    (tmp_path / "zapret2-v1.0.6-openwrt-embedded.tar.gz").write_bytes(b"old")
+    newest = tmp_path / "zapret2-v1.0.7-openwrt-embedded.tar.gz"
+    newest.write_bytes(b"new")
+    import os
+    os.utime(tmp_path / "zapret2-v1.0.6-openwrt-embedded.tar.gz", (1, 1))
+    assert zapret.release(tmp_path) == ("v1.0.7", newest)
+
+
 def test_payload_takes_the_routers_binary_lua_and_fake_files(tmp_path):
     tgz = tmp_path / "z.tar.gz"
     with tarfile.open(tgz, "w:gz") as tf:
@@ -280,6 +296,14 @@ def test_a_saved_config_takes_the_routers_zapret_first_and_its_file_brings_it_ba
         assert json.loads(text)["zapret"] == {"main": {"args": ["--b=1"], "url": "https://x.com/", "name": "fast", "service": "twitter"}}
         again = c.post("/api/configs/import", headers=H, json={"text": text, "file": "x.json"}).json()
         assert again["zapret"] == ["main"]
+        # the router's switches and probe settings go along; its keys do not
+        router = json.loads(text)["router"]
+        assert set(router) == {"probe"} and "keys" not in router["probe"]
+        monkeypatch.setattr(FakeRouter, "status", {"fingerprint": "fp1", "agent": {"capabilities": ["zapret"]},
+                                                   "heal": {"strict": ["main", "gone"], "off": ["*"]}, "protected": []})
+        row = c.post("/api/configs", headers=H, json={"router_id": 1}).json()
+        assert row["zapret"] == [] and {k: v for k, v in row["router"].items() if k != "probe"} == {      # (refused there)
+            "kill_switch": ["main"], "protected": [], "heal_off": ["*"]}
 
 
 SET_STUBS = '''
@@ -298,6 +322,20 @@ def test_set_checks_its_input_before_anything_else(tmp_path, rules, ok):
     p = _sh(tmp_path, SET_STUBS + "\nzapret_set", json.dumps({"rules": rules}))
     # a good request gets as far as "not installed" (the stub); a bad one stops at the check
     assert ("not_installed" in p.stderr) == ok and ("bad_request" in p.stderr) == (not ok), p.stderr
+
+
+@pytest.mark.parametrize("rule, refused", [("meta", False), ("chatgpt", True), ("vpn_1", True), ("nope", True)])
+def test_set_refuses_only_the_rules_with_a_kill_switch_or_protection(tmp_path, rule, refused):
+    # 0.29.1 refused every rule as soon as any rule had a kill switch or Protected
+    cfg = {"sections": [{"name": n, "type": "section", "options": {"connection_type": ct}}
+                        for n, ct in (("meta", "proxy"), ("chatgpt", "proxy"), ("vpn_1", "vpn"))]}
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/strict").write_text("chatgpt\n")
+    (tmp_path / "etc/protected").write_text("google_ai\n")
+    stubs = "\nsafe_mode() { return 1; }\nzapret_installed() { return 0; }\nseen_json() { echo '" + json.dumps(cfg) + "'; }\n"
+    body = {"rules": {rule: {"args": ["--payload=tls_client_hello"], "url": "https://x.com/", "name": "a"}}}
+    p = _sh(tmp_path, stubs + "zapret_set", json.dumps(body))
+    assert ("zapret works only on proxy rules" in p.stderr) == refused, p.stderr
 
 
 @pytest.mark.parametrize("body, ok", [

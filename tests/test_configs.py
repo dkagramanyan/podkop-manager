@@ -75,6 +75,22 @@ def test_a_config_file_carries_its_rules_zapret_first():
             configs.read(json.dumps(dict(configs.to_file("x", cfg, {}), zapret=bad)))
 
 
+def test_a_config_file_carries_the_routers_switches_and_probe_but_no_keys():
+    cfg = configs.check_config(configs.parse_uci(UCI))
+    router = {"kill_switch": ["main"], "protected": [], "heal_off": ["*"],
+              "probe": {"schedule": "03:30", "auto_apply": True, "fix_fingerprint": 0, "test_from": "manager", "options": ["-x"]}}
+    f = configs.read(json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", None, router)))
+    assert f["router"] == dict(router, probe=dict(router["probe"], auto_apply=1))
+    assert configs.read(json.dumps(configs.to_file("x", cfg, {})))["router"] == {}        # older files: none
+    zap = {"main": {"args": ["--payload=tls_client_hello"], "url": "https://x.com/", "name": "z", "service": ""}}
+    for bad, msg in (({"kill_switch": ["nope"]}, "no rule nope"), ({"probe": {"keys": ["https://sub"]}}, "keys stay"),
+                     ({"probe": {"schedule": "25:00"}}, "HH:MM"), ({"vpn": 1}, "only"), ({"protected": "main"}, "list")):
+        with pytest.raises(ValueError, match=msg):
+            configs.read(json.dumps(configs.to_file("x", cfg, {}, "", None, bad)))
+    with pytest.raises(ValueError, match="does not go with a kill switch"):
+        configs.read(json.dumps(configs.to_file("x", cfg, {}, "", zap, {"kill_switch": ["main"]})))
+
+
 def test_backup_round_trip(tmp_path: Path):
     key = tmp_path / "id_ed25519"
     asyncssh.generate_private_key("ssh-ed25519").write_private_key(str(key))

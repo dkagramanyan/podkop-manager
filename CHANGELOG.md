@@ -3,6 +3,36 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.58.0 — 2026-11-20
+
+A config keeps every setting of its rules (manager 0.45.0, agent 0.29.2).
+
+- **Fixed (agent 0.29.2): zapret first was refused on every rule as soon as
+  any rule had a kill switch or Protected** ("zapret works only on proxy
+  rules without kill switch or protection"): the check looked the list up
+  in itself instead of the rule's name. Update the agent on routers with a
+  kill switch or Protected rule.
+
+- **The router's switches go into a config**: Save config takes the
+  router's Kill switch, Protected and self-heal off lists (for the config's
+  rules) and its nightly probe settings (time, apply by itself, chrome
+  fingerprint, where servers are tested, extra options) along with podkop's
+  sections, the probe rules and zapret first, in a `router` part of the
+  file. Load into draft says what comes back; once applied the lists
+  replace the router's, the probe settings this manager's, each one on its
+  own (an event names what was set and what was refused). When the router
+  runs those settings already they are set at once. A file without the part
+  (older ones, podkop's own) leaves them as they are.
+- **Keys never go into a config**: subscriptions, which keys a rule takes
+  servers from and your own servers stay in the manager's database (its
+  /data volume and backups), by rule name, so a loaded config keeps them.
+- A file with zapret first on a rule that also has a kill switch or
+  Protected is refused (the router would refuse it); Save config leaves such
+  a rule's zapret out.
+- **zapret2 installs without GitHub's answer**: when GitHub cannot be
+  reached or refuses (its limit for addresses without a login is 60 asks an
+  hour), the release this manager downloaded and checked before is used.
+
 ## 1.57.0 — 2026-11-20
 
 Zapret first travels with a config (manager 0.44.0; agent 0.29 or later).

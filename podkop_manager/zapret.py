@@ -51,7 +51,15 @@ def release(cache: Path) -> tuple[str, Path]:
     checked against the SHA-256 GitHub gives for the asset; the release's own
     sha256sum.txt (which lists the files inside) is kept next to it for
     payload() to check nfqws2."""
-    rel = json.loads(_get(f"https://api.github.com/repos/{REPO}/releases/latest", 30))
+    try:
+        rel = json.loads(_get(f"https://api.github.com/repos/{REPO}/releases/latest", 30))
+    except OSError:
+        # GitHub away, or its limit for addresses without a login (60 an hour): a release
+        # downloaded and checked before does
+        kept = sorted(cache.glob(f"{NAME}-v*-openwrt-embedded.tar.gz"), key=lambda p: p.stat().st_mtime)
+        if not kept:
+            raise
+        return kept[-1].name.removeprefix(f"{NAME}-").removesuffix("-openwrt-embedded.tar.gz"), kept[-1]
     tag = rel["tag_name"]
     if not re.fullmatch(r"v[0-9][0-9A-Za-z.-]*", tag):
         raise ValueError(f"unexpected release tag {tag!r}")

@@ -849,6 +849,41 @@ def test_a_loaded_configs_zapret_first_is_turned_on_once_it_is_applied(tmp_path,
     assert ev["type"] == "zapret_failed" and "update it" in json.loads(ev["data"])["message"]
 
 
+def test_a_loaded_configs_switches_and_probe_settings_are_set_once_it_is_applied(tmp_path):
+    from podkop_manager.agent import AgentError
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    calls = []
+
+    async def call(name, *args, payload=None, **kw):
+        if name == "job":
+            return {"state": "applied"}
+        calls.append((name, payload))
+        if name == "protect":
+            raise AgentError("unsupported", "agent too old")
+        return {}
+
+    async def refresh(r):
+        pass
+    rt.agent.call, hub.refresh = call, refresh
+    db.set_probe_settings(rid, keys=["https://sub.example/x"], schedule="")
+    part = {"kill_switch": ["main"], "protected": [], "heal_off": ["*"], "probe": {"schedule": "04:00", "auto_apply": 1}}
+    out = hub.load_config(rid, {"config": _cfg(["vless://u@b:443#b"]), "rules": {}, "router": part})
+    assert not calls
+
+    async def apply():
+        vid = db.add_version(rid, out, [], "", "fp", "web")
+        await hub._track_job(rt, vid, "j1")
+        await asyncio.gather(*hub.jobs)
+    asyncio.run(apply())
+    assert calls == [("heal-off", {"sections": ["*"]}), ("protect", {"sections": []}), ("strict", {"sections": ["main"]})]
+    ps = db.probe_settings(rid)
+    assert (ps["schedule"], ps["auto_apply"], ps["keys"]) == ("04:00", 1, ["https://sub.example/x"])     # keys untouched
+    ev = db.q("SELECT type, data FROM events WHERE router_id = ? ORDER BY id DESC LIMIT 1", rid)[0]
+    assert ev["type"] == "settings_failed" and json.loads(ev["data"]) == {
+        "done": ["nightly probe", "self-heal off: *", "kill switch: main"], "failed": ["Protected: agent too old"]}
+    assert db.get_setting(f"router_pending:{rid}") is None
+
+
 def test_cached_settings_and_database_copy(tmp_path):
     db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
     assert hub.cached_config(rt) is None                    # nothing read yet

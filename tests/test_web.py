@@ -50,6 +50,12 @@ class FakeHub:
     def local_probe_missing(self):
         return "sing-box not found"
 
+    def cached_config(self, rt):
+        return None
+
+    def after_apply_now(self, rt):
+        self.after_apply = rt
+
     async def refresh(self, rt):
         pass
 

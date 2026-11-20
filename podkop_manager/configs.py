@@ -1,6 +1,8 @@
 """Config files: podkop's sections plus the rules that take servers from the
-probe and the rules' zapret first, as a JSON file the manager exports and
-imports. Import also reads podkop's own /etc/config/podkop (UCI)."""
+probe, the rules' zapret first and the router's own switches (kill switch,
+Protected, self-heal off, the nightly probe), as a JSON file the manager
+exports and imports. Keys never go in it: they stay in the manager's
+database. Import also reads podkop's own /etc/config/podkop (UCI)."""
 
 from __future__ import annotations
 
@@ -14,13 +16,69 @@ from .podkop import INTERNAL_OPTIONS, check_auto_rule
 FORMAT = "podkop-manager-config"
 
 
-def to_file(name: str, config: dict, rules: dict, podkop_version: str = "", zapret: dict | None = None) -> dict:
-    """The exported file: {format, name, saved, podkop, config, rules[, zapret]}:
-    zapret is {rule: {args, url, name, service}}, the rules with zapret first."""
+def to_file(name: str, config: dict, rules: dict, podkop_version: str = "", zapret: dict | None = None,
+            router: dict | None = None) -> dict:
+    """The exported file: {format, name, saved, podkop, config, rules[, zapret][, router]}:
+    zapret is {rule: {args, url, name, service}}, the rules with zapret first;
+    router is check_router's."""
     out = {"format": FORMAT, "version": 1, "name": name,
            "saved": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "podkop": podkop_version,
            "config": config, "rules": rules}
-    return out | ({"zapret": zapret} if zapret else {})
+    return out | ({"zapret": zapret} if zapret else {}) | ({"router": router} if router else {})
+
+
+PROBE_FIELDS = ("schedule", "auto_apply", "fix_fingerprint", "test_from", "options", "main_section", "youtube_section")
+
+
+def check_router(r, config: dict, zapret: dict) -> dict:
+    """A config's router part: {"kill_switch", "protected", "heal_off": [rule],
+    "probe": {schedule, auto_apply, fix_fingerprint, test_from, options,
+    main_section, youtube_section}}, each one optional (left out: the
+    router's stays). Raises ValueError."""
+    if r is None:
+        return {}
+    if not isinstance(r, dict) or set(r) - {"kill_switch", "protected", "heal_off", "probe"}:
+        raise ValueError("router has kill_switch, protected, heal_off and probe only")
+    rules = {s["name"] for s in config["sections"] if s["type"] == "section"}
+    out = {}
+    for k in ("kill_switch", "protected", "heal_off"):
+        if k not in r:
+            continue
+        v = r[k]
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ValueError(f"router.{k} must be a list of rule names")
+        bad = sorted(set(v) - rules - ({"*"} if k == "heal_off" else set()))
+        if bad:
+            raise ValueError(f"router.{k}: no rule {', '.join(bad)} in this config")
+        out[k] = sorted(set(v))
+    both = sorted(set(zapret) & (set(out.get("kill_switch", [])) | set(out.get("protected", []))))
+    if both:
+        raise ValueError(f"{', '.join(both)}: zapret first does not go with a kill switch or Protected")
+    if "probe" in r:
+        p = r["probe"]
+        if not isinstance(p, dict) or set(p) - set(PROBE_FIELDS):
+            raise ValueError(f"router.probe has {', '.join(PROBE_FIELDS)} only (keys stay in the manager)")
+        probe = {}
+        if "schedule" in p:
+            if not isinstance(p["schedule"], str) or (p["schedule"] and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", p["schedule"])):
+                raise ValueError("router.probe.schedule must be HH:MM or empty")
+            probe["schedule"] = p["schedule"]
+        for k in ("auto_apply", "fix_fingerprint"):
+            if k in p:
+                probe[k] = 1 if p[k] else 0
+        if "test_from" in p:
+            if p["test_from"] not in ("router", "manager"):
+                raise ValueError("router.probe.test_from must be router or manager")
+            probe["test_from"] = p["test_from"]
+        if "options" in p:
+            if not isinstance(p["options"], list) or not all(isinstance(x, str) for x in p["options"]):
+                raise ValueError("router.probe.options must be a list of text")
+            probe["options"] = p["options"]
+        for k in ("main_section", "youtube_section"):
+            if k in p:
+                probe[k] = str(p[k]).strip()
+        out["probe"] = probe
+    return out
 
 
 def _uci_statements(text: str):
@@ -113,8 +171,8 @@ def check_config(config: dict) -> dict:
 
 
 def read(text: str) -> dict:
-    """An imported file -> {"name", "config", "rules", "podkop", "zapret"}: our
-    JSON export or podkop's UCI file. Raises ValueError."""
+    """An imported file -> {"name", "config", "rules", "podkop", "zapret", "router"}:
+    our JSON export or podkop's UCI file. Raises ValueError."""
     text = text.lstrip("\ufeff")       # a byte order mark from some editors
     stripped = text.lstrip()
     if stripped.startswith("{"):
@@ -129,7 +187,8 @@ def read(text: str) -> dict:
         names = {s["name"] for s in config["sections"] if s["type"] == "section"}
         if not isinstance(rules, dict) or set(rules) - names:
             raise ValueError("rules must be for sections of this config")
+        zap = zapret_mod.check_rules(data.get("zapret") or {}, config)
         return {"name": str(data.get("name") or ""), "config": config, "podkop": str(data.get("podkop") or ""),
-                "rules": {k: check_auto_rule(v) for k, v in rules.items()},
-                "zapret": zapret_mod.check_rules(data.get("zapret") or {}, config)}
-    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": "", "zapret": {}}
+                "rules": {k: check_auto_rule(v) for k, v in rules.items()}, "zapret": zap,
+                "router": check_router(data.get("router"), config, zap)}
+    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": "", "zapret": {}, "router": {}}

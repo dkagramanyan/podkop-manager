@@ -33,6 +33,7 @@ TEXT = {
     "vpn_up": lambda d: "VPN is up again",
     "zapret_servers": lambda d: f"{d.get('section')}: zapret does not open its sites now, the rule uses its servers",
     "zapret_direct": lambda d: f"{d.get('section')}: back on zapret (direct)",
+    "settings_failed": lambda d: "the loaded config's settings were set only partly: " + "; ".join(d.get("failed") or []),
     "zapret_failed": lambda d: f"zapret first was not turned on for {', '.join(d.get('rules') or [])}: {d.get('message') or ''}",
     "group_stuck": lambda d: f"{d.get('section')}: sing-box kept {d.get('server')}, which does not answer, although another server did; podkop is restarted",
     "clash_api_silent": lambda d: "sing-box runs but does not answer; podkop is restarted",

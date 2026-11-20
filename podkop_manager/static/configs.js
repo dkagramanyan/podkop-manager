@@ -7,6 +7,15 @@ import { busyClick } from "./usage.js";
 
 // --- saved configs: archive, export, import -------------------------------------------------------------------
 
+// a saved config's router part, in words: "kill switch on meta; Protected: none; nightly probe at 03:00"
+export function routerText(c) {
+  const r = c.router || {}, out = [];
+  const list = (k, what) => { if (Array.isArray(r[k])) out.push(`${what} ${r[k].length ? `on ${r[k].join(", ")}` : "on no rule"}`); };
+  list("kill_switch", "kill switch"); list("protected", "Protected"); list("heal_off", "self-heal off");
+  if (r.probe && Object.keys(r.probe).length) out.push(r.probe.schedule ? `nightly probe at ${r.probe.schedule}` : "nightly probe off");
+  return out.join("; ");
+}
+
 // {"format": "podkop-manager-zapret", "rules": {rule: {args, url, name, service}}} -> it, or null
 export function zapretFile(text) {
   let d;
@@ -71,11 +80,12 @@ export async function viewConfigs(main, id) {
   const loadInto = (c) => {
     const rt = S.routers[id];
     confirm(`Load ${c.name}?`, `It becomes the draft of ${rt.name}${draftChanges(rt) ? ", replacing the draft you have" : ""}. Rules that take links from probe get the last probe's servers. Nothing changes on the router until you apply.`
-      + ((c.zapret || []).length ? ` Once it is applied, ${c.zapret.join(", ")} get zapret first with the file's strategies (zapret2 is installed on the router first if it has none).` : ""),
+      + (routerText(c) ? ` Once it is applied: ${routerText(c)}.` : "")
+      + ((c.zapret || []).length ? ` ${c.zapret.join(", ")} get zapret first with the file's strategies (zapret2 is installed on the router first if it has none).` : ""),
       "Load into draft", "primary", async () => {
         try {
           const r = await api("POST", `/api/routers/${id}/configs/${c.id}/load`);
-          if (r.zapret === "now") toast(`${rt.name} runs these settings already: zapret first is being turned on for ${c.zapret.join(", ")}`);
+          if (r.now) toast(`${rt.name} runs these settings already: the config's switches${(c.zapret || []).length ? " and zapret first" : ""} are being set`);
           location.hash = `#/r/${id}/rules`;
         }
         catch (e) { toast(e.message, true); }
@@ -102,7 +112,8 @@ export async function viewConfigs(main, id) {
             h("td", { class: "num nowrap", style: "color: var(--text-2)" }, shortWhen(c.t)),
             h("td", { style: "color: var(--text-2)" }, c.rules.join(", ") || "–",
               c.from_probe.length ? h("span", { class: "xs muted" }, ` · ${c.from_probe.length} from probe`) : null,
-              (c.zapret || []).length ? h("span", { class: "xs muted", title: c.zapret.join(", ") }, ` · zapret first: ${c.zapret.join(", ")}`) : null),
+              (c.zapret || []).length ? h("span", { class: "xs muted", title: c.zapret.join(", ") }, ` · zapret first: ${c.zapret.join(", ")}`) : null,
+              routerText(c) ? h("span", { class: "xs muted", title: routerText(c) }, ` · ${routerText(c)}`) : null),
             h("td", { class: "r nowrap" }, h("span", { class: "row", style: "gap: 6px; justify-content: flex-end; flex-wrap: nowrap" },
               h("button", { type: "button", class: "btn xs", onclick: () => loadInto(c) }, "Load into draft"),
               h("a", { class: "btn xs", href: `/api/configs/${c.id}/file`, download: "" }, "Download"),
@@ -110,7 +121,8 @@ export async function viewConfigs(main, id) {
               h("button", { type: "button", class: "btn xs danger", onclick: () => confirm(`Delete ${c.name}?`, "The saved config goes away; routers keep what they run.",
                 "Delete", "danger", () => run(() => api("DELETE", `/api/configs/${c.id}`), "Deleted")) }, "Delete")))))))
           : h("p", { class: "empty" }, "No saved configs. Save this router's config, or import a file: one downloaded here, or podkop's /etc/config/podkop.")),
-      h("p", { class: "small muted" }, "A config can carry its rules' zapret first: it is turned on after the config is applied. "
+      h("p", { class: "small muted" }, "A config keeps every rule's settings: podkop's, the probe's, zapret first, kill switch, Protected, self-heal off and the nightly probe; "
+        + "the switches are set after the config is applied. Keys are not in it: they stay in this manager. "
         + "Import file also takes a zapret file alone (zapret first for some rules, with their strategies): it goes to this router at once."));
   };
 
