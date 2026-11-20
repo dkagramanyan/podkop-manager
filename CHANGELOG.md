@@ -3,6 +3,17 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.59.0 — 2026-11-21
+
+- **Nightly probe has a card of its own, at the bottom of Keys and usage**
+  (time, apply the result by itself, chrome fingerprint, where servers are
+  tested, and a Run now button), with a one-line summary ("Every night at
+  03:00, applies the result by itself" or "Off"). It was at the end of the
+  closed Probe panel of each rule that takes links from the probe, the same
+  settings repeated on every such rule. A rule's Probe panel keeps the
+  rule's own filter (countries, protocols, keep, limits, services) and links
+  to the card (manager 0.46.0).
+
 ## 1.58.0 — 2026-11-20
 
 A config keeps every setting of its rules (manager 0.45.0, agent 0.29.2).

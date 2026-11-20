@@ -7,7 +7,7 @@ import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
-import { EUROPE, busyClick, countriesText, countryName, flag, hasEurope } from "./usage.js";
+import { EUROPE, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
 import { zapretParts, zapretTag } from "./zapret.js";
@@ -568,77 +568,6 @@ export async function toggleAuto(w, s, on) {
 }
 
 // a rule's filter and limits for the probe's servers, what it matches now, and its servers in the draft
-// The router's nightly probe: one run for every rule that takes links from
-// it, so each such rule shows the same settings. Saved right away, not in the
-// draft. key: a suffix for the element ids.
-export function nightlyProbeBlock(w, key, redraw) {
-  const c = w.probeCfg || (w.probeCfg = { settings: null, loading: false, downloading: false });
-  if (!c.settings) {
-    if (!c.loading) {
-      c.loading = true;
-      Promise.all([api("GET", `/api/routers/${w.id}/probe?settings=1`), S.manager || api("GET", "/api/manager")])
-        .then(([p, m]) => { c.settings = p.settings; S.manager = m; c.loading = false; redraw(); })
-        .catch((e) => { c.loading = false; toast(e.message, true); });
-    }
-    return null;
-  }
-  const probe = c.settings;
-  let lp = (S.manager && S.manager.local_probe) || { ready: false, missing: "this manager is too old" };
-  if (c.downloading) lp = Object.assign({}, lp, { missing: "podkop-engine is downloading…", engine: { state: "downloading" } });
-  const save = async (patch) => {
-    try { c.settings = await api("PUT", `/api/routers/${w.id}/probe`, patch); toast("Saved"); } catch (e) { toast(e.message, true); }
-    redraw();
-  };
-  // podkop-engine for probes run on this server: the manager downloads it after it starts; this tries again
-  const getEngine = busyClick(async () => {
-    try {
-      let e = await api("POST", "/api/engine/download");
-      c.downloading = true; redraw();
-      while (e.state === "downloading") {
-        await new Promise((r) => setTimeout(r, 4000));
-        S.manager = await api("GET", "/api/manager"); e = S.manager.local_probe.engine;
-      }
-      if (e.state === "failed") toast(`podkop-engine was not downloaded: ${e.error}`, true); else toast("podkop-engine downloaded");
-    } catch (err) { toast(err.message, true); }
-    c.downloading = false; redraw();
-  });
-  return h("div", { class: "stack", style: "gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 10px" },
-    h("div", { class: "part-head" }, h("span", { style: "font-size: 13.5px; font-weight: 600" }, "Nightly probe"),
-      h("span", { class: "xs muted" }, "One run for all rules that take links from it. Saved right away")),
-    h("div", { class: "form-grid" },
-      h("label", { class: "lbl", for: `sched-${key}` }, "Every night at"),
-      h("div", { class: "ctl" }, h("input", { id: `sched-${key}`, type: "time", class: "input mid num", style: "width: 110px", value: probe.schedule || "",
-        onchange: (e) => save({ schedule: e.target.value }) }), h("span", { class: "help" }, "Empty: off"))),
-    h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!probe.auto_apply, onchange: (e) => save({ auto_apply: e.target.checked }) }),
-      h("span", {}, "Apply the result by itself")),
-    h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!probe.fix_fingerprint, onchange: (e) => save({ fix_fingerprint: e.target.checked }) }),
-      h("span", { class: "col" }, h("span", {}, "Use the chrome TLS fingerprint"),
-        h("span", {}, "For REALITY links with fp=qq, 360, ios, android or edge, which new servers reject"))),
-    h("div", { class: "form-grid" },
-      h("label", { class: "lbl", for: `testfrom-${key}` }, "Test servers"),
-      h("div", { class: "ctl" },
-        h("select", { id: `testfrom-${key}`, class: "input mid", style: "width: auto", onchange: (e) => save({ test_from: e.target.value }) },
-          h("option", { value: "router", selected: probe.test_from !== "manager" }, "On the router"),
-          h("option", { value: "manager", selected: probe.test_from === "manager", disabled: !lp.ready && probe.test_from !== "manager" },
-            "On this server, through the router")),
-        h("span", { class: "help" }, probe.test_from === "manager"
-          ? "The servers still see the router's address. Servers that use UDP (hysteria2, TUIC) are not tested."
-          : lp.ready ? "On this server the test is faster and leaves the router's processor free" : `Not possible here yet: ${lp.missing}`),
-        !lp.ready && /podkop-engine is (not downloaded|downloading)/.test(lp.missing || "")
-          ? h("button", { type: "button", class: "btn sm", disabled: c.downloading, onclick: getEngine },
-            lp.engine && lp.engine.state === "downloading" ? "Downloading podkop-engine…" : "Download podkop-engine, 13 MB") : null)),
-    probe.test_from === "manager" ? h("div", { class: "col", style: "gap: 8px" },
-      h("span", { class: "small" }, "The router must accept this server's forwarding key: Settings → Reinstall agent with \"Let this manager test servers through the router\" adds it, or add this line to the router's /etc/dropbear/authorized_keys. It lets this server open connections through the router and nothing else: no shell, no commands."),
-      h("div", { class: "row", style: "align-items: flex-start; flex-wrap: nowrap; padding: 10px 12px; border-radius: 6px; background: var(--chip)" },
-        h("code", { class: "grow", style: "font-size: 12px; line-height: 1.5; color: var(--text-2); word-break: break-all" }, lp.forward_line || lp.missing),
-        lp.forward_line ? h("button", { type: "button", class: "btn xs", onclick: async () => {
-          try { await navigator.clipboard.writeText(lp.forward_line); toast("Line copied"); } catch { toast("Select the line and copy it", true); }
-        } }, "Copy") : null),
-      h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", onclick: busyClick(async () => {
-        try { toast((await api("POST", `/api/routers/${w.id}/probe/check-forward`)).message); } catch (e) { toast(e.message, true); }
-      }) }, "Check the router"))) : null);
-}
-
 export function autoRuleEditor(w, s, rule) {
   const box = h("div", { class: "stack", style: "gap: 16px" });
   const ui = w.ui[`${s.name}:auto`] || (w.ui[`${s.name}:auto`] = { preview: null, loading: false });
@@ -687,7 +616,7 @@ export function autoRuleEditor(w, s, rule) {
     const matched = p ? p.matched : [], fb = p ? p.fallback : [];
     const run = (p && p.run) || {};
     const running = run.state === "running";
-    const sched = w.probeCfg && w.probeCfg.settings ? w.probeCfg.settings.schedule : p && p.schedule;
+    const sched = p && p.schedule;
     const eu = hasEurope(rule.countries);
     const chip = (text, label, without) => h("span", { class: "toggle", "aria-pressed": "true", style: "display: inline-flex; align-items: center; gap: 6px; padding: 0 4px 0 10px; height: 30px" },
       text, h("button", { type: "button", class: "btn icon", style: "width: 22px; height: 22px; color: inherit", "aria-label": `Remove ${label}`,
@@ -817,7 +746,7 @@ export function autoRuleEditor(w, s, rule) {
             `${plural(p.left_out.length, "server")}${rule.countries.length === 1 ? ` in ${countryName(rule.countries[0])}` : ""} left out, and why`),
           h("div", { style: "padding: 0 14px 12px" }, p.left_out.map((x) => h("div", { class: "row xs", style: "padding: 4px 0; flex-wrap: nowrap" },
             h("span", { style: "font-weight: 500; flex: none" }, `${flag(x.country)} ${x.name}`.trim()), h("span", { class: "muted" }, x.reason))))) : null),
-      nightlyProbeBlock(w, s.name, () => { if (box.isConnected) keepFocus(draw); }));
+      h("p", { class: "xs muted" }, "When the probe runs, and how: Nightly probe, at the bottom of ", h("a", { href: `#/r/${w.id}/usage` }, "Keys and usage"), "."));
   };
 
   draw();

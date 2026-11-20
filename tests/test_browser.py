@@ -427,6 +427,17 @@ def test_rule_servers_show_flags_and_sort_by_ping(tmp_path):
             page.locator(".servers").screenshot(path=str(tmp_path / "servers.png"))
             page.click(".servers table th button")
             assert rows() == picked and errors == [], errors
+            # the nightly probe is not on a rule's page: it has its card at the bottom of Keys and usage
+            assert page.locator("#probe-sched, [id^=sched-]").count() == 0
+            assert page.locator("a:has-text('Keys and usage')").count() >= 1
+            page.goto(f"{base}/#/r/1/usage")
+            page.wait_for_selector("#nightly-probe h2:has-text('Nightly probe')")
+            page.wait_for_selector("#probe-sched")
+            page.fill("#probe-sched", "03:30")
+            page.locator("#probe-sched").dispatch_event("change")
+            page.wait_for_selector("#nightly-probe :text('Every night at 03:30')")
+            assert db.probe_settings(1)["schedule"] == "03:30"
+            assert errors == [], errors
             browser.close()
     finally:
         srv.should_exit = True

@@ -286,6 +286,7 @@ export async function viewUsage(main, id) {
   } }, icon("refresh", 15), "Ask providers now");
 
   const addBtn = h("button", { type: "button", class: "btn primary", onclick: () => addKey() }, icon("plus", 15), "Add key");
+  const probeCard = nightlyProbeCard(id);         // kept across redraws: it loads and saves on its own
   const draw = () => {
     const rt = S.routers[id];
     const old = rt && rt.status && rt.status.agent.version.localeCompare("0.2.0", undefined, { numeric: true }) < 0;
@@ -296,12 +297,89 @@ export async function viewUsage(main, id) {
         h("span", { class: "grow" }, "podkop-agent on this router is too old to count traffic."), h("a", { class: "alink", href: "#/settings" }, "Reinstall agent")) : null,
       warnings(),
       keysCard(), history(), servers(),
-      h("p", { class: "small muted" }, "Provider numbers are read every 10 minutes; the split by rule and server is counted on the router."));
+      h("p", { class: "small muted" }, "Provider numbers are read every 10 minutes; the split by rule and server is counted on the router."),
+      probeCard);
   };
 
   await load();
   draw();
   S.view = { onUsage: (m) => { if (m.router_id === id && !document.querySelector(".modal-bg") && !page.querySelector("form :focus")) load().then(draw).catch(() => {}); } };
+}
+
+// The router's nightly probe: one run for every rule that takes links from it.
+// A card of its own at the bottom of Keys and usage; saved right away, not in the draft.
+export function nightlyProbeCard(id) {
+  const card = h("section", { class: "card pad", id: "nightly-probe", "aria-labelledby": "u-probe", style: "gap: 14px" },
+    h("h2", { id: "u-probe" }, "Nightly probe"), h("span", { class: "small muted" }, "…"));
+  const c = { settings: null, downloading: false };
+  const draw = () => {
+    if (!c.settings) return;
+    const probe = c.settings;
+    let lp = (S.manager && S.manager.local_probe) || { ready: false, missing: "this manager is too old" };
+    if (c.downloading) lp = Object.assign({}, lp, { missing: "podkop-engine is downloading…", engine: { state: "downloading" } });
+    const save = async (patch) => {
+      try { c.settings = await api("PUT", `/api/routers/${id}/probe`, patch); toast("Saved"); } catch (e) { toast(e.message, true); }
+      draw();
+    };
+    // podkop-engine for probes run on this server: the manager downloads it after it starts; this tries again
+    const getEngine = busyClick(async () => {
+      try {
+        let e = await api("POST", "/api/engine/download");
+        c.downloading = true; draw();
+        while (e.state === "downloading") {
+          await new Promise((r) => setTimeout(r, 4000));
+          S.manager = await api("GET", "/api/manager"); e = S.manager.local_probe.engine;
+        }
+        if (e.state === "failed") toast(`podkop-engine was not downloaded: ${e.error}`, true); else toast("podkop-engine downloaded");
+      } catch (err) { toast(err.message, true); }
+      c.downloading = false; draw();
+    });
+    const run = busyClick(async () => {
+      try { await api("POST", `/api/routers/${id}/probe/start`); toast("Probe started, it takes 2 to 10 minutes"); } catch (e) { toast(e.message, true); }
+    });
+    put(card,
+      h("div", { class: "row", style: "justify-content: space-between" },
+        h("div", { class: "col", style: "gap: 2px" }, h("h2", { id: "u-probe" }, "Nightly probe"),
+          h("span", { class: "small muted" }, `${probe.schedule ? `Every night at ${probe.schedule}${probe.auto_apply ? ", applies the result by itself" : ", the result waits for you"}` : "Off"}. `
+            + "One run tests your keys' servers for every rule that takes links from the probe. Saved right away.")),
+        h("button", { type: "button", class: "btn", onclick: run }, icon("probe", 14), "Run now")),
+      h("div", { class: "form-grid" },
+        h("label", { class: "lbl", for: "probe-sched" }, "Every night at"),
+        h("div", { class: "ctl" }, h("input", { id: "probe-sched", type: "time", class: "input mid num", style: "width: 110px", value: probe.schedule || "",
+          onchange: (e) => save({ schedule: e.target.value }) }), h("span", { class: "help" }, "Empty: off"))),
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!probe.auto_apply, onchange: (e) => save({ auto_apply: e.target.checked }) }),
+        h("span", {}, "Apply the result by itself")),
+      h("label", { class: "check" }, h("input", { type: "checkbox", checked: !!probe.fix_fingerprint, onchange: (e) => save({ fix_fingerprint: e.target.checked }) }),
+        h("span", { class: "col" }, h("span", {}, "Use the chrome TLS fingerprint"),
+          h("span", {}, "For REALITY links with fp=qq, 360, ios, android or edge, which new servers reject"))),
+      h("div", { class: "form-grid" },
+        h("label", { class: "lbl", for: "probe-testfrom" }, "Test servers"),
+        h("div", { class: "ctl" },
+          h("select", { id: "probe-testfrom", class: "input mid", style: "width: auto", onchange: (e) => save({ test_from: e.target.value }) },
+            h("option", { value: "router", selected: probe.test_from !== "manager" }, "On the router"),
+            h("option", { value: "manager", selected: probe.test_from === "manager", disabled: !lp.ready && probe.test_from !== "manager" },
+              "On this server, through the router")),
+          h("span", { class: "help" }, probe.test_from === "manager"
+            ? "The servers still see the router's address. Servers that use UDP (hysteria2, TUIC) are not tested."
+            : lp.ready ? "On this server the test is faster and leaves the router's processor free" : `Not possible here yet: ${lp.missing}`),
+          !lp.ready && /podkop-engine is (not downloaded|downloading)/.test(lp.missing || "")
+            ? h("button", { type: "button", class: "btn sm", disabled: c.downloading, onclick: getEngine },
+              lp.engine && lp.engine.state === "downloading" ? "Downloading podkop-engine…" : "Download podkop-engine, 13 MB") : null)),
+      probe.test_from === "manager" ? h("div", { class: "col", style: "gap: 8px" },
+        h("span", { class: "small" }, "The router must accept this server's forwarding key: Settings → Reinstall agent with \"Let this manager test servers through the router\" adds it, or add this line to the router's /etc/dropbear/authorized_keys. It lets this server open connections through the router and nothing else: no shell, no commands."),
+        h("div", { class: "row", style: "align-items: flex-start; flex-wrap: nowrap; padding: 10px 12px; border-radius: 6px; background: var(--chip)" },
+          h("code", { class: "grow", style: "font-size: 12px; line-height: 1.5; color: var(--text-2); word-break: break-all" }, lp.forward_line || lp.missing),
+          lp.forward_line ? h("button", { type: "button", class: "btn xs", onclick: async () => {
+            try { await navigator.clipboard.writeText(lp.forward_line); toast("Line copied"); } catch { toast("Select the line and copy it", true); }
+          } }, "Copy") : null),
+        h("div", { class: "row" }, h("button", { type: "button", class: "btn sm", onclick: busyClick(async () => {
+          try { toast((await api("POST", `/api/routers/${id}/probe/check-forward`)).message); } catch (e) { toast(e.message, true); }
+        }) }, "Check the router"))) : null);
+  };
+  Promise.all([api("GET", `/api/routers/${id}/probe?settings=1`), S.manager || api("GET", "/api/manager")])
+    .then(([p, m]) => { c.settings = p.settings; S.manager = m; draw(); })
+    .catch((e) => put(card, h("h2", { id: "u-probe" }, "Nightly probe"), h("span", { class: "small bad-text" }, e.message)));
+  return card;
 }
 
 // busyClick(fn): a click handler that ignores clicks while its work runs (the button is disabled meanwhile)
