@@ -800,6 +800,55 @@ def test_a_change_nobody_watches_that_is_not_applied_raises_an_alert(tmp_path):
     assert rt.alert is None
 
 
+def test_a_loaded_configs_zapret_first_is_turned_on_once_it_is_applied(tmp_path, monkeypatch):
+    from podkop_manager import zapret
+    db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
+    rt.status = {"fingerprint": "fp", "agent": {"capabilities": ["zapret"]}}
+    zap = {"main": {"args": ["--payload=tls_client_hello"], "url": "https://x.com/", "name": "f", "service": "twitter"}}
+    calls, installs = [], []
+    state = {"installed": None, "rules": {"kept": {"args": ["--a=1"], "url": "https://k/", "name": "k", "service": "", "n": 1}}}
+
+    async def call(name, *args, payload=None, **kw):
+        calls.append((name, args, payload))
+        if name == "job":
+            return {"state": "applied"}
+        if (name, args[:1]) == ("zapret", ("status",)):
+            return dict(state, arch="aarch64")
+        if (name, args[:1]) == ("zapret", ("set",)):
+            state["rules"] = payload["rules"]
+            return {"refused": []}
+        raise AssertionError(name)
+
+    async def install(agent, cache, machine):
+        installs.append(machine)
+        state["installed"] = "v1.0.7"
+
+    async def refresh(r):
+        pass
+    rt.agent.call, hub.refresh = call, refresh
+    monkeypatch.setattr(zapret, "install", install)
+    out = hub.load_config(rid, {"config": _cfg(["vless://u@b:443#b"]), "rules": {}, "zapret": zap})
+    assert db.get_setting(f"zapret_pending:{rid}") == zap and not calls       # nothing on the router before the apply
+
+    async def apply(cfg, job):
+        vid = db.add_version(rid, cfg, [], "", "fp", "web")
+        await hub._track_job(rt, vid, job)
+        await asyncio.gather(*hub.jobs)
+    asyncio.run(apply(out, "j1"))
+    assert installs == ["aarch64"] and db.get_setting(f"zapret_pending:{rid}") is None
+    assert state["rules"] == {"kept": {"args": ["--a=1"], "url": "https://k/", "name": "k", "service": ""}, **zap}
+    ev = db.q("SELECT type, data FROM events WHERE router_id = ? ORDER BY id DESC LIMIT 1", rid)[0]
+    assert ev["type"] == "zapret_on" and json.loads(ev["data"]) == {"rules": ["main"], "refused": [], "installed": True}
+    # another config without zapret: nothing pending; an agent without zapret: the event says why
+    hub.load_config(rid, {"config": _cfg(["vless://u@c:443#c"]), "rules": {}})
+    assert db.get_setting(f"zapret_pending:{rid}") is None
+    out = hub.load_config(rid, {"config": _cfg(["vless://u@d:443#d"]), "rules": {}, "zapret": zap})
+    rt.status = {"fingerprint": "fp", "agent": {"capabilities": []}}
+    asyncio.run(apply(out, "j2"))
+    ev = db.q("SELECT type, data FROM events WHERE router_id = ? ORDER BY id DESC LIMIT 1", rid)[0]
+    assert ev["type"] == "zapret_failed" and "update it" in json.loads(ev["data"])["message"]
+
+
 def test_cached_settings_and_database_copy(tmp_path):
     db, hub, rt, rid = _hub(tmp_path, _cfg(["vless://u@a:443#a"]))
     assert hub.cached_config(rt) is None                    # nothing read yet

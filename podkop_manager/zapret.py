@@ -168,6 +168,48 @@ def service_of(section: dict) -> str | None:
     return None
 
 
+INTERVALS = (15, 30, 60, 120, 300)
+
+
+def interval(db) -> int:
+    """Seconds between checks of a zapret rule's direct path: sing-box's
+    URLTest and the agent's own test use the same (Settings, all routers)."""
+    try:
+        v = int(db.get_setting("zapret_interval") or 30)
+    except (TypeError, ValueError):
+        v = 30
+    return v if v in INTERVALS else 30
+
+
+def check_rule(name: str, r) -> dict:
+    """One rule's zapret ({args, url, name, service}) as the router takes it;
+    raises ValueError naming the rule."""
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", str(name)) or not isinstance(r, dict):
+        raise ValueError(f"bad rule {name!r}")
+    args = r.get("args")
+    args = args.split() if isinstance(args, str) else args
+    url = str(r.get("url") or "")
+    if not isinstance(args, list) or not args or not all(isinstance(a, str) and ARG.fullmatch(a) for a in args):
+        raise ValueError(f"{name}: nfqws2 --options expected")
+    if not re.fullmatch(r"https?://[!-~]{1,290}", url):
+        raise ValueError(f"{name}: the test address must be an http(s) URL")
+    service = str(r.get("service") or "")
+    if service and service not in DEFAULTS["services"] and service != "other":
+        raise ValueError(f"{name}: unknown service {service!r}")
+    return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120], "service": service}
+
+
+def check_rules(rules, config: dict) -> dict:
+    """A config's zapret part: {rule: zapret} for its proxy rules only; raises ValueError."""
+    if not isinstance(rules, dict) or len(rules) > 30:
+        raise ValueError("zapret must be {rule: {args, url, name, service}}")
+    out = {k: check_rule(k, v) for k, v in rules.items()}
+    missing = sorted(set(out) - {r["name"] for r in rules_view(config)})
+    if missing:
+        raise ValueError(f"zapret is for proxy rules of this config only, not {', '.join(missing)}")
+    return out
+
+
 def rules_view(config: dict) -> list[dict]:
     """The rules zapret can serve: proxy rules, with their service."""
     out = []

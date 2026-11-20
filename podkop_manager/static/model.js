@@ -168,6 +168,9 @@ export const EVENT_TEXT = {
   vpn_up: (d) => `VPN is up again${d.address ? `, ${d.address}` : ""}`,
   zapret_servers: (d) => `${d.section}: zapret does not open its sites now, the rule uses its servers`,
   zapret_direct: (d) => `${d.section}: back on zapret (direct)`,
+  zapret_on: (d) => `${d.installed ? "zapret2 installed; " : ""}zapret first on ${(d.rules || []).join(", ") || "no rule"} (from the applied config)`
+    + ((d.refused || []).length ? `; not on ${d.refused.join(", ")}: kill switch or Protected` : ""),
+  zapret_failed: (d) => `zapret first was not turned on for ${(d.rules || []).join(", ")}: ${d.message || ""}`,
   vpn_restart: (d) => `VPN: gateway ${d.gateway} stopped answering, reconnecting`,
   strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
   strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
@@ -218,7 +221,7 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", fds_high: "bad", fds_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", zapret_servers: "warn", zapret_direct: "ok", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", fds_high: "bad", fds_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", zapret_servers: "warn", zapret_direct: "ok", zapret_on: "ok", zapret_failed: "bad", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",

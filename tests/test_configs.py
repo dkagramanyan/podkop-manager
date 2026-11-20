@@ -57,6 +57,24 @@ def test_export_and_import_keep_rules():
         configs.read(json.dumps(configs.to_file("x", cfg, {"nope": rule})))
 
 
+def test_a_config_file_carries_its_rules_zapret_first():
+    cfg = configs.check_config(configs.parse_uci(UCI))
+    zap = {"main": {"args": ["--payload=tls_client_hello", "--lua-desync=fake:blob=fake_default_tls"],
+                    "url": "https://www.instagram.com/", "name": "fake", "service": "meta"}}
+    text = json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", zap))
+    assert configs.read(text)["zapret"] == zap
+    # a file without it (older ones, podkop's own) has none; the key is left out when empty
+    assert configs.read(json.dumps(configs.to_file("x", cfg, {})))["zapret"] == {}
+    assert "zapret" not in configs.to_file("x", cfg, {}) and configs.read(UCI)["zapret"] == {}
+    for bad, msg in ((dict(zap, nope=zap["main"]), "proxy rules of this config only, not nope"),
+                     ({"main": dict(zap["main"], args=["--qnum=1 2"])}, "nfqws2 --options"),
+                     ({"main": dict(zap["main"], url="ftp://x")}, "http"),
+                     ({"main": dict(zap["main"], service="tiktok")}, "unknown service"),
+                     ([1], "zapret must be")):
+        with pytest.raises(ValueError, match=msg):
+            configs.read(json.dumps(dict(configs.to_file("x", cfg, {}), zapret=bad)))
+
+
 def test_backup_round_trip(tmp_path: Path):
     key = tmp_path / "id_ed25519"
     asyncssh.generate_private_key("ssh-ed25519").write_private_key(str(key))

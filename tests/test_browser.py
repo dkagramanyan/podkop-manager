@@ -4,6 +4,7 @@ page opens without a JavaScript error, with a router that is offline.
 Needs `pip install playwright && playwright install chromium`; skipped otherwise.
 """
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -548,6 +549,19 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             page.click("button:has-text('Expand all')")
             assert page.locator("details.panel").evaluate_all("ds => ds.every(d => d.open)")
             page.wait_for_selector("button:has-text('Collapse all')")
+            # a zapret file through Configs → Import file goes to this router, not to the saved configs
+            zf = tmp_path / "zapret.json"
+            zf.write_text(json.dumps({"format": "podkop-manager-zapret", "rules": {"github": {
+                "args": ["--payload=tls_client_hello"], "url": "https://github.com/", "name": "from a file", "service": "other"}}}))
+            page.goto(f"{base}/#/r/1/configs")
+            page.wait_for_selector("text=also takes a zapret file")
+            page.set_input_files("input[type=file]", str(zf))
+            page.wait_for_selector("text=Turn on zapret first on home?")
+            page.click("button:has-text('Turn on')")
+            page.wait_for_selector("text=zapret first on github")
+            assert sets[-1]["rules"]["github"] == {"args": ["--payload=tls_client_hello"], "url": "https://github.com/",
+                                                   "name": "from a file", "service": "other"}
+            assert page.locator("text=No saved configs").count() == 1
             # the strategy list lives in Settings
             page.goto(f"{base}/#/settings")
             page.wait_for_selector("textarea[aria-label='Zapret strategies']")

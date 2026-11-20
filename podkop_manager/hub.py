@@ -20,7 +20,7 @@ import time
 import urllib.request
 from pathlib import Path
 
-from . import backup, configs, notify, podkop, usage, reliability
+from . import backup, configs, notify, podkop, usage, reliability, zapret
 from .agent import AGENT_FILES, Agent, AgentError, check_forward, connection_support, require_connection_support
 from .db import DB
 
@@ -820,6 +820,8 @@ class Hub:
                 self.db.set_setting(f"rule_keys_base:{rt.id}", None)
                 self.db.set_setting(f"rule_links_base:{rt.id}", None)
                 rt.draft = None
+                if self.db.get_setting(f"zapret_pending:{rt.id}"):
+                    self.zapret_pending_now(rt)
         rt.wake.set()
         return data
 
@@ -1391,9 +1393,47 @@ class Hub:
                 self._event(rt, "stale_probe_not_used", {"message": "the last probe is older than a day: the file's "
                                                          "servers are kept; run the probe to pick new ones"})
         self.db.set_draft(rid, config, (rt.status or {}).get("fingerprint") or "")
+        # its zapret first: turned on once this draft is applied (the router needs the rules first)
+        self.db.set_setting(f"zapret_pending:{rid}", saved.get("zapret") or None)
         self.update_draft(rt)
         self.publish({"type": "router", "router": rt.snapshot()})
         return config
+
+    async def zapret_on(self, rt: RouterRuntime, rules: dict) -> dict:
+        """zapret first for these rules ({rule: {args, url, name, service}}),
+        zapret2 installed first if the router has none; its other zapret rules
+        stay. -> {rules, refused, installed}. Raises AgentError, ValueError
+        or OSError (the release could not be fetched)."""
+        if "zapret" not in ((((rt.status or {}).get("agent") or {}).get("capabilities")) or []):
+            raise AgentError("unsupported", "this router's podkop-agent has no zapret: update it (0.29 or later)")
+        st = await rt.agent.call("zapret", "status", timeout=30)
+        installed = not st.get("installed")
+        if installed:
+            await zapret.install(rt.agent, self.key.parent / "zapret", st.get("arch") or "")
+        cur = {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in (st.get("rules") or {}).items()}
+        out = await rt.agent.call("zapret", "set", payload={"rules": {**cur, **rules}, "interval": zapret.interval(self.db)}, timeout=120)
+        await self.refresh(rt)
+        return {"rules": sorted(rules), "refused": sorted(set(rules) & set((out or {}).get("refused") or [])), "installed": installed}
+
+    def zapret_pending_now(self, rt: RouterRuntime) -> None:
+        """The loaded config's zapret first, in the background (its event tells how it went)."""
+        task = asyncio.create_task(self._zapret_after_apply(rt))
+        self.jobs.add(task)
+        task.add_done_callback(self.jobs.discard)
+
+    async def _zapret_after_apply(self, rt: RouterRuntime) -> None:
+        """A loaded config's zapret first, now that its rules are on the router."""
+        rules = self.db.get_setting(f"zapret_pending:{rt.id}") or {}
+        self.db.set_setting(f"zapret_pending:{rt.id}", None)
+        if not rules:
+            return
+        try:
+            r = await self.zapret_on(rt, rules)
+        except (AgentError, ValueError, OSError) as e:
+            self._event(rt, "zapret_failed", {"rules": sorted(rules), "message": getattr(e, "message", "") or str(e)})
+            return
+        self._event(rt, "zapret_on", {"rules": [x for x in r["rules"] if x not in r["refused"]], "refused": r["refused"],
+                                      "installed": r["installed"]})
 
     # --- URLTest rules that take every server of their keys (keys chosen, no probe) -----------
     def link_keys(self, rid: int) -> list:

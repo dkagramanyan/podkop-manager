@@ -38,6 +38,7 @@ class FakeHub:
     auto_picks = Hub.auto_picks
     usage = Hub.usage
     load_config = Hub.load_config
+    zapret_on = Hub.zapret_on
     keep_rules = Hub.keep_rules
     restore_rules = Hub.restore_rules
     probe_config = Hub.probe_config

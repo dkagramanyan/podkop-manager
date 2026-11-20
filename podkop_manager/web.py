@@ -689,35 +689,20 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     # --- zapret (agent 0.29): the direct path first, the rule's servers as fallback ---
     zapret_runs: dict[int, dict] = {}       # router -> the running or last strategy search
-    ZAPRET_INTERVALS = (15, 30, 60, 120, 300)
+    ZAPRET_INTERVALS = zapret.INTERVALS
 
     def zapret_interval() -> int:
-        """Seconds between checks of a zapret rule's direct path: sing-box's
-        URLTest and the agent's own test use the same (Settings, all routers)."""
-        try:
-            v = int(db.get_setting("zapret_interval") or 30)
-        except (TypeError, ValueError):
-            v = 30
-        return v if v in ZAPRET_INTERVALS else 30
+        return zapret.interval(db)
 
     def zapret_strategies() -> list[dict]:
         text = db.get_setting("zapret_strategies")
         return zapret.parse_strategies(text) if text else zapret.default_strategies()
 
     def zapret_rule(name: str, r) -> dict:
-        if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name) or not isinstance(r, dict):
-            raise HTTPException(400, f"bad rule {name!r}")
-        args = r.get("args")
-        args = args.split() if isinstance(args, str) else args
-        url = str(r.get("url") or "")
-        if not isinstance(args, list) or not args or not all(isinstance(a, str) and zapret.ARG.fullmatch(a) for a in args):
-            raise HTTPException(400, f"{name}: nfqws2 --options expected")
-        if not re.fullmatch(r"https?://[!-~]{1,290}", url):
-            raise HTTPException(400, f"{name}: the test address must be an http(s) URL")
-        service = str(r.get("service") or "")
-        if service and service not in zapret.DEFAULTS["services"] and service != "other":
-            raise HTTPException(400, f"{name}: unknown service {service!r}")
-        return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120], "service": service}
+        try:
+            return zapret.check_rule(name, r)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from None
 
     def zapret_urls(name: str, urls) -> list[str]:
         if not isinstance(urls, list) or not urls or len(urls) > 10 or not all(
@@ -813,6 +798,32 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                                                             "interval": zapret_interval()}, timeout=120)
         await hub.refresh(rt)
         return out
+
+    @app.post("/api/routers/{rid}/zapret/import", dependencies=[api])
+    async def zapret_import(rid: int, body: dict):
+        """A zapret file ({"rules": {rule: {args, url, name, service}}}, from
+        Configs → Import file): those rules get zapret first with the file's
+        strategies, zapret2 is installed first if the router has none, and the
+        router's other zapret rules stay as they are. Rules the router does
+        not run yet are refused: apply the config first."""
+        rt = router_or_404(rid)
+        needs(rt, "zapret", "0.29")
+        rules = body.get("rules")
+        if not isinstance(rules, dict) or not rules or len(rules) > 20:
+            raise HTTPException(400, "the file has no zapret rules")
+        new = {k: zapret_rule(k, v) for k, v in rules.items()}
+        run = zapret_runs.get(rid)
+        if run and run.get("state") == "running":
+            raise HTTPException(409, "a strategy search is running on this router")
+        cfg = hub.cached_config(rt) or await hub.config(rid)
+        have = {r["name"] for r in zapret.rules_view(cfg["config"])}
+        missing = sorted(set(new) - have)
+        if missing:
+            raise HTTPException(400, f"{rt.row['name']} has no proxy rule {', '.join(missing)} yet: apply the config first")
+        try:
+            return await hub.zapret_on(rt, new)
+        except (ValueError, OSError) as e:
+            raise HTTPException(502, f"zapret2 could not be installed: {e}") from None
 
     @app.post("/api/routers/{rid}/zapret/search", dependencies=[api])
     async def zapret_search(rid: int, body: dict):
@@ -1213,7 +1224,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     def config_row(c: dict) -> dict:
         rules = [s for s in c["config"]["sections"] if s["type"] == "section"]
         return {k: c[k] for k in ("id", "name", "t", "source", "podkop")} | {
-            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"])}
+            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"]), "zapret": sorted(c.get("zapret") or {})}
 
     def config_name(name, fallback: str) -> str:
         name = str(name or "").strip()[:80]
@@ -1244,8 +1255,15 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         names = {s["name"] for s in config["sections"]}
         rules = {r["section"]: podkop.check_auto_rule(r) for r in db.auto_rules(rt.id) if r["section"] in names}
         version = (((rt.status or {}).get("podkop")) or {}).get("version") or ""
+        # the router's zapret first goes with its rules (a draft: the rules it has in both)
+        zap = {}
+        if "zapret" in ((((rt.status or {}).get("agent") or {}).get("capabilities")) or []):
+            with contextlib.suppress(AgentError, ValueError):
+                cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
+                have = {r["name"] for r in zapret.rules_view(config)}
+                zap = {k: zapret.check_rule(k, v) for k, v in cur.items() if k in have}
         cid = db.add_config(config_name(body.get("name"), f"{source} {time.strftime('%Y-%m-%d %H:%M')}"),
-                            config, rules, source, version)
+                            config, rules, source, version, zap)
         return config_row(config_or_404(cid))
 
     @app.post("/api/configs/import", dependencies=[api])
@@ -1257,13 +1275,13 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, str(e)) from None
         file = str(body.get("file") or "").strip()[:120]
         cid = db.add_config(config_name(body.get("name") or f["name"], file or "Imported"),
-                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"])
+                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"], f["zapret"])
         return config_row(config_or_404(cid))
 
     @app.get("/api/configs/{cid}/file", dependencies=[api])
     async def export_config(cid: int):
         c = config_or_404(cid)
-        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"])
+        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"], c.get("zapret"))
         fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", c["name"]).strip("-")[:60] or "config"
         return Response(json.dumps(data, ensure_ascii=False, indent=1), media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="podkop-{fname}.json"'})
@@ -1282,9 +1300,18 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     @app.post("/api/routers/{rid}/configs/{cid}/load", dependencies=[api])
     async def load_config(rid: int, cid: int):
-        """Puts a saved config into the router's draft, to review and apply."""
-        router_or_404(rid)
-        hub.load_config(rid, config_or_404(cid))
+        """Puts a saved config into the router's draft, to review and apply.
+        Its zapret first follows the apply; when the router runs these very
+        settings already (nothing to apply), it is turned on now."""
+        rt = router_or_404(rid)
+        saved = config_or_404(cid)
+        config = hub.load_config(rid, saved)
+        if saved.get("zapret"):
+            with contextlib.suppress(AgentError):
+                cur = hub.cached_config(rt) or await hub.config(rid)
+                if not podkop.diff(cur["config"], config):
+                    hub.zapret_pending_now(rt)
+                    return {"ok": True, "zapret": "now"}
         return {"ok": True}
 
     # --- the whole manager: backup and restore ---------------------------------------------

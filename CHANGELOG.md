@@ -3,6 +3,27 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.57.0 — 2026-11-20
+
+Zapret first travels with a config (manager 0.44.0; agent 0.29 or later).
+
+- **A config file carries its rules' zapret first**: an optional `zapret`
+  part, `{rule: {args, url, name, service}}`, next to podkop's sections and
+  the probe rules. Configs → Import file keeps it (the list says "zapret
+  first: youtube, meta, …"); Load into draft says which rules get it, and
+  once the draft is applied the manager installs zapret2 on the router if
+  it has none and turns zapret first on for those rules with the file's
+  strategies (the router's other zapret rules stay). When the router runs
+  those very settings already, nothing is to apply and it is turned on at
+  once. Either way an event says how it went ("zapret first on …", or why
+  not: an agent without zapret, the release not fetched).
+- **Save a router's config** takes its zapret first along (the rules of the
+  config only), so Download gives one file with both.
+- **A zapret file alone** (`"format": "podkop-manager-zapret"`, only the
+  rules) is taken by Import file too, and goes to that router at once.
+- Every zapret part is checked like the rule page's: nfqws2 options only,
+  an http(s) test address, a known service, and proxy rules of the config.
+
 ## 1.56.0 — 2026-11-20
 
 A rule's page in fewer screens (manager 0.43.0; the agent is unchanged).

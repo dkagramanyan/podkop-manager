@@ -222,6 +222,66 @@ def test_search_turns_zapret_on_with_the_fastest_working_strategy(tmp_path, monk
         assert c.put("/api/zapret/strategies", headers=H, json={"text": "mine | --lua-desync=fake"}).json() == {"count": 1, "custom": True, "interval": 30}
 
 
+def test_a_zapret_file_turns_its_rules_on_installs_zapret_first_and_keeps_the_others(tmp_path, monkeypatch):
+    monkeypatch.setattr(FakeHub, "cached_config", lambda self, r: None, raising=False)
+    installs = []
+
+    class Bare(ZapretAgent):
+        installed = None
+
+        async def call(self, *args, payload=None, timeout=60):
+            if args[:2] == ("zapret", "status"):
+                return {"installed": self.installed, "rules": self.rules, "using": {}, "refused": [], "arch": "aarch64"}
+            if args[:2] == ("zapret", "set"):
+                self.rules = payload["rules"]
+                return {"running": list(self.rules), "refused": []}
+            return await super().call(*args, payload=payload, timeout=timeout)
+
+    async def install(agent, cache, machine):
+        installs.append(machine)
+        agent.installed = "v1.0.7"
+        return {}
+
+    monkeypatch.setattr(zapret, "install", install)
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        agent = Bare()
+        agent.rules = {"other": {"args": ["--a=1"], "url": "https://o.example/", "name": "kept", "service": "", "n": 1}}
+        monkeypatch.setattr(FakeRouter, "agent", agent)
+        monkeypatch.setattr(FakeRouter, "status", {"agent": {"capabilities": ["zapret"]}})
+        rule = {"args": ["--payload=tls_client_hello"], "url": "https://www.youtube.com/generate_204", "name": "fake md5", "service": "youtube"}
+        # a rule the router does not run yet: nothing happens
+        r = c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": rule, "meta": rule}})
+        assert r.status_code == 400 and "meta" in r.json()["detail"] and "apply the config first" in r.json()["detail"]
+        assert not installs and "main" not in agent.rules
+        assert c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": dict(rule, args=["rm"])}}).status_code == 400
+        assert c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {}}).status_code == 400
+        r = c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": rule}})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"rules": ["main"], "refused": [], "installed": True} and installs == ["aarch64"]
+        assert agent.rules == {"other": {"args": ["--a=1"], "url": "https://o.example/", "name": "kept", "service": ""}, "main": rule}
+        # installed now: not again
+        assert c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": rule}}).json()["installed"] is False
+        assert installs == ["aarch64"]
+
+
+def test_a_saved_config_takes_the_routers_zapret_first_and_its_file_brings_it_back(tmp_path, monkeypatch):
+    monkeypatch.setattr(FakeHub, "cached_config", lambda self, r: None, raising=False)
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        agent = ZapretAgent()
+        agent.rules = {"main": {"args": ["--b=1"], "url": "https://x.com/", "name": "fast", "service": "twitter", "n": 1},
+                       "gone": {"args": ["--b=1"], "url": "https://x.com/", "name": "old", "service": "", "n": 2}}
+        monkeypatch.setattr(FakeRouter, "agent", agent)
+        monkeypatch.setattr(FakeRouter, "status", {"fingerprint": "fp1", "podkop": {"version": "0.7.24"}, "agent": {"capabilities": ["zapret"]}})
+        row = c.post("/api/configs", headers=H, json={"router_id": 1}).json()
+        assert row["zapret"] == ["main"]                        # a rule the config does not have is left out
+        text = c.get(f"/api/configs/{row['id']}/file", headers=H).text
+        assert json.loads(text)["zapret"] == {"main": {"args": ["--b=1"], "url": "https://x.com/", "name": "fast", "service": "twitter"}}
+        again = c.post("/api/configs/import", headers=H, json={"text": text, "file": "x.json"}).json()
+        assert again["zapret"] == ["main"]
+
+
 SET_STUBS = '''
 safe_mode() { return 1; }
 zapret_installed() { return 1; }

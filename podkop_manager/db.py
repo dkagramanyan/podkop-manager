@@ -110,6 +110,7 @@ COLUMNS = [
     ("auto_rules", "heal_fallback", "TEXT NOT NULL DEFAULT ''"),     # 1.40.0: self-heal's wider countries
     ("auto_rules", "unlock", "TEXT NOT NULL DEFAULT '[]'"),          # 1.54.0: services the probe asks through each server
     ("versions", "due", "REAL"),                 # a change scheduled for this time
+    ("configs", "zapret", "TEXT NOT NULL DEFAULT '{}'"),             # 1.57.0: zapret first of its rules
     ("versions", "base_config", "TEXT"),         # ... and the router's settings it was made on
 ]
 
@@ -547,15 +548,15 @@ class DB:
     def configs(self) -> list[dict]:
         rows = self.q("SELECT * FROM configs ORDER BY id DESC")
         for r in rows:
-            r["config"], r["rules"] = json.loads(r["config"]), json.loads(r["rules"])
+            r["config"], r["rules"], r["zapret"] = json.loads(r["config"]), json.loads(r["rules"]), json.loads(r.get("zapret") or "{}")
         return rows
 
     def saved_config(self, cid: int) -> dict | None:
         return next((r for r in self.configs() if r["id"] == cid), None)
 
-    def add_config(self, name: str, config: dict, rules: dict, source: str, podkop: str = "") -> int:
-        return self.x("INSERT INTO configs (name, t, source, podkop, config, rules) VALUES (?, ?, ?, ?, ?, ?)",
-                      name, time.time(), source, podkop, json.dumps(config), json.dumps(rules))
+    def add_config(self, name: str, config: dict, rules: dict, source: str, podkop: str = "", zapret: dict | None = None) -> int:
+        return self.x("INSERT INTO configs (name, t, source, podkop, config, rules, zapret) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      name, time.time(), source, podkop, json.dumps(config), json.dumps(rules), json.dumps(zapret or {}))
 
     def rename_config(self, cid: int, name: str) -> None:
         self.x("UPDATE configs SET name = ? WHERE id = ?", name, cid)

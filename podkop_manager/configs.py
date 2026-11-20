@@ -1,6 +1,6 @@
 """Config files: podkop's sections plus the rules that take servers from the
-probe, as a JSON file the manager exports and imports. Import also reads
-podkop's own /etc/config/podkop (UCI)."""
+probe and the rules' zapret first, as a JSON file the manager exports and
+imports. Import also reads podkop's own /etc/config/podkop (UCI)."""
 
 from __future__ import annotations
 
@@ -8,16 +8,19 @@ import json
 import re
 import time
 
+from . import zapret as zapret_mod
 from .podkop import INTERNAL_OPTIONS, check_auto_rule
 
 FORMAT = "podkop-manager-config"
 
 
-def to_file(name: str, config: dict, rules: dict, podkop_version: str = "") -> dict:
-    """The exported file: {format, name, saved, podkop, config, rules}."""
-    return {"format": FORMAT, "version": 1, "name": name,
-            "saved": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "podkop": podkop_version,
-            "config": config, "rules": rules}
+def to_file(name: str, config: dict, rules: dict, podkop_version: str = "", zapret: dict | None = None) -> dict:
+    """The exported file: {format, name, saved, podkop, config, rules[, zapret]}:
+    zapret is {rule: {args, url, name, service}}, the rules with zapret first."""
+    out = {"format": FORMAT, "version": 1, "name": name,
+           "saved": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "podkop": podkop_version,
+           "config": config, "rules": rules}
+    return out | ({"zapret": zapret} if zapret else {})
 
 
 def _uci_statements(text: str):
@@ -110,8 +113,8 @@ def check_config(config: dict) -> dict:
 
 
 def read(text: str) -> dict:
-    """An imported file -> {"name", "config", "rules", "podkop"}: our JSON
-    export or podkop's UCI file. Raises ValueError."""
+    """An imported file -> {"name", "config", "rules", "podkop", "zapret"}: our
+    JSON export or podkop's UCI file. Raises ValueError."""
     text = text.lstrip("\ufeff")       # a byte order mark from some editors
     stripped = text.lstrip()
     if stripped.startswith("{"):
@@ -127,5 +130,6 @@ def read(text: str) -> dict:
         if not isinstance(rules, dict) or set(rules) - names:
             raise ValueError("rules must be for sections of this config")
         return {"name": str(data.get("name") or ""), "config": config, "podkop": str(data.get("podkop") or ""),
-                "rules": {k: check_auto_rule(v) for k, v in rules.items()}}
-    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": ""}
+                "rules": {k: check_auto_rule(v) for k, v in rules.items()},
+                "zapret": zapret_mod.check_rules(data.get("zapret") or {}, config)}
+    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": "", "zapret": {}}
