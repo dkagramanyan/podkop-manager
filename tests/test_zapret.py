@@ -78,8 +78,13 @@ def test_filter_puts_zapret_first_and_the_rules_servers_behind(tmp_path):
     assert g["type"] == "urltest" and g["outbounds"] == ["meta-zapret-direct"] and g["fallbacks"] == ["meta-out"]
     assert g["url"] == "https://www.instagram.com/"
     assert tags["youtube-zapret-direct"]["routing_mark"] == 0x08000002
-    outs = [r["outbound"] for r in out["route"]["rules"]]
-    assert outs == ["youtube-zapret-out", "meta-zapret-out", "main-out"]
+    rules = out["route"]["rules"]
+    assert [r["outbound"] for r in rules] == ["youtube-zapret-out", "youtube-zapret-out", "youtube-out",
+                                              "meta-zapret-out", "meta-zapret-out", "meta-out", "main-out"]
+    # only the web goes to zapret; the rest of what the rule takes stays on its servers
+    assert rules[3] == dict(SB["route"]["rules"][1], network=["tcp"], port=[80, 443], protocol=["tls", "http"], outbound="meta-zapret-out")
+    assert rules[4] == dict(SB["route"]["rules"][1], network=["udp"], port=[443], outbound="meta-zapret-out")
+    assert rules[5] == SB["route"]["rules"][1]
     # run again on its own output: the same config (health_on reads the live one)
     (tmp_path / "again.json").write_text(json.dumps(out))
     assert _filter(tmp_path, "again.json") == out
@@ -269,3 +274,12 @@ def test_where_does_it_go_names_the_rule_and_says_zapret(tmp_path, monkeypatch):
             rt.proxies = {"groups": [{"name": "meta-zapret-out", "now": now}], "servers": []}
             rule = c.post("/api/routers/1/route", headers=H, json={"target": "instagram.com"}).json()["rule"]
             assert rule["section"] == "meta" and rule["by"] == "domains" and rule["zapret"] is want
+
+
+def test_a_route_rule_with_its_own_ports_stays_on_the_servers(tmp_path):
+    _setup(tmp_path)
+    sb = json.loads(json.dumps(SB))
+    sb["route"]["rules"][1]["port"] = [5222]
+    (tmp_path / "in.json").write_text(json.dumps(sb))
+    out = _filter(tmp_path)
+    assert [r["outbound"] for r in out["route"]["rules"] if r["outbound"].startswith("meta")] == ["meta-out"]

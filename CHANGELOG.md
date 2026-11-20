@@ -11,14 +11,18 @@ zapret2 in front of a rule's servers (manager 0.42.0, agent 0.29.0).
   latest release (checked against its sha256sum.txt, the router's CPU only,
   about 0.4 MB of flash in /etc/podkop-zapret). zapret (the first version)
   is not used: it is no longer developed.
-- **A zapret rule goes out direct first**: sing-box gets a direct outbound
-  with the rule's own mark and a URLTest of it whose fallback is the rule's
-  usual servers; when the rule's check address fails through zapret, the
-  rule uses its servers until it passes again (on openwrt-reserv: servers
-  after 41 s, back after 46 s). nfqws2 sees only the first packets of those
-  connections; they then carry podkop's own mark, so addresses in podkop's
-  subnet lists don't loop back into sing-box. QUIC is refused on the direct
-  path (apps fall back to TCP). Kill-switch and protected rules are left alone.
+- **A zapret rule's web traffic goes out direct first**: sing-box gets a
+  direct outbound with the rule's own mark and a URLTest of it whose
+  fallback is the rule's usual servers; TCP 80/443 sniffed as TLS or HTTP
+  (and QUIC, which is refused there so apps use TCP) goes to it, everything
+  else the rule takes (other ports, other UDP: WhatsApp chat and calls,
+  Discord voice) stays on the servers. When the rule's check address fails
+  through zapret, the rule uses its servers until it passes again (on
+  openwrt-reserv: servers after 41 s, back after 46 s). nfqws2 sees only the
+  first packets of those connections; they then carry podkop's own mark, so
+  addresses in podkop's subnet lists don't loop back into sing-box. After a
+  podkop restart the daemon puts it back. Kill-switch and protected rules
+  are left alone.
 - **Strategy search** ("Find strategies", "Find and turn on"): the router
   tries each address without zapret, then each strategy of the list with a
   fresh nfqws2, and keeps the fastest of the first three that open every

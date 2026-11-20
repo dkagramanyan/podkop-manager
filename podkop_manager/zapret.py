@@ -47,21 +47,28 @@ def _get(url: str, timeout: float = 120) -> bytes:
 
 
 def release(cache: Path) -> tuple[str, Path]:
-    """(tag, tarball) of the latest release, downloaded once and checked."""
-    repo, name = REPO, NAME
-    tag = json.loads(_get(f"https://api.github.com/repos/{repo}/releases/latest", 30))["tag_name"]
+    """(tag, tarball) of the latest release, downloaded once. The tarball is
+    checked against the SHA-256 GitHub gives for the asset; the release's own
+    sha256sum.txt (which lists the files inside) is kept next to it for
+    payload() to check nfqws2."""
+    rel = json.loads(_get(f"https://api.github.com/repos/{REPO}/releases/latest", 30))
+    tag = rel["tag_name"]
     if not re.fullmatch(r"v[0-9][0-9A-Za-z.-]*", tag):
         raise ValueError(f"unexpected release tag {tag!r}")
-    file = f"{name}-{tag}-openwrt-embedded.tar.gz"
+    file = f"{NAME}-{tag}-openwrt-embedded.tar.gz"
     dest = cache / file
     if not dest.exists():
-        base = f"https://github.com/{repo}/releases/download/{tag}/"
-        sums = _get(base + "sha256sum.txt", 30).decode()
-        want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[-1:] == [file]), None)
+        asset = next((a for a in rel.get("assets") or [] if a.get("name") == file), None)
+        want = str((asset or {}).get("digest") or "")
+        if not want.startswith("sha256:"):
+            raise ValueError(f"{file}: the release gives no SHA-256 for it")
+        base = f"https://github.com/{REPO}/releases/download/{tag}/"
         data = _get(base + file)
-        if not want or hashlib.sha256(data).hexdigest() != want:
-            raise ValueError(f"{file}: checksum does not match the release's sha256sum.txt")
+        if hashlib.sha256(data).hexdigest() != want.removeprefix("sha256:"):
+            raise ValueError(f"{file}: checksum does not match the release's")
+        sums = _get(base + "sha256sum.txt", 30)
         cache.mkdir(parents=True, exist_ok=True)
+        (cache / f"{file}.sha256sum.txt").write_bytes(sums)
         tmp = dest.with_suffix(".new")
         tmp.write_bytes(data)
         tmp.replace(dest)
@@ -71,6 +78,8 @@ def release(cache: Path) -> tuple[str, Path]:
 def payload(tag: str, path: Path, arch: str) -> dict:
     """The agent's "zapret install" input for one binaries/ folder."""
     files = {}
+    sums_file = path.with_name(path.name + ".sha256sum.txt")
+    sums = sums_file.read_text() if sums_file.exists() else ""
     with tarfile.open(path, "r:gz") as tf:
         for m in tf.getmembers():
             if not m.isfile():
@@ -85,7 +94,12 @@ def payload(tag: str, path: Path, arch: str) -> dict:
                 key = "fake/" + parts[-1]
             else:
                 continue
-            files[key] = base64.b64encode(tf.extractfile(m).read()).decode()
+            data = tf.extractfile(m).read()
+            if key == "nfqws2" and sums:
+                want = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[-1:] == [m.name]), None)
+                if want != hashlib.sha256(data).hexdigest():
+                    raise ValueError(f"{m.name}: not the file the release's sha256sum.txt lists")
+            files[key] = base64.b64encode(data).decode()
     return {"files": files, "version": {"nfqws2": tag} if "nfqws2" in files else {}}
 
 

@@ -1676,20 +1676,28 @@ zapret_init() {
   "$ZAPRET_INIT" enabled 2>/dev/null || "$ZAPRET_INIT" enable
 }
 
-# zapret_filter <sing-box config> <out>: the zapret rules' outbounds and route
-# rules (what an earlier round added goes first, so it can run again on its
-# own output); kill-switch and protected rules are left as they are
+# zapret_filter <sing-box config> <out>: the zapret rules' outbounds, and in
+# front of each of their route rules two copies of it for the web only (TCP
+# 80/443 sniffed as TLS or HTTP, and QUIC, which the nft table refuses so
+# apps use TCP) that send to the zapret group; everything else the rule
+# takes stays on its servers (zapret changes web connections only). A route
+# rule that already names ports, networks or protocols is left alone. What
+# an earlier round added goes first, so it can run again on its own output;
+# kill-switch and protected rules are left as they are.
 ZAPRET_JQ='
   def strip: .outbounds |= map(select((.tag // "") | (endswith("-zapret-out") or endswith("-zapret-direct")) | not))
-    | if (.route.rules | type) == "array" then .route.rules |= map(
-        if ((.outbound // "") | endswith("-zapret-out")) then .outbound = (.outbound[:-11] + "-out") else . end) else . end;
+    | if (.route.rules | type) == "array" then .route.rules |= map(select((.outbound // "") | endswith("-zapret-out") | not)) else . end;
   strip | [.outbounds[]?.tag] as $tags
   | reduce ($z | to_entries[] | select(.key as $k | ($skip | index($k) | not) and ($tags | index($k + "-out")))) as $r (.;
-      .outbounds += [{type: "direct", tag: ($r.key + "-zapret-direct"), routing_mark: ($base + $r.value.n)},
-                     {type: "urltest", tag: ($r.key + "-zapret-out"), outbounds: [$r.key + "-zapret-direct"],
-                      fallbacks: [$r.key + "-out"], url: $r.value.url, interval: "1m", interrupt_exist_connections: true}]
-      | if (.route.rules | type) == "array" then .route.rules |= map(
-          if .outbound == ($r.key + "-out") then .outbound = ($r.key + "-zapret-out") else . end) else . end)'
+      ($r.key + "-zapret-out") as $g
+      | .outbounds += [{type: "direct", tag: ($r.key + "-zapret-direct"), routing_mark: ($base + $r.value.n)},
+                       {type: "urltest", tag: $g, outbounds: [$r.key + "-zapret-direct"],
+                        fallbacks: [$r.key + "-out"], url: $r.value.url, interval: "1m", interrupt_exist_connections: true}]
+      | if (.route.rules | type) == "array" then .route.rules |= [.[]
+          | if .outbound == ($r.key + "-out") and .network == null and .port == null and .port_range == null and .protocol == null
+            then (. + {network: ["tcp"], port: [80, 443], protocol: ["tls", "http"], outbound: $g}),
+                 (. + {network: ["udp"], port: [443], outbound: $g}), .
+            else . end] else . end)'
 zapret_skip_json() { cat "$ETC/strict" "$ETC/protected" 2>/dev/null | jq -Rsc 'split("\n") | map(select(. != ""))'; }
 zapret_filter() {
   _zz='{}'
