@@ -10,6 +10,10 @@ export const countryName = (cc) => {
   try { return new Intl.DisplayNames(["en"], { type: "region" }).of(cc); } catch { return cc; }
 };
 
+// "LT" -> the flag of Lithuania (two regional indicator letters); "" for anything else
+export const flag = (cc) => (/^[A-Z]{2}$/.test(cc || "") && cc !== "EU"
+  ? String.fromCodePoint(...[...cc].map((c) => 0x1F1E6 + c.charCodeAt(0) - 65)) : "");
+
 // podkop-probe's "europe" (EUROPE in router/probe.sh)
 export const EUROPE = ("EU AD AL AT BA BE BG CH CY CZ DE DK EE ES FI FR GB GR HR HU IE IS IT LI LT LU LV MC MD ME MK MT NL NO PL PT RO RS "
   + "SE SI SK SM UA VA XK").split(" ");

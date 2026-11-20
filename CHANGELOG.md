@@ -3,6 +3,15 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## Manager 0.41.1 — 2026-11-20
+
+Only the manager (no new router files, so no release of its own).
+
+- **A rule's servers from the probe** ("Matches now"): each server's exit
+  country with its flag, and a click on "Median" sorts the table by ping
+  (another click puts back the picked order, the one podkop gets). The
+  servers left out show their flag too.
+
 ## 1.54.0 — 2026-11-19
 
 Devices, "where does it go", things worth a look, services in the probe, a

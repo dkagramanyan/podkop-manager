@@ -7,7 +7,7 @@ import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
-import { EUROPE, busyClick, countriesText, countryName, hasEurope } from "./usage.js";
+import { EUROPE, busyClick, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
 
@@ -749,10 +749,18 @@ export function autoRuleEditor(w, s, rule) {
         p && !p.has_links ? h("p", { class: "empty", style: "border-top: 1px solid var(--line-soft)" },
           "The last probe run has no server links (podkop-probe before 1.12 does not save them). Run the probe again to fill this rule.") : null,
         matched.length || fb.length ? h("div", { class: "scroll-x" }, h("table", {},
-          h("tr", {}, h("th", { scope: "col" }, "Server"), h("th", { scope: "col" }, "Protocol"), h("th", { scope: "col" }, "Exit IP"),
-            h("th", { scope: "col", class: "r" }, "Median"), h("th", { scope: "col", class: "r" }, "Mbit/s")),
-          [...matched.map((m) => [m, false]), ...fb.map((m) => [m, true])].map(([m, isFb]) => h("tr", {},
+          h("tr", {}, h("th", { scope: "col" }, "Server"), h("th", { scope: "col" }, "Exit"), h("th", { scope: "col" }, "Protocol"), h("th", { scope: "col" }, "Exit IP"),
+            // a click sorts by ping; another click puts the picked order back (the order podkop gets)
+            h("th", { scope: "col", class: "r", "aria-sort": ui.byPing ? "ascending" : "none" },
+              h("button", { type: "button", class: "alink", style: "font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer", title: ui.byPing ? "Sorted by ping. Click for the picked order" : "In the picked order. Click to sort by ping",
+                onclick: () => { ui.byPing = !ui.byPing; draw(); } }, `Median${ui.byPing ? " ↑" : ""}`)),
+            h("th", { scope: "col", class: "r" }, "Mbit/s")),
+          (ui.byPing ? [...matched.map((m) => [m, false]), ...fb.map((m) => [m, true])]
+            .sort((a, b) => (parseFloat(a[0].median) || 1e9) - (parseFloat(b[0].median) || 1e9))
+            : [...matched.map((m) => [m, false]), ...fb.map((m) => [m, true])]).map(([m, isFb]) => h("tr", {},
             h("td", {}, m.name, isFb ? h("span", { class: "xs muted" }, " fallback") : null),
+            h("td", { class: "nowrap", title: /^[A-Z]{2}$/.test(m.country || "") ? countryName(m.country) : null },
+              /^[A-Z]{2}$/.test(m.country || "") ? `${flag(m.country)} ${m.country}` : "–"),
             h("td", { class: "mono-cell" }, m.protocol), h("td", { class: "mono-cell", style: "color: var(--text-2)" }, m.exit_ip || "–"),
             h("td", { class: "r num" }, Number.isFinite(parseFloat(m.median)) ? `${parseFloat(m.median).toFixed(2)} s` : "–"),
             h("td", { class: "r num" }, m.mbit && m.mbit !== "-" ? Math.round(+m.mbit) : "–"))))) : null,
@@ -767,7 +775,7 @@ export function autoRuleEditor(w, s, rule) {
           h("summary", { style: "padding: 10px 14px; font-size: 13px; font-weight: 500" }, icon("right", 14, { width: 1.6, class: "chev" }),
             `${plural(p.left_out.length, "server")}${rule.countries.length === 1 ? ` in ${countryName(rule.countries[0])}` : ""} left out, and why`),
           h("div", { style: "padding: 0 14px 12px" }, p.left_out.map((x) => h("div", { class: "row xs", style: "padding: 4px 0; flex-wrap: nowrap" },
-            h("span", { style: "font-weight: 500; flex: none" }, x.name), h("span", { class: "muted" }, x.reason))))) : null),
+            h("span", { style: "font-weight: 500; flex: none" }, `${flag(x.country)} ${x.name}`.trim()), h("span", { class: "muted" }, x.reason))))) : null),
       nightlyProbeBlock(w, s.name, () => { if (box.isConnected) keepFocus(draw); }));
   };
 

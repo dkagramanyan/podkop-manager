@@ -357,3 +357,75 @@ def test_devices_page_and_where_does_it_go(tmp_path):
     finally:
         srv.should_exit = True
         t.join(timeout=10)
+
+
+def test_rule_servers_show_flags_and_sort_by_ping(tmp_path):
+    import copy
+    import uvicorn
+    from playwright.sync_api import sync_playwright
+    from test_podkop import ROWS
+
+    class AutoAgent(OnlineAgent):
+        config = copy.deepcopy(OnlineAgent.config)
+        config["sections"][1]["options"] = {"connection_type": "proxy", "proxy_config_type": "urltest",
+                                            "urltest_proxy_links": ["vless://a@h:1#A"]}
+
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "status":
+                st = await super().call(name)
+                st["protected"], st["safe_mode"] = [], {"on": False}
+                return st
+            return await super().call(name, *args, payload=payload, **kwargs)
+
+    class AutoHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = AutoAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    from podkop_manager import podkop
+    db.set_auto_rule(1, "main", podkop.check_auto_rule({"countries": ["PL"], "top": 2, "fallback": 1}))
+    db.finish_probe_run(db.add_probe_run(1, "manual"), "done", {"finished": "2026-10-17T21:00:00Z", "rows": ROWS})
+    app = create_app(db, AutoHub(db, tmp_path / "id_ed25519", ROOT), "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page(viewport={"width": 1500, "height": 1400})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/rules/main")
+            page.wait_for_selector("text=Matches now: 3 servers")
+            rows = lambda: page.locator(".servers table tr td:first-child").all_inner_texts()      # noqa: E731
+            picked = rows()
+            assert "\U0001F1F5\U0001F1F1 PL" in page.locator(".servers table").inner_text()      # the flag of Poland
+            page.click(".servers table th button")
+            medians = [float(x.split()[0]) for x in page.locator(".servers table tr td:nth-child(5)").all_inner_texts()]
+            assert medians == sorted(medians) and sorted(rows()) == sorted(picked)
+            page.locator(".servers").screenshot(path=str(tmp_path / "servers.png"))
+            page.click(".servers table th button")
+            assert rows() == picked and errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)
