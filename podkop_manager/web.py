@@ -689,6 +689,16 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     # --- zapret (agent 0.29): the direct path first, the rule's servers as fallback ---
     zapret_runs: dict[int, dict] = {}       # router -> the running or last strategy search
+    ZAPRET_INTERVALS = (15, 30, 60, 120, 300)
+
+    def zapret_interval() -> int:
+        """Seconds between checks of a zapret rule's direct path: sing-box's
+        URLTest and the agent's own test use the same (Settings, all routers)."""
+        try:
+            v = int(db.get_setting("zapret_interval") or 30)
+        except (TypeError, ValueError):
+            v = 30
+        return v if v in ZAPRET_INTERVALS else 30
 
     def zapret_strategies() -> list[dict]:
         text = db.get_setting("zapret_strategies")
@@ -728,17 +738,42 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 "services": {k: {f: v.get(f) for f in ("urls", "test", "note")} for k, v in zapret.DEFAULTS["services"].items()},
                 "strategies": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
                 "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
+                "interval": st.get("interval") or zapret_interval(),
                 "run": {k: v for k, v in run.items() if k != "task"} if run else None}
 
     @app.get("/api/zapret/strategies", dependencies=[api])
     async def zapret_strategies_get():
         return {"text": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
-                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies())}
+                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
+                "interval": zapret_interval(), "intervals": list(ZAPRET_INTERVALS)}
 
     @app.put("/api/zapret/strategies", dependencies=[api])
     async def zapret_strategies_set(body: dict):
         """The nfqws2 strategies every search tries, one per line ("name |
         --options"); empty text goes back to the defaults."""
+        if "interval" in body:
+            try:
+                iv = int(body["interval"])
+            except (TypeError, ValueError):
+                iv = 0
+            if iv not in ZAPRET_INTERVALS:
+                raise HTTPException(400, f"interval: one of {', '.join(map(str, ZAPRET_INTERVALS))} seconds")
+            db.set_setting("zapret_interval", iv)
+            # routers with zapret rules take it now (one that is offline gets it with its next change)
+            told, missed = [], []
+            for rt in list(hub.routers.values()):
+                if "zapret" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
+                    continue
+                try:
+                    cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
+                    if cur:
+                        await rt.agent.call("zapret", "set", payload={"interval": iv, "rules": {
+                            k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in cur.items()}}, timeout=120)
+                        told.append(rt.row["name"])
+                except AgentError as e:
+                    missed.append(f"{rt.row['name']}: {e.message}")
+            if "text" not in body:
+                return {"interval": iv, "routers": told, "missed": missed}
         text = str(body.get("text") or "").strip()
         if text:
             try:
@@ -748,7 +783,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             if not 0 < n <= 200:
                 raise HTTPException(400, "1 to 200 strategies expected")
         db.set_setting("zapret_strategies", text or None)
-        return {"count": len(zapret_strategies()), "custom": bool(text)}
+        return {"count": len(zapret_strategies()), "custom": bool(text), "interval": zapret_interval()}
 
     @app.post("/api/routers/{rid}/zapret/install", dependencies=[api])
     async def zapret_install(rid: int):
@@ -774,7 +809,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         run = zapret_runs.get(rid)
         if run and run.get("state") == "running":
             raise HTTPException(409, "a strategy search is running on this router")
-        out = await rt.agent.call("zapret", "set", payload={"rules": {k: zapret_rule(k, v) for k, v in rules.items()}}, timeout=120)
+        out = await rt.agent.call("zapret", "set", payload={"rules": {k: zapret_rule(k, v) for k, v in rules.items()},
+                                                            "interval": zapret_interval()}, timeout=120)
         await hub.refresh(rt)
         return out
 
@@ -820,7 +856,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 new = await zapret.auto(rt.agent, rules, strategies, cur, state)
                 if apply and new != cur:
                     state["now"] = "turning zapret on"
-                    await rt.agent.call("zapret", "set", payload={"rules": new}, timeout=120)
+                    await rt.agent.call("zapret", "set", payload={"rules": new, "interval": zapret_interval()}, timeout=120)
                     await hub.refresh(rt)
                 state["state"] = "done"
             except Exception as e:        # noqa: BLE001 - shown on the page

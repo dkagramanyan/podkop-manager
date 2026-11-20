@@ -219,7 +219,7 @@ def test_search_turns_zapret_on_with_the_fastest_working_strategy(tmp_path, monk
         bad = c.put("/api/routers/1/zapret", headers=H, json={"rules": {"meta": {"args": ["rm"], "url": "https://x/"}}})
         assert bad.status_code == 400
         assert c.put("/api/zapret/strategies", headers=H, json={"text": "x | nope"}).status_code == 400
-        assert c.put("/api/zapret/strategies", headers=H, json={"text": "mine | --lua-desync=fake"}).json() == {"count": 1, "custom": True}
+        assert c.put("/api/zapret/strategies", headers=H, json={"text": "mine | --lua-desync=fake"}).json() == {"count": 1, "custom": True, "interval": 30}
 
 
 SET_STUBS = '''
@@ -308,7 +308,7 @@ zapret_watch'''
 
 
 def test_watch_tests_each_direct_path_itself(tmp_path):
-    # sing-box tests a URLTest only while it carries connections; the agent does it every 4 rounds
+    # sing-box tests a URLTest only while it carries connections; the agent does it every 2 rounds (30 s)
     _setup(tmp_path, rules={"meta": RULES["meta"]})
     p = _sh(tmp_path, '''
 TAB=$(printf '\\t')
@@ -318,4 +318,51 @@ clash_get() { echo "$*" >> "$RUN/probes"; }
 zapret_watch; zapret_watch; zapret_watch; zapret_watch; zapret_watch''')
     assert p.returncode == 0, p.stderr
     probes = (tmp_path / "probes").read_text().splitlines()
-    assert probes == ["/proxies/meta-zapret-direct/delay --data-urlencode url=https://www.instagram.com/ --data timeout=6000"] * 2
+    assert probes == ["/proxies/meta-zapret-direct/delay --data-urlencode url=https://www.instagram.com/ --data timeout=6000"] * 3
+
+
+def test_one_interval_for_sing_box_and_the_agents_own_test(tmp_path):
+    _setup(tmp_path, rules={"meta": RULES["meta"]})
+    out = _filter(tmp_path)
+    assert next(o for o in out["outbounds"] if o["tag"] == "meta-zapret-out")["interval"] == "30s"      # the default
+    (tmp_path / "zapret/interval").write_text("60\n")
+    out = _filter(tmp_path)
+    assert next(o for o in out["outbounds"] if o["tag"] == "meta-zapret-out")["interval"] == "60s"
+    p = _sh(tmp_path, '''
+TAB=$(printf '\\t')
+event() { :; }
+proxies() { echo '{"proxies": {}}'; }
+clash_get() { echo "$*" >> "$RUN/probes"; }
+for i in 1 2 3 4 5 6 7 8; do zapret_watch; done''')
+    assert p.returncode == 0, p.stderr
+    assert len((tmp_path / "probes").read_text().splitlines()) == 2          # every 4 rounds of 15 s
+    (tmp_path / "zapret/interval").write_text("7\n")                          # nonsense: the default
+    p = _sh(tmp_path, "\nzapret_interval")
+    assert p.stdout.strip() == "30"
+
+
+@pytest.mark.parametrize("interval, ok", [(45, True), (15, True), (20, False), (900, False), ("30", False)])
+def test_set_takes_an_interval_by_15_seconds(tmp_path, interval, ok):
+    body = {"rules": {"youtube": {"args": ["--payload=tls_client_hello"], "url": "https://www.youtube.com/"}}, "interval": interval}
+    p = _sh(tmp_path, SET_STUBS + "\nzapret_set", json.dumps(body))
+    assert ("not_installed" in p.stderr) == ok, p.stderr
+
+
+def test_settings_interval_goes_to_every_router_with_zapret_rules(tmp_path, monkeypatch):
+    monkeypatch.setattr(FakeHub, "cached_config", lambda self, r: None, raising=False)
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        agent = ZapretAgent()
+        agent.rules = {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast", "service": "meta", "n": 1}}
+        # the hub's own router (class attributes: the client made it already)
+        monkeypatch.setattr(FakeRouter, "agent", agent)
+        monkeypatch.setattr(FakeRouter, "status", {"agent": {"capabilities": ["zapret"]}})
+        rt = FakeRouter()
+        assert c.put("/api/zapret/strategies", headers=H, json={"interval": 20}).status_code == 400
+        r = c.put("/api/zapret/strategies", headers=H, json={"interval": 60}).json()
+        assert r["interval"] == 60 and r["routers"] == ["home"]
+        assert rt.agent.calls[-1][1] == {"interval": 60, "rules": {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast", "service": "meta"}}}
+        assert c.get("/api/zapret/strategies", headers=H).json()["interval"] == 60
+        # and with every change of rules
+        c.put("/api/routers/1/zapret", headers=H, json={"rules": {}})
+        assert rt.agent.calls[-1][1] == {"rules": {}, "interval": 60}

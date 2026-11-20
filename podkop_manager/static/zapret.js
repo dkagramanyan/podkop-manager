@@ -143,7 +143,7 @@ export function zapretField(w, s, redraw) {
       h("label", { class: "lbl" }, "Check addresses"), h("div", { class: "ctl" },
         h("textarea", { class: "input mono xs", rows: 2, spellcheck: "false", disabled: running, "aria-label": "Check addresses",
           placeholder: "https://example.com/", oninput: (e) => { ui.urls = e.target.value; } }, ui.urls),
-        h("span", { class: "xs muted" }, "Sites that must open through zapret; the first one is checked every minute"))),
+        h("span", { class: "xs muted" }, `Sites that must open through zapret; the first one is checked every ${z.interval || 30} s (Settings)`))),
     known && !refused ? h("div", { class: "row" },
       h("button", { type: "button", class: "btn", disabled: running, onclick: search }, on ? "Find the best strategy again" : "Find a strategy and turn on"),
       st.installed ? h("span", { class: "xs muted" }, `zapret2 ${st.installed} on this router · sites see the router's own address · QUIC refused there, so apps use TCP`)
@@ -152,14 +152,23 @@ export function zapretField(w, s, redraw) {
   return box;
 }
 
-// Settings: the strategy list every search tries (all routers)
+// Settings: how often zapret rules are checked, and the strategy list every search tries (all routers)
 export function strategiesCard() {
   const card = h("section", { class: "card pad", "aria-labelledby": "s-zap", style: "gap: 12px" },
-    h("h2", { id: "s-zap" }, "Zapret strategies"), h("span", { class: "small muted" }, "…"));
+    h("h2", { id: "s-zap" }, "Zapret"), h("span", { class: "small muted" }, "…"));
   api("GET", "/api/zapret/strategies").then((z) => {
+    const every = h("select", { class: "input mid", "aria-label": "Zapret check interval", onchange: busyClick(async (e) => {
+      try {
+        const r = await api("PUT", "/api/zapret/strategies", { interval: +e.target.value });
+        toast(`Checked every ${r.interval} s${r.routers.length ? `; sent to ${r.routers.join(", ")}` : ""}${r.missed.length ? `; not reached: ${r.missed.join("; ")}` : ""}`, r.missed.length > 0);
+      } catch (err) { toast(err.message, true); }
+    }) }, z.intervals.map((s) => h("option", { value: s, selected: s === z.interval }, s < 60 ? `${s} s` : `${s / 60} min`)));
     const ta = h("textarea", { class: "input mono xs", rows: 8, spellcheck: "false", "aria-label": "Zapret strategies" }, z.text);
     const sub = h("span", { class: "small muted" }, z.custom ? `Your list, ${z.count} strategies.` : `The default list, ${z.count} strategies: zapret2's docs and blockcheck2, and Flowseal's lists ported to zapret2.`);
-    card.replaceChildren(h("h2", { id: "s-zap" }, "Zapret strategies"), sub,
+    card.replaceChildren(h("h2", { id: "s-zap" }, "Zapret"),
+      h("div", { class: "row" }, h("span", { style: "font-size: 13px; font-weight: 500" }, "Check a zapret rule every"), every),
+      h("span", { class: "small muted" }, "The router opens each zapret rule's first check address through zapret at this interval (sing-box's own check uses the same one). When it fails, the rule's web traffic goes through its servers until it opens again; the move is reported after two rounds of the agent (about 30 s)."),
+      h("span", { style: "font-size: 13px; font-weight: 500" }, "Strategies"), sub,
       h("span", { class: "small muted" }, "Tried in this order when a rule turns on “Zapret first”. One nfqws2 strategy per line: name | options. Fake files are named plainly, like tls_clienthello_www_google_com.bin."),
       ta,
       h("div", { class: "row" },

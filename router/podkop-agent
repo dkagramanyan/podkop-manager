@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.29.0"
+AGENT_VERSION="0.29.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -1584,6 +1584,7 @@ ZAPRET_RULES=$ZAPRET_DIR/rules.json   # {"<rule>": {"args": [...], "url", "name"
 ZAPRET_INIT=/etc/init.d/podkop-zapret
 ZAPRET_BASE=134217728                 # 0x08000000: a rule's mark is base + n, its queue 300 + n
 ZAPRET_TEST=99                        # n of the strategy search
+ZAPRET_INTERVAL=$ZAPRET_DIR/interval  # seconds between checks of a direct path (15..600, by 15; default 30)
 ZAPRET_FAKE=0x40000000                # nfqws2's mark on the packets it makes (its default)
 # options a strategy may not set: ours, or ones that leave the process unwatched
 ZAPRET_DENY='["--qnum","--fwmark","--daemon","--pidfile","--user","--uid","--debug","--chdir","--writable","--intercept","--dry-run","--version","--lua-init"]'
@@ -1591,6 +1592,11 @@ ZAPRET_ARGS_OK='type == "array" and length > 0 and length <= 40 and all(.[]; typ
   and startswith("--") and (explode | all(. >= 33 and . <= 126)) and ((split("=")[0]) as $o | $deny | index($o) | not))'
 
 zapret_installed() { [ -x "$ZAPRET_DIR/nfqws2" ]; }
+# the check interval: sing-box's URLTest and the agent's own test use the same one
+zapret_interval() {
+  _zi=$(cat "$ZAPRET_INTERVAL" 2>/dev/null)
+  case "$_zi" in ""|*[!0-9]*) echo 30 ;; *) if [ "$_zi" -ge 15 ] && [ "$_zi" -le 600 ]; then echo $((_zi / 15 * 15)); else echo 30; fi ;; esac
+}
 zapret_rules_json() { if [ -s "$ZAPRET_RULES" ]; then cat "$ZAPRET_RULES"; else echo '{}'; fi; }
 zapret_table() { nft list table inet podkop_zapret >/dev/null 2>&1; }
 
@@ -1692,7 +1698,7 @@ ZAPRET_JQ='
       ($r.key + "-zapret-out") as $g
       | .outbounds += [{type: "direct", tag: ($r.key + "-zapret-direct"), routing_mark: ($base + $r.value.n)},
                        {type: "urltest", tag: $g, outbounds: [$r.key + "-zapret-direct"],
-                        fallbacks: [$r.key + "-out"], url: $r.value.url, interval: "1m", interrupt_exist_connections: true}]
+                        fallbacks: [$r.key + "-out"], url: $r.value.url, interval: "\($iv)s", interrupt_exist_connections: true}]
       | if (.route.rules | type) == "array" then .route.rules |= [.[]
           | if .outbound == ($r.key + "-out") and .network == null and .port == null and .port_range == null and .protocol == null
             then (. + {network: ["tcp"], port: [80, 443], protocol: ["tls", "http"], outbound: $g}),
@@ -1702,7 +1708,7 @@ zapret_skip_json() { cat "$ETC/strict" "$ETC/protected" 2>/dev/null | jq -Rsc 's
 zapret_filter() {
   _zz='{}'
   if [ -s "$ZAPRET_RULES" ] && zapret_installed && zapret_table; then _zz=$(zapret_rules_json); fi
-  jq --argjson z "$_zz" --argjson skip "$(zapret_skip_json)" --argjson base "$ZAPRET_BASE" "$ZAPRET_JQ" "$1" > "$2"
+  jq --argjson z "$_zz" --argjson skip "$(zapret_skip_json)" --argjson base "$ZAPRET_BASE" --argjson iv "$(zapret_interval)" "$ZAPRET_JQ" "$1" > "$2"
 }
 
 zapret_running() {
@@ -1719,9 +1725,10 @@ zapret_watch() {
   zapret_table || { zapret_nft && logger -t podkop-agent "zapret: firewall table was missing, added again"; }
   # sing-box tests a URLTest only while connections use it: with no traffic a
   # failing zapret path would stay chosen (and the next connection fail), so
-  # each rule's direct path is tested here every 4 rounds (about a minute)
-  _zwt=$(( (${_zwt:-0} + 1) % 4 ))
-  if [ "$_zwt" = 1 ] && command -v clash_get >/dev/null 2>&1; then
+  # each rule's direct path is tested here at the same interval as sing-box's
+  # own test (the daemon's rounds are 15 s)
+  _zwt=$(( (${_zwt:-0} + 1) % ($(zapret_interval) / 15) ))
+  if [ "$_zwt" = "$(( 1 % ($(zapret_interval) / 15) ))" ] && command -v clash_get >/dev/null 2>&1; then
     _wps=""
     for _wr in $(jq -r 'keys[]' "$ZAPRET_RULES" 2>/dev/null); do
       _wurl=$(jq -r --arg r "$_wr" '.[$r].url' "$ZAPRET_RULES")
@@ -1756,10 +1763,10 @@ zapret_status() {
     --argjson ver "$(cat "$ZAPRET_DIR/version.json" 2>/dev/null || echo '{}')" \
     --arg e2 "$([ -x "$ZAPRET_DIR/nfqws2" ] && echo 1)" \
     --arg tbl "$(zapret_table && echo 1)" --argjson run "$(zapret_running)" --argjson px "$_zp" \
-    --argjson skip "$(zapret_skip_json)" \
+    --argjson skip "$(zapret_skip_json)" --argjson iv "$(zapret_interval)" \
     --arg q "$(lsmod 2>/dev/null | grep -c '^nft_queue ')" \
     '{arch: $arch, installed: (if $e2 == "1" then ($ver.nfqws2 // "") else null end),
-      queue: ($q != "0"), table: ($tbl == "1"), rules: $r, running: $run, refused: $skip,
+      queue: ($q != "0"), table: ($tbl == "1"), rules: $r, running: $run, refused: $skip, interval: $iv,
       using: ($r | with_entries(.value = (($px.proxies[.key + "-zapret-out"].now? // null)
                | if . == null then null elif endswith("-zapret-direct") then "zapret" else "servers" end)))}'
 }
@@ -1877,18 +1884,19 @@ zapret_install() {
   reply "$(zapret_status)"
 }
 
-# set: stdin {"rules": {"<rule>": {"args", "url", "name", "service"}}} (all of them;
+# set: stdin {"rules": {"<rule>": {"args", "url", "name", "service"}}, "interval": s} (all of them;
 # {} turns zapret off); a rule keeps its number, so its mark and queue
 zapret_set() {
   _zq=$(head -c 262144)
-  printf '%s' "$_zq" | jq -e --argjson deny "$ZAPRET_DENY" '.rules | type == "object" and length <= 50 and all(to_entries[];
+  printf '%s' "$_zq" | jq -e --argjson deny "$ZAPRET_DENY" '(.interval // 30) as $iv | .rules | type == "object" and length <= 50 and all(to_entries[];
       (.key | length > 0 and length <= 64 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
       and ((.value.name // "") | type == "string" and length <= 120 and (contains("\n") | not))
       and ((.value.service // "") | type == "string" and length <= 32 and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 97 and . <= 122))))
       and (.value.args | '"$ZAPRET_ARGS_OK"')
       and (.value.url | type == "string" and (startswith("https://") or startswith("http://")) and length <= 300
-           and (explode | all(. >= 33 and . <= 126))))' >/dev/null 2>&1 ||
-    fail bad_request 'expected {"rules": {"<rule>": {"args": ["--..."], "url": "https://...", "name"}}}'
+           and (explode | all(. >= 33 and . <= 126))))
+      and ($iv | type == "number" and . >= 15 and . <= 600 and . % 15 == 0)' >/dev/null 2>&1 ||
+    fail bad_request 'expected {"rules": {"<rule>": {"args": ["--..."], "url": "https://...", "name"}}, "interval": 15..600 by 15}'
   _zn=$(printf '%s' "$_zq" | jq -c '.rules | with_entries(.value |= {args, url, name: (.name // ""), service: (.service // "")})')
   if [ "$_zn" != '{}' ]; then
     ! safe_mode || fail safe_mode "safe mode: the router runs plain podkop; leave safe mode first"
@@ -1904,9 +1912,22 @@ zapret_set() {
       ([.[] | .n] + [$new | keys[] | $old[.].n // empty]) as $used
       | . + {($k): ($new[$k] + {n: ($old[$k].n // ([range(1; $t)] - $used | first))})})')
   mkdir -p "$ZAPRET_DIR"
+  # the check interval: written (flash) only when it changes; sing-box takes it at once
+  _ziv=$(printf '%s' "$_zq" | jq -r '.interval // empty')
+  _zivc=0
+  if [ -n "$_ziv" ] && [ "$_ziv" != "$(zapret_interval)" ]; then
+    { echo "$_ziv" > "$ZAPRET_INTERVAL.t" && mv "$ZAPRET_INTERVAL.t" "$ZAPRET_INTERVAL"; } || fail error "could not write the check interval"
+    _zivc=1
+  fi
   printf '%s\n' "$_zn" | jq -cS . > "$RUN/zapret.rules"
   if cmp -s "$RUN/zapret.rules" "$ZAPRET_RULES" || { [ "$_zn" = '{}' ] && [ ! -e "$ZAPRET_RULES" ]; }; then
-    rm -f "$RUN/zapret.rules"; reply "$(zapret_status)"
+    rm -f "$RUN/zapret.rules"
+    if [ "$_zivc" = 1 ] && [ "$_zn" != '{}' ] && [ -n "$(singbox_pid)" ]; then
+      exec 9> "$RUN/apply.lock"; flock -n 9 || fail busy "an apply is in progress"
+      _zh=$(hot_apply "zapret check interval: $_ziv s") || { exec 9>&-; fail recovery_failed "sing-box did not take the change: $_zh"; }
+      exec 9>&-
+    fi
+    reply "$(zapret_status)"
   fi
   exec 9> "$RUN/apply.lock"; flock -n 9 || { rm -f "$RUN/zapret.rules"; fail busy "an apply is in progress"; }
   if [ "$_zn" = '{}' ]; then

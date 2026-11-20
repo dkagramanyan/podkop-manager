@@ -531,10 +531,11 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             page.wait_for_selector("text=Strategy: slow one")
             page.click("label.check:has-text('Zapret first') input")
             page.wait_for_selector("text=through its servers only")
-            assert sets[-1] == {"rules": {}}
+            assert sets[-1] == {"rules": {}, "interval": 30}
             # the strategy list lives in Settings
             page.goto(f"{base}/#/settings")
             page.wait_for_selector("textarea[aria-label='Zapret strategies']")
+            assert page.locator("select[aria-label='Zapret check interval']").input_value() == "30"
             assert not errors, errors
             browser.close()
     finally:

@@ -3,6 +3,16 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.55.1 — 2026-11-20
+
+- **One check interval for zapret rules**, set in Settings → Zapret (15 s,
+  30 s, 1 min, 2 min or 5 min; default 30 s instead of 1 min): sing-box's
+  URLTest of a zapret rule and the agent's own test of its direct path run
+  at the same interval, so a rule whose zapret stops working moves to its
+  servers sooner. A change goes to every router with zapret rules at once
+  (sing-box reloads in place) and with every later zapret change (agent
+  0.29.1, manager 0.42.1).
+
 ## 1.55.0 — 2026-11-20
 
 zapret2 in front of a rule's servers (manager 0.42.0, agent 0.29.0).
