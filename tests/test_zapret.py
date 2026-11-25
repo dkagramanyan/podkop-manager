@@ -30,7 +30,8 @@ nft() { [ -f "$RUN/table" ]; }
 
 
 def _sh(tmp_path, body, stdin=""):
-    code = STUBS + _code().replace("ZAPRET_DIR=/etc/podkop-zapret", 'ZAPRET_DIR="$RUN/zapret"') + body
+    code = STUBS + (_code().replace("ZAPRET_DIR=/etc/podkop-zapret", 'ZAPRET_DIR="$RUN/zapret"')
+                    .replace("ZAPRET_INIT=/etc/init.d/podkop-zapret", 'ZAPRET_INIT="$RUN/init"')) + body
     return subprocess.run(["sh", "-c", code, "sh", str(tmp_path)], input=stdin, capture_output=True, text=True, timeout=20)
 
 
@@ -107,11 +108,11 @@ def test_nft_table_queues_each_rule_and_the_search_and_gives_podkops_mark(tmp_pa
     assert p.returncode == 0, p.stderr
     t = p.stdout
     for n in (1, 2, 99):
-        assert f"meta mark {0x08000000 + n} tcp dport {{ 80, 443 }} ct original packets 1-20 queue num {300 + n} bypass" in t
+        assert f"meta mark {0x08000000 + n} tcp dport {{ 80, 443 }} ct original packets 1-20 counter queue num {300 + n} bypass" in t
         assert f"ct mark {0x08000000 + n} tcp sport {{ 80, 443 }} ct reply packets 1-10 queue num {300 + n} bypass" in t
     assert "type filter hook output priority -160" in t and "type route hook output priority -155" in t
     assert "ct mark & 0xff000000 == 0x08000000 meta mark set 0x00200000" in t
-    assert "udp dport 443 reject" in t
+    assert "udp dport 443 counter reject" in t
 
 
 def test_exec_passes_each_option_as_one_argument(tmp_path):
@@ -388,6 +389,7 @@ def test_watch_tells_a_move_to_the_servers_and_back_once_it_holds(tmp_path):
     now = tmp_path / "now"
     body = '''
 TAB=$(printf '\\t')
+zapret_running() { jq -c keys "$ZAPRET_RULES"; }
 event() { echo "$1 $2" >> "$RUN/events"; }
 proxies() { printf '{"proxies": {"meta-zapret-out": {"now": "%s"}}}' "$(cat "$RUN/now")"; }
 zapret_watch'''
@@ -410,6 +412,7 @@ def test_watch_tests_each_direct_path_itself(tmp_path):
     _setup(tmp_path, rules={"meta": RULES["meta"]})
     p = _sh(tmp_path, '''
 TAB=$(printf '\\t')
+zapret_running() { jq -c keys "$ZAPRET_RULES"; }
 event() { :; }
 proxies() { echo '{"proxies": {}}'; }
 clash_get() { echo "$*" >> "$RUN/probes"; }
@@ -428,6 +431,7 @@ def test_one_interval_for_sing_box_and_the_agents_own_test(tmp_path):
     assert next(o for o in out["outbounds"] if o["tag"] == "meta-zapret-out")["interval"] == "60s"
     p = _sh(tmp_path, '''
 TAB=$(printf '\\t')
+zapret_running() { jq -c keys "$ZAPRET_RULES"; }
 event() { :; }
 proxies() { echo '{"proxies": {}}'; }
 clash_get() { echo "$*" >> "$RUN/probes"; }
@@ -464,3 +468,123 @@ def test_settings_interval_goes_to_every_router_with_zapret_rules(tmp_path, monk
         # and with every change of rules
         c.put("/api/routers/1/zapret", headers=H, json={"rules": {}})
         assert rt.agent.calls[-1][1] == {"rules": {}, "interval": 60}
+
+
+# --- 1.60.0: zapret mends itself (agent 0.30.0) -----------------------------------------
+
+def test_filter_adds_a_missing_table_instead_of_leaving_the_rules_out(tmp_path):
+    _setup(tmp_path, table=False)
+    p = _sh(tmp_path, '''
+nft() { if [ "$1" = -f ]; then cat > /dev/null; : > "$RUN/table"; else [ -f "$RUN/table" ]; fi; }
+zapret_filter "$RUN/in.json" "$RUN/out.json" && cat "$RUN/out.json"''')
+    assert p.returncode == 0, p.stderr
+    assert "meta-zapret-out" in {o["tag"] for o in json.loads(p.stdout)["outbounds"]}
+
+
+REPAIR = '''
+TAB=$(printf '\\t')
+event() { echo "$1 $2" >> "$RUN/events"; }
+podkop_start_state() { echo 0; }
+reapply_pins() { :; }
+hot_apply() { echo "$1" >> "$RUN/hot"; [ ! -f "$RUN/hot-fails" ] || { echo "sing-box did not take the new servers"; return 1; }; }
+'''
+MISSING = json.dumps({"proxies": {"meta-out": {"now": "main-out"}, "youtube-out": {"now": "main-out"},
+                                  "youtube-zapret-out": {"now": "youtube-zapret-direct"}}})
+
+
+def _events(tmp_path):
+    ev = tmp_path / "events"
+    return ev.read_text().splitlines() if ev.exists() else []
+
+
+def test_missing_zapret_outbounds_come_back_after_two_rounds(tmp_path):
+    _setup(tmp_path)
+    body = REPAIR + f"mkdir -p \"$RUN/zapret\"; zapret_repair '{MISSING}'"
+    p = _sh(tmp_path, body)
+    assert p.returncode == 0, p.stderr
+    assert not (tmp_path / "hot").exists()          # one round: the daemon's own start may still add them
+    p = _sh(tmp_path, body)
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "hot").read_text().startswith("zapret: outbounds of meta were missing")
+    assert _events(tmp_path) == ['zapret_repaired {"rules":["meta"]}']
+
+
+def test_a_repair_that_fails_is_told_once_and_not_tried_for_5_minutes(tmp_path):
+    _setup(tmp_path)
+    (tmp_path / "hot-fails").write_text("")
+    body = REPAIR + f"mkdir -p \"$RUN/zapret\"; zapret_repair '{MISSING}'"
+    for _ in range(4):
+        assert _sh(tmp_path, body).returncode == 0
+    assert len((tmp_path / "hot").read_text().splitlines()) == 1
+    assert _events(tmp_path) == ['zapret_missing {"rules":["meta"],"reason":"sing-box did not take the new servers"}']
+
+
+def test_a_kill_switch_rule_left_out_on_purpose_is_not_mended(tmp_path):
+    _setup(tmp_path, strict="meta\n")
+    body = REPAIR + f"mkdir -p \"$RUN/zapret\"; zapret_repair '{MISSING}'; zapret_repair '{MISSING}'"
+    assert _sh(tmp_path, body).returncode == 0
+    assert not (tmp_path / "hot").exists() and _events(tmp_path) == []
+
+
+def test_a_stopped_nfqws2_is_started_again(tmp_path):
+    _setup(tmp_path)
+    init = tmp_path / "init"
+    init.write_text('#!/bin/sh\necho "$1" >> "$(dirname "$0")/init.log"\n')
+    init.chmod(0o755)
+    p = _sh(tmp_path, REPAIR + '''
+zapret_running() { echo '["youtube"]'; }
+zapret_init() { :; }
+proxies() { :; }
+zapret_watch; zapret_watch''')
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "init.log").read_text().split() == ["start"]          # not again within 2 minutes
+    assert _events(tmp_path) == ['zapret_restarted {"rules":["meta"]}']
+
+
+CFG = {"sections": [{"name": "settings", "type": "settings", "options": {}},
+                    {"name": "meta", "type": "section", "options": {"connection_type": "proxy"}},
+                    {"name": "youtube", "type": "section", "options": {"connection_type": "vpn"}}]}
+
+
+def test_a_rule_that_is_gone_or_no_proxy_rule_leaves_zapret(tmp_path):
+    _setup(tmp_path)
+    init = tmp_path / "init"
+    init.write_text("#!/bin/sh\n")
+    init.chmod(0o755)
+    p = _sh(tmp_path, REPAIR + "singbox_pid() { echo 1; }\nseen_json() { echo '" + json.dumps(CFG) + "'; }\nzapret_prune")
+    assert p.returncode == 0, p.stderr
+    assert list(json.loads((tmp_path / "zapret/rules.json").read_text())) == ["meta"]
+    assert _events(tmp_path) == ['zapret_dropped {"rules":["youtube"]}']
+    assert "youtube left" in (tmp_path / "hot").read_text()
+
+
+def test_set_drops_a_stale_rule_and_keeps_an_unchanged_kill_switch_rule(tmp_path):
+    # 1.59: one rule that had got a kill switch (or was removed) refused every later change
+    _setup(tmp_path, rules={"meta": dict(RULES["meta"], service=""), "gone": dict(RULES["youtube"], n=2, service="")},
+           strict="meta\n")
+    cfg = {"sections": CFG["sections"] + [{"name": "chatgpt", "type": "section", "options": {"connection_type": "proxy"}}]}
+    stubs = REPAIR + "safe_mode() { return 1; }\nzapret_init() { :; }\nsingbox_pid() { :; }\nseen_json() { echo '" + json.dumps(cfg) + "'; }\n"
+    new = {"args": ["--payload=tls_client_hello"], "url": "https://chatgpt.com/", "name": "c", "service": ""}
+    old = {k: {f: v[f] for f in ("args", "url", "name", "service")} for k, v in
+           json.loads((tmp_path / "zapret/rules.json").read_text()).items()}
+    p = _sh(tmp_path, stubs + "zapret_set", json.dumps({"rules": {**old, "chatgpt": new}}))
+    assert p.returncode == 0, p.stderr
+    assert sorted(json.loads((tmp_path / "zapret/rules.json").read_text())) == ["chatgpt", "meta"]
+    # turning zapret on for a kill-switch rule is still refused
+    p = _sh(tmp_path, stubs + "zapret_set", json.dumps({"rules": {"meta": dict(old["meta"], url="https://x.com/")}}))
+    assert "zapret works only on proxy rules" in p.stderr
+
+
+@pytest.mark.parametrize("now, strict, running, want", [
+    ({"meta-out": "", "meta-zapret-out": "meta-zapret-direct"}, "", ["meta"], "zapret"),
+    ({"meta-out": "", "meta-zapret-out": "meta-out"}, "", ["meta"], "servers"),
+    ({"meta-out": ""}, "", ["meta"], "missing"),
+    ({"meta-out": "", "meta-zapret-out": "meta-zapret-direct"}, "", [], "stopped"),
+    ({"meta-out": ""}, "meta\n", ["meta"], "refused"),
+    ({}, "", ["meta"], "unknown")])
+def test_each_rule_has_a_state(tmp_path, now, strict, running, want):
+    _setup(tmp_path, rules={"meta": RULES["meta"]}, strict=strict)
+    (tmp_path / "now.json").write_text(json.dumps(now))
+    p = _sh(tmp_path, f"\nzapret_running() {{ echo '{json.dumps(running)}'; }}\nzapret_state \"$RUN/now.json\"")
+    assert p.returncode == 0, p.stderr
+    assert json.loads(p.stdout) == {"meta": want}

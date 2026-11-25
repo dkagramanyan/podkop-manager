@@ -29,7 +29,7 @@ RELEASE="$REPO_URL/releases/latest/download"
 KEYS=/etc/dropbear/authorized_keys
 MARK=podkop-agent
 FWD_MARK=podkop-agent-forward
-KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /etc/init.d/podkop-guard /etc/hotplug.d/ntp/90-podkop-agent"
+KEEP="/usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent/ /usr/bin/podkop-probe /usr/share/podkop-agent/ /etc/init.d/podkop-vpn /usr/bin/podkop-sentinel /etc/init.d/podkop-sentinel /etc/init.d/podkop-guard /etc/hotplug.d/ntp/90-podkop-agent /etc/podkop-zapret/ /etc/init.d/podkop-zapret"
 
 set -u
 KEY=""; FWD_KEY=""; ALLOW=""; SRC=""; UNINSTALL=0; BLOCK=on; UPGRADE=0; PAIRING=0; PRINT_SENTINEL=0
@@ -343,6 +343,14 @@ if [ "$UNINSTALL" = 1 ]; then
   /etc/init.d/podkop-agent stop 2>/dev/null; /etc/init.d/podkop-agent disable 2>/dev/null
   # the OpenVPN client (VPN page); the openvpn package stays
   [ -x /etc/init.d/podkop-vpn ] && { /etc/init.d/podkop-vpn stop 2>/dev/null; /etc/init.d/podkop-vpn disable 2>/dev/null; rm -f /etc/init.d/podkop-vpn; }
+  # zapret2: its rules' outbounds are in sing-box's config, so podkop builds it again without them
+  if [ -e /etc/init.d/podkop-zapret ] || [ -d /etc/podkop-zapret ]; then
+    _zr=$([ -s /etc/podkop-zapret/rules.json ] && echo 1)
+    [ -x /etc/init.d/podkop-zapret ] && { /etc/init.d/podkop-zapret stop 2>/dev/null; /etc/init.d/podkop-zapret disable 2>/dev/null; }
+    rm -rf /etc/init.d/podkop-zapret /etc/podkop-zapret
+    nft delete table inet podkop_zapret 2>/dev/null
+    [ "$_zr" = 1 ] && [ -x /etc/init.d/podkop ] && /etc/init.d/podkop restart >/dev/null 2>&1
+  fi
   rm -rf /usr/bin/podkop-agent /etc/init.d/podkop-agent /etc/podkop-agent /tmp/podkop-agent /usr/share/podkop-agent
   [ -f "$KEYS" ] && sed -i "/ $MARK\$/d; / $FWD_MARK\$/d" "$KEYS"
   firewall_rules "" off
