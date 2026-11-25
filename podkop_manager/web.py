@@ -185,7 +185,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.get("/api/manager", dependencies=[api])
     async def manager_info():
         missing = hub.local_probe_missing()
-        return {"version": __version__, "public_key": keys["public"],
+        return {"version": __version__, "release": release_tag(hub.src), "public_key": keys["public"],
                 "local_probe": {"ready": not missing, "missing": missing, "engine": hub.engine,
                                 "forward_line": "" if missing else forward_line(hub.forward_public())}}
 

@@ -521,3 +521,29 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
   .dialog-body { flex: 1; }
 }
 .banner.sticky-bar { position: sticky; top: 8px; z-index: 5; box-shadow: 0 6px 18px rgba(20, 24, 28, .10); }
+
+/* --- 1.60: phones: the menu folds into a button, forms stack, bigger targets --- */
+.menu-btn { display: none; }
+@media (max-width: 800px) {
+  .side { padding: 10px 12px; gap: 10px; }
+  .side .nav { display: none; }
+  .side.open .nav { display: flex; }
+  .menu-btn { display: inline-flex; height: 32px; margin-left: auto; }
+  .brand { gap: 10px; }
+  .nav-bottom { display: none; }
+  .side.open .nav-bottom { display: flex; }
+  /* Now routing: the rule, where it goes and what it uses now fit; "Matches" is on the rule's page */
+  table.wide th:nth-child(3), table.wide td:nth-child(3) { display: none; }
+}
+@media (max-width: 520px) {
+  .form-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .form-grid > .lbl { padding-top: 0 !important; }
+  select, .input { max-width: 100%; }
+}
+@media (pointer: coarse) {
+  .link-btn, .alink { padding: 6px 2px; }
+  .token button { min-width: 28px; min-height: 28px; }
+  .seg button { min-height: 34px; }
+  .btn.xs, .btn.sm { min-height: 32px; }
+  .btn.icon { min-width: 36px; min-height: 36px; }
+}

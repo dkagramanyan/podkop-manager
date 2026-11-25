@@ -105,6 +105,7 @@ export async function render() {
   // the Servers and Servers probe pages are gone: their old links open the rules
   if (r.rid && ["servers", "probe"].includes(r.section)) { location.replace(`#/r/${r.rid}/rules`); return; }
   if (r.rid) store("router", String(r.rid));
+  menuOpen = false;          // a page was picked: the phone's menu folds away
   S.from = S.at; S.at = `${r.rid}/${r.section}`;      // the page before this one (see workFor)
   S.rid = r.rid || lastRouter();
   drawSide();
@@ -141,6 +142,7 @@ export async function render() {
 // --- sidebar ---------------------------------------------------------------------------
 
 export let switchOpen = false;
+let menuOpen = false;       // the menu on a phone (folded away until asked for)
 
 export function drawSide() {
   const side = document.getElementById("side");
@@ -150,12 +152,16 @@ export function drawSide() {
   const link = (section, label, ico, extra) => h("a", { href: `#/r/${rt.id}${section ? "/" + section : ""}`, "aria-current": cur(section) },
     ico ? icon(ico) : null, label, extra);
   const n = rt ? draftChanges(rt) : 0;
+  side.classList.toggle("open", menuOpen);
   put(side,
     h("div", { class: "brand" }, h("b", {}, "podkop-manager"),
       h("span", { class: `live${S.live ? " on" : ""}`, title: S.live ? "live updates on" : "reconnecting" },
-        h("span", { class: "dot sm" }), S.live ? "live" : "offline")),
+        h("span", { class: "dot sm" }), S.live ? "live" : "offline"),
+      // a phone: the menu folds into this button, the page starts at the top of the screen
+      h("button", { type: "button", class: "btn menu-btn", "aria-expanded": String(menuOpen), "aria-controls": "side-nav",
+        onclick: () => { menuOpen = !menuOpen; drawSide(); } }, menuOpen ? "Close" : `Menu${n ? ` · ${n}` : ""}`)),
     rt ? switcher(rt) : null,
-    rt ? h("div", { class: "nav" },
+    rt ? h("div", { class: "nav", id: "side-nav" },
       link("", "Overview", "overview"),
       link("usage", "Keys and usage", "usage", rt.usage && rt.usage.pct !== null && rt.usage.pct !== undefined
         ? h("span", { class: `count${rt.usage.alerts.length ? " warn" : ""}`, title: "Highest daily limit used" }, `${Math.round(rt.usage.pct)}%`) : null),

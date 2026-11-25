@@ -172,7 +172,7 @@ export async function viewSettings(main) {
       addForm,
       h("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; align-items: start" },
         h("section", { class: "card pad", "aria-labelledby": "s-mgr", style: "gap: 12px" },
-          h("div", { class: "col" }, h("h2", { id: "s-mgr" }, "This manager"), h("span", { class: "small muted" }, `podkop-manager ${info.version}`)),
+          h("div", { class: "col" }, h("h2", { id: "s-mgr" }, "This manager"), h("span", { class: "small muted" }, `podkop-manager ${info.release || ""} (manager ${info.version})`.replace("  ", " "))),
           h("span", { style: "font-size: 13px; font-weight: 500" }, "SSH key the routers accept"),
           h("div", { class: "row", style: "align-items: flex-start; flex-wrap: nowrap; padding: 10px 12px; border-radius: 6px; background: var(--chip)" },
             h("code", { class: "grow", style: "font-size: 12px; line-height: 1.5; color: var(--text-2); word-break: break-all" }, info.public_key),

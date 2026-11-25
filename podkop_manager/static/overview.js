@@ -1,10 +1,10 @@
 // overview.js: part of podkop-manager's web interface (see app.js)
 
 import { openApply } from "./apply.js";
-import { EVENT_DOT, configDiff, destChip, diffSummary, eventText, ruleExit, ruleMatches, ruleNow, rulesOf, runningVersion } from "./model.js";
+import { EVENT_DOT, configDiff, destChip, diffSummary, eventText, ruleExit, ruleHealth, ruleMatches, ruleNow, rulesOf, runningVersion } from "./model.js";
 import { pageHead, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { agentTime, api, duration, h, hhmm, icon, longWhen, plural, put, shortWhen, toast } from "./ui.js";
+import { agentTime, api, confirmDialog, duration, h, hhmm, icon, longWhen, plural, put, shortWhen, toast } from "./ui.js";
 import { countriesText, gb } from "./usage.js";
 
 // --- overview -------------------------------------------------------------------------------------
@@ -24,7 +24,9 @@ export async function viewOverview(main, id) {
   };
 
   const service = (action, label, cls) => h("button", { type: "button", class: `btn ${cls || ""}`, onclick: async (e) => {
-    const b = e.currentTarget; b.disabled = true;
+    const b = e.currentTarget;
+    if (action === "stop" && !await confirmDialog("Stop podkop?", "Every rule stops: its sites go direct, or are blocked where a kill switch is on, until podkop is started again. The watchdog leaves it stopped.", "Stop podkop")) return;
+    b.disabled = true;
     try { await api("POST", `/api/routers/${id}/service`, { action }); toast(`podkop: ${action} done`); }
     catch (err) { toast(err.message, true); }
     b.disabled = false;
@@ -58,6 +60,7 @@ export async function viewOverview(main, id) {
           catch (err) { toast(err.message, true); }
           b.disabled = false;
         } }, "Leave safe mode")) : null,
+      verdict(rt, cfg),
       waiting(rt, cfg, running),
       st ? statusStrip(st) : null,
       h("div", { class: "split" },
@@ -75,13 +78,29 @@ export async function viewOverview(main, id) {
     } catch (e) { toast(e.message, true); }
   };
 
+  // one line on top: is everything working now, and if not, which rules and why
+  const verdict = (rt, cfg) => {
+    if (!rt.online || !cfg || !rt.status) return null;
+    const pk = rt.status.podkop || {};
+    if (!pk.running) return null;          // the status strip and its banners say why
+    const rules = rulesOf(cfg).map((s) => [s, ruleHealth(rt, s)]).filter(([, x]) => x.cls);
+    const bad = rules.filter(([, x]) => x.cls !== "ok");
+    if (!rules.length) return null;
+    const worst = bad.some(([, x]) => x.cls === "bad") ? "bad" : bad.length ? "warn" : "ok";
+    return h("div", { class: `banner${worst === "ok" ? "" : ` ${worst}`}`, role: "status", "aria-label": "Verdict" },
+      h("span", { class: `dot ${worst}` }),
+      h("div", { class: "col grow", style: "gap: 4px" },
+        h("b", {}, bad.length ? `${bad.length} of ${plural(rules.length, "rule")} ${bad.length === 1 ? "needs" : "need"} a look` : `All ${plural(rules.length, "rule")} working`),
+        bad.map(([s, x]) => h("span", { class: "small" }, h("a", { href: `#/r/${id}/rules/${s.name}`, class: "mono" }, s.name), `: ${x.text}`))));
+  };
+
   // things that wait for the user: an unapplied draft, a probe result not in podkop yet
   const waiting = (rt, cfg, running) => {
     const notes = [];
     if (data.draft && cfg && data.draft.changes) {
       const d = configDiff(cfg, data.draft.config);
       notes.push(h("div", { class: "note" }, h("span", { class: "dot accent" }),
-        h("div", { class: "col" }, h("span", {}, `${plural(d.length, "routing change")} ${d.length === 1 ? "is" : "are"} not applied`),
+        h("div", { class: "col" }, h("span", {}, `${plural(d.length, "change")} not applied`),
           h("span", {}, `${diffSummary(d)}.${running ? ` The router still runs #${running.id}.` : ""}`)),
         h("a", { class: "alink", href: `#/r/${id}/rules` }, "Open changes")));
     }
@@ -173,7 +192,8 @@ export async function viewOverview(main, id) {
             const now = ruleNow(rt, sec, data.config.devices);
             return h("tr", {},
               h("td", { class: "muted num" }, i + 1),
-              h("td", { class: "mono", style: "font-size: 13px; font-weight: 500" }, sec.name),
+              h("td", { class: "mono", style: "font-size: 13px; font-weight: 500" },
+                ((x) => (x.cls ? h("span", { class: `dot sm ${x.cls}`, title: x.text, style: "margin-right: 6px" }) : null))(ruleHealth(rt, sec)), sec.name),
               h("td", { style: "color: var(--text-2)" }, ruleMatches(sec)),
               h("td", {}, data.auto[sec.name] && (sec.options || {}).connection_type === "proxy"
                 ? h("span", { class: "dest" }, `Proxy, from probe${data.auto[sec.name].countries.length ? ", " + countriesText(data.auto[sec.name].countries) : ""}`) : destChip(sec)),
@@ -214,7 +234,12 @@ export async function viewOverview(main, id) {
           ? `Every night at ${ps.schedule}, ${ps.auto_apply ? "applied by itself if podkop starts with it" : "results wait for you to apply them"}.`
           : "Off"),
         lastText || next ? h("span", { class: "small muted" }, [lastText, next].filter(Boolean).join(" ")) : null),
-      h("a", { class: "btn", href: `#/r/${id}/rules${(p.auto_rules || []).length ? `/${p.auto_rules[0].section}` : ""}` }, "Schedule"));
+      // its settings are on Keys and usage, at the bottom: the page opens there
+      h("a", { class: "btn", href: `#/r/${id}/usage`, onclick: () => {
+        let n = 0;
+        const go = () => { const el = document.getElementById("nightly-probe"); if (el) el.scrollIntoView({ block: "start" }); else if (n++ < 20) setTimeout(go, 150); };
+        setTimeout(go, 150);
+      } }, "Schedule"));
   };
 
   const eventsCard = () => h("aside", { class: "card events", "aria-label": "Events", style: "flex: 1 1 300px; min-width: 0" },

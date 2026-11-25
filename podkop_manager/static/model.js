@@ -102,10 +102,10 @@ export function ruleNow(rt, sec, devices) {
   const groups = rt.proxies.groups || [];
   const g = groups.find((x) => x.name === `${sec.name}-out`);
   if (!g) return { text: "–" };
-  if (g.now === `${sec.name}-strict-out`) return { text: "refusing connections: no server of its answers", bad: true, mode: "kill switch" };
+  if (g.now === `${sec.name}-strict-out`) return { text: "kill switch closed: no server answers, connections refused", bad: true, mode: "kill switch" };
   // zapret first (agent 0.29): its web traffic goes out direct while zapret's check passes
   const zg = groups.find((x) => x.name === `${sec.name}-zapret-out`);
-  if (zg && zg.now === `${sec.name}-zapret-direct`) return { text: "direct, through zapret (web); the rest through its servers", mode: "zapret" };
+  if (zg && zg.now === `${sec.name}-zapret-direct`) return { text: "web through zapret, the rest through its servers", mode: "zapret" };
   const ut = groups.find((x) => x.name === `${sec.name}-urltest-out`);
   const tag = g.now === `${sec.name}-urltest-out` && ut ? ut.now : g.now;
   const server = (rt.proxies.servers || []).find((x) => x.name === tag);
@@ -113,6 +113,25 @@ export function ruleNow(rt, sec, devices) {
   const name = (rt.names || {})[tag] || tag;
   return { text: server && server.delay ? `${name}, ${server.delay} ms` : name,
     mode: pinned ? "pinned" : o.proxy_config_type === "urltest" ? "auto" : "" };
+}
+
+// is the rule working now, in one word and one reason: {cls: ok|warn|bad|"", text}
+// (self-heal's dead groups, the kill switch, zapret's state, watched servers)
+export function ruleHealth(rt, sec) {
+  const o = sec.options || {}, st = (rt && rt.status) || {};
+  if (!rt || !rt.online) return { cls: "", text: "" };
+  if (["block", "exclusion"].includes(o.connection_type)) return { cls: "", text: "" };
+  const groups = ((rt.proxies || {}).groups) || [];
+  const g = groups.find((x) => x.name === `${sec.name}-out`);
+  if (g && g.now === `${sec.name}-strict-out`) return { cls: "bad", text: "kill switch closed: no server answers" };
+  if ((((st.heal || {}).groups || {})[sec.name] || {}).reported) return { cls: "bad", text: "none of its servers answers" };
+  const z = (st.zapret || {})[sec.name];
+  if (["missing", "stopped", "no_table", "not_installed"].includes(z)) return { cls: "bad", text: "zapret is on but not working (the router mends it)" };
+  const down = ((st.watched || []).filter((x) => x.section === sec.name && x.state === "down"));
+  if (down.length) return { cls: "warn", text: `watched server ${down.map((x) => x.name).join(", ")} does not answer` };
+  if (z === "servers") return { cls: "warn", text: "zapret does not open its sites: on its servers" };
+  if (o.connection_type === "proxy" && !g) return { cls: "", text: "" };
+  return { cls: "ok", text: z === "zapret" ? "working, web through zapret" : "working" };
 }
 
 // where a rule's traffic leaves to the internet: "DE, Germany · 203.0.113.5"

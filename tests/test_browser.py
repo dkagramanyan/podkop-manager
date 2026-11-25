@@ -726,3 +726,45 @@ def test_the_bell_watches_a_server_and_settings_lists_it(tmp_path):
     finally:
         srv.should_exit = True
         t.join(timeout=10)
+
+
+def test_on_a_phone_the_menu_folds_and_the_page_starts_at_the_top(tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    class PhoneHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = OnlineAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    srv, t, base = _serve(PhoneHub(db, tmp_path / "id_ed25519", ROOT), db)
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page(viewport={"width": 390, "height": 844})
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector(".menu-btn")
+            page.goto(f"{base}/#/r/1")
+            page.wait_for_selector("#main h1")
+            assert page.locator("#side-nav").is_hidden()
+            assert page.locator("#main h1").bounding_box()["y"] < 300          # was ~640 under the whole menu
+            page.screenshot(path=str(tmp_path / "phone-overview.png"))
+            page.click(".menu-btn")
+            page.wait_for_selector("#side-nav >> text=History")
+            page.click("#side-nav >> text=History")
+            page.wait_for_selector("#side-nav", state="hidden")
+            assert errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)

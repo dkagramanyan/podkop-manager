@@ -109,7 +109,8 @@ export async function viewVpn(main, id) {
     const key = `${host}|${dns}`;
     if (!checks.has(key)) {
       checks.set(key, api("POST", `/api/routers/${id}/vpn/test`, { host, dns }).catch((e) => ({ ok: false, reason: "error", error: e.message }))
-        .then((res) => { checks.set(key, res); if (page.isConnected) draw(); return res; }));
+        // not while one types in the form: the redraw would take the field away
+        .then((res) => { checks.set(key, res); if (page.isConnected && !page.contains(document.activeElement)) draw(); return res; }));
     }
     return checks.get(key);
   };
@@ -135,7 +136,7 @@ export async function viewVpn(main, id) {
     } });
     const user = h("input", { class: "input mid", autocomplete: "off", value: form.username ?? st.username ?? "",
       oninput: (e) => { form.username = e.target.value; } });
-    const pass = h("input", { class: "input mid", type: "password", autocomplete: "new-password",
+    const pass = h("input", { class: "input mid", type: "password", autocomplete: "new-password", value: form.password,
       placeholder: st.password_set ? "saved, leave empty to keep" : "", oninput: (e) => { form.password = e.target.value; } });
     const rules = vpnRules();
     put(page,

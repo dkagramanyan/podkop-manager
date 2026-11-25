@@ -2,7 +2,7 @@
 
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
   loadWork, tokenField, touch, userListField, watchButton, workChanges, workFor } from "./draft.js";
-import { bySection, destChip, optionDef, ruleDest, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
+import { bySection, destChip, optionDef, ruleDest, ruleHealth, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
 import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
@@ -79,7 +79,8 @@ export async function viewRules(main, id, sub) {
         h("span", { class: "grip" }, icon("grip", 18)),
         h("span", { class: "n" }, i + 1),
         h("div", { class: "col grow", style: "gap: 6px" },
-          h("div", { class: "row" }, h("span", { class: "name" }, s.name), tag, zapretTag(S.routers[id], s),
+          h("div", { class: "row" }, ((x) => (x.cls ? h("span", { class: `dot sm ${x.cls}`, title: x.text, "aria-label": x.text }) : null))(ruleHealth(S.routers[id], s)),
+            h("span", { class: "name" }, s.name), tag, zapretTag(S.routers[id], s),
             auto ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, "from probe")
               : keyRule(w, s) ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, `from ${keyLabels(w, s.name)}`) : null),
           h("div", { class: "what" }, h("span", {}, ruleMatches(s)), icon("arrow", 14, { stroke: "var(--muted)" }),
@@ -150,6 +151,10 @@ export function panel(key, title, summary, body, open = true) {
     // (drawn open, the browser says "toggle" too: only a change is kept, so a default stays a default)
     ontoggle: (e) => {
       const d = e.currentTarget;
+      // on a phone the page stays short: opening one part closes the others
+      if (d.open && window.matchMedia("(max-width: 800px)").matches) {
+        for (const o of d.closest(".editor")?.querySelectorAll("details.panel[open]") || []) if (o !== d) o.open = false;
+      }
       if (d.open !== first || panelState()[key] !== undefined) savePanel(key, d.open);
       d.closest(".editor")?.dispatchEvent(new Event("panels"));
     } },
