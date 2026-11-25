@@ -769,7 +769,7 @@ def test_notifications_text_and_channels(tmp_path, monkeypatch):
         sent.append((req if isinstance(req, str) else req.full_url, data if data is not None else req.data))
         return Answer()
     monkeypatch.setattr(notify.urllib.request, "urlopen", urlopen)
-    assert notify.send({"telegram_token": "T", "telegram_chat": "42", "webhook_url": "http://hook/x"}, "hello", {"event": "e"}) == []
+    assert notify.send({"telegram_token": "T", "telegram_chat": "42", "webhook_url": "http://hook/x"}, "hello", {"event": "e"}) == {}
     assert sent[0][0] == "https://api.telegram.org/botT/sendMessage" and b"chat_id=42" in sent[0][1] and b"text=hello" in sent[0][1]
     assert sent[1][0] == "http://hook/x" and json.loads(sent[1][1]) == {"text": "hello", "event": "e"}
     # the hub sends router events and its own through it

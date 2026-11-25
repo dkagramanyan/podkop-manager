@@ -4,7 +4,7 @@ import { updateAgent } from "./agent.js";
 import { loadRouters } from "./app.js";
 import { drawSide, pageHead, routerList, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { api, h, longWhen, modal, put, shortWhen, toast } from "./ui.js";
+import { ago, api, h, longWhen, modal, put, shortWhen, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 import { strategiesCard } from "./zapret.js";
 
@@ -197,8 +197,26 @@ export async function viewSettings(main) {
   let zapCard = null;      // kept across redraws (its text may be in the middle of an edit)
 
   // where alerts go; loaded once, edits live in notifyS until saved
-  let notifyS = null;
-  api("GET", "/api/notify").then((n) => { notifyS = n; if (!page.querySelector(":focus")) draw(); }).catch(() => {});
+  let notifyS = null, notifyEvents = [];
+  Promise.all([api("GET", "/api/notify"), api("GET", "/api/notify/events").catch(() => [])])
+    .then(([n, ev]) => { notifyS = n; notifyEvents = ev; if (!page.querySelector(":focus")) draw(); }).catch(() => {});
+  // the events a message is sent for, in groups, each one can be switched off
+  const eventGroups = () => {
+    const groups = [["Servers and rules", /^(group_|server_|strict_)/], ["zapret", /^zapret/], ["Changes and the probe", /^(revert|apply_|schedule_|change_|settings_|probe_|heal_)/],
+      ["Router, podkop and VPN", /./]];
+    const out = groups.map(([name]) => [name, []]);
+    for (const e of notifyEvents) out[groups.findIndex(([, re]) => re.test(e))][1].push(e);
+    return out.filter(([, list]) => list.length);
+  };
+  const watchedList = () => {
+    const rows = routerList().flatMap((rt) => (((rt.status || {}).watched) || []).map((x) => ({ rt, x })));
+    if (!rows.length) return h("span", { class: "small muted" }, "No server is watched. On a rule's page, the bell beside a server watches it: a message when it stops answering for 3 minutes, and when it is back.");
+    return h("div", { class: "stack", style: "gap: 4px" }, rows.map(({ rt, x }) => h("div", { class: "row small", style: "gap: 8px" },
+      h("span", { class: `dot ${x.state === "down" ? "bad" : x.state === "up" ? "ok" : "gray"}` }),
+      h("a", { href: `#/r/${rt.id}/rules/${x.section}` }, `${rt.name} · ${x.section}`), h("span", {}, x.name || x.md5.slice(0, 8)),
+      h("span", { class: "muted" }, x.state === "down" ? `does not answer since ${ago(x.since)}` : x.state === "up" ? "answers"
+        : x.state === "gone" ? "not in the rule any more" : "first test within a minute"))));
+  };
   const notifyCard = () => {
     if (!notifyS) return null;
     const field = (key, label, type, hint) => h("label", { class: "col", style: "gap: 4px" },
@@ -210,12 +228,25 @@ export async function viewSettings(main) {
     };
     return h("section", { class: "card pad", "aria-labelledby": "s-ntf", style: "gap: 12px" },
       h("h2", { id: "s-ntf" }, "Notifications"),
-      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a kill switch closes or opens, a zapret rule falls back to its servers, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes."),
+      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a watched server stops answering, a kill switch closes or opens, zapret falls back or is missing, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes. A message that could not be sent is sent later, with its time."),
       field("telegram_token", "Telegram bot token", "password", "from @BotFather"),
       field("telegram_chat", "Telegram chat id", "text", "your id or a group's, e.g. 123456789"),
       field("webhook_url", "Webhook URL (JSON POST)", "url", "https://…"),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: notifyS.daily, onchange: (e) => { notifyS.daily = e.target.checked; } }),
         h("span", {}, "A daily summary at 9:00")),
+      field("quiet", "Quiet hours", "text", "e.g. 23:00-08:00: Telegram messages come without a sound then"),
+      notifyEvents.length ? h("details", { class: "small" },
+        h("summary", {}, `Which events send a message: ${notifyEvents.length - (notifyS.off || []).length} of ${notifyEvents.length}`),
+        eventGroups().map(([name, list]) => h("div", { class: "stack", style: "gap: 4px; margin-top: 10px" },
+          h("b", {}, name),
+          h("div", { class: "row", style: "gap: 4px 14px" }, list.map((e) => h("label", { class: "check inline" },
+            h("input", { type: "checkbox", checked: !(notifyS.off || []).includes(e), onchange: (ev) => {
+              const off = new Set(notifyS.off || []);
+              if (ev.target.checked) off.delete(e); else off.add(e);
+              notifyS.off = [...off];
+            } }), h("span", {}, e.replace(/_/g, " ")))))))) : null,
+      h("span", { style: "font-size: 13px; font-weight: 500" }, "Watched servers"),
+      watchedList(),
       h("div", { class: "row" },
         h("button", { type: "button", class: "btn primary", onclick: () => save() }, "Save"),
         h("button", { type: "button", class: "btn", onclick: () => save(async () => { await api("POST", "/api/notify/test"); toast("Test notification sent"); }) }, "Save and send a test")));

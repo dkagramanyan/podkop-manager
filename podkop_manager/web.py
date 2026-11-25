@@ -487,6 +487,48 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                            "zapret": None if not zg else zg.get("now") == f"{section}-zapret-direct"}
         return out
 
+    # --- watched servers: an alert when one stops answering (agent 0.30) -------------
+    def watched_view(rt) -> list:
+        """The router's watched servers with their links (it keeps only their md5) and state."""
+        by = {(section, hashlib.md5(link.encode()).hexdigest()): link
+              for section, link in podkop.tag_links((rt.config or {}).get("config") or {"sections": []}).values()}
+        return [dict(x, link=by.get((x.get("section"), x.get("md5")))) for x in ((rt.status or {}).get("watched") or [])]
+
+    @app.get("/api/routers/{rid}/watched", dependencies=[api])
+    async def watched(rid: int):
+        rt = router_or_404(rid)
+        needs(rt, "server-watch", "0.30")
+        rt.status["watched"] = await rt.agent.call("server-watch", "status", timeout=30)
+        return watched_view(rt)
+
+    @app.put("/api/routers/{rid}/watched", dependencies=[api])
+    async def set_watched(rid: int, body: dict):
+        """{"add": [{"section", "link"}], "remove": [{"section", "link" | "md5"}]}: the
+        router's other watched servers stay. Each is tested every minute; 3 failed
+        tests in a row send server_down (Telegram/webhook), its first answer server_up."""
+        rt = router_or_404(rid)
+        needs(rt, "server-watch", "0.30")
+        add, remove = body.get("add") or [], body.get("remove") or []
+        if not isinstance(add, list) or not isinstance(remove, list) or len(add) > 50:
+            raise HTTPException(400, 'expected {"add": [{"section", "link"}], "remove": [...]}')
+        cur = {(x["section"], x["md5"]): x.get("name") or "" for x in await rt.agent.call("server-watch", "status", timeout=30)}
+        for x in remove:
+            if isinstance(x, dict):
+                md5 = x.get("md5") or hashlib.md5(str(x.get("link") or "").encode()).hexdigest()
+                cur.pop((str(x.get("section") or ""), md5), None)
+        for x in add:
+            section, link = str((x or {}).get("section") or ""), str((x or {}).get("link") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", section) or not re.fullmatch(r"[a-z0-9]+://[^\x00-\x1f\x7f]{1,4000}", link):
+                raise HTTPException(400, f"bad server {section!r}: a rule's name and one of its links")
+            name = re.sub(r"[\x00-\x1f\x7f]", " ", podkop.link_name(link))[:80]
+            cur[(section, hashlib.md5(link.encode()).hexdigest())] = name
+        if len(cur) > 50:
+            raise HTTPException(400, "at most 50 watched servers per router")
+        rt.status["watched"] = await rt.agent.call("server-watch", "set", payload={
+            "servers": [{"section": s, "md5": m, "name": n} for (s, m), n in sorted(cur.items())]}, timeout=30)
+        hub.publish({"type": "router", "router": rt.snapshot()})
+        return watched_view(rt)
+
     # names whose path the report shows: slow Apple and Google answers, YouTube's video servers
     REPORT_NAMES = ("www.apple.com", "www.icloud.com", "www.google.com", "www.gstatic.com", "www.youtube.com",
                     "rr1---sn-4g5e6nzz.googlevideo.com", "www.instagram.com", "discord.com")
@@ -1402,13 +1444,25 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def notify_settings():
         return {**notify.DEFAULTS, **db.get_setting("notify", {})}
 
+    @app.get("/api/notify/events", dependencies=[api])
+    async def notify_events():
+        """The events a message can be sent for (Settings → Notifications switches them off one by one)."""
+        return sorted(notify.TEXT)
+
     @app.put("/api/notify", dependencies=[api])
     async def set_notify(body: dict):
-        """Where alerts go: a Telegram bot (token + chat id) and/or a webhook URL."""
+        """Where alerts go: a Telegram bot (token + chat id) and/or a webhook URL;
+        off: events not sent; quiet: "23:00-08:00", Telegram without a sound then."""
         new = {k: body.get(k, v) for k, v in notify.DEFAULTS.items()}
-        if not all(isinstance(new[k], str) and len(new[k]) <= 500 for k in ("telegram_token", "telegram_chat", "webhook_url")):
+        if not all(isinstance(new[k], str) and len(new[k]) <= 500 for k in ("telegram_token", "telegram_chat", "webhook_url", "quiet")):
             raise HTTPException(400, "token, chat and URL must be text")
+        off = new.pop("off")
+        if not isinstance(off, list) or not all(isinstance(x, str) and x in notify.TEXT for x in off):
+            raise HTTPException(400, "off: a list of event names")
         new = {k: v.strip() if isinstance(v, str) else bool(v) for k, v in new.items()}
+        new["off"] = sorted(set(off))
+        if new["quiet"] and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d", new["quiet"]):
+            raise HTTPException(400, "quiet hours like 23:00-08:00")
         if new["webhook_url"] and not new["webhook_url"].startswith(("http://", "https://")):
             raise HTTPException(400, "the webhook URL must start with http:// or https://")
         if bool(new["telegram_token"]) != bool(new["telegram_chat"]):
@@ -1421,6 +1475,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         settings = {**notify.DEFAULTS, **db.get_setting("notify", {})}
         if not notify.configured(settings):
             raise HTTPException(400, "set a Telegram bot or a webhook first")
+        await hub.flush_notifications()
         errors = await hub.send_notification(settings, "podkop-manager: test notification", {"event": "test"}, tries=1)
         if errors:
             raise HTTPException(502, "; ".join(errors))

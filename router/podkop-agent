@@ -36,9 +36,9 @@ reply() { printf '{"v":%s,"ok":true,"data":%s}\n' "$PROTO" "${1:-null}"; exit 0;
 
 capabilities() {
   if command -v cmd_diagnostics >/dev/null 2>&1 && command -v cmd_eligibility >/dev/null 2>&1; then
-    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'
-    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'; fi
-  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret"]'; fi
+    if command -v heal_check >/dev/null 2>&1; then printf '["diagnostics","eligibility","heal","strict","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret","server-watch"]'
+    else printf '["diagnostics","eligibility","resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret","server-watch"]'; fi
+  else printf '["resolve","upgrade","ipv6","vpn","safe","dns","sections","devices","route","zapret","server-watch"]'; fi
 }
 
 # fail <code> <message> [details json]
@@ -1052,7 +1052,7 @@ daemon() {
     [ "$_w" -lt 15 ] && continue     # woken by a service event: the guard only
     vpn_watch
     zapret_watch
-    [ -n "$(singbox_pid)" ] && traffic_poll
+    if [ -n "$(singbox_pid)" ]; then traffic_poll; swatch_round; fi
     if [ -f "$ETC/paused" ] || ! podkop_enabled; then _down=0; continue; fi
     # a change or a recovery holds the lock; podkop's own start takes a while
     flock -n "$RUN/apply.lock" true || continue
@@ -2103,6 +2103,138 @@ cmd_zapret() {
   esac
 }
 
+# --- watched servers: an alert when one stops answering ------------------------------------
+#
+# $ETC/watched: "<section><TAB><md5 of the link><TAB><name>" per line, set by the
+# manager (written only when it changes). Every minute the daemon tests each
+# one through sing-box's API, whether its group uses it now or not: 3 failed
+# tests in a row give server_down (not while the provider's line itself is
+# down), the first answer after that server_up. Its state lives in RAM.
+WATCH=$ETC/watched
+WATCH_FAILS=3
+WATCH_URL=https://www.gstatic.com/generate_204
+
+# swatch_tag <config json> <section> <md5>: the outbound tag of that link now
+swatch_tag() {
+  printf '%s' "$1" | jq -r --arg s "$2" '
+    def lst: if . == null then [] elif type == "array" then . else [.] end;
+    .sections[] | select(.name == $s) | .options as $o
+    | if $o.proxy_config_type == "urltest" then
+        ($o.urltest_proxy_links | lst | to_entries[] | "\($s)-\(.key + 1)-out\t\(.value)"),
+        ($o.urltest_fallback_links | lst | to_entries[] | "\($s)-fallback-\(.key + 1)-out\t\(.value)")
+      elif $o.proxy_config_type == "selector" then
+        ($o.selector_proxy_links | lst | to_entries[] | "\($s)-\(.key + 1)-out\t\(.value)")
+      elif ($o.proxy_string // "") != "" then "\($s)-out\t\($o.proxy_string)"
+      else empty end' |
+  while IFS="$TAB" read -r _t _l; do
+    [ "$(link_md5 "$_l")" = "$3" ] && { echo "$_t"; return; }
+  done
+}
+
+# swatch_tags: "<section> <md5> <name> <tag or empty>" (tabs) for each watched
+# server; looked up again only after podkop's settings or the list changed
+swatch_tags() {
+  _wfp=$(seen_fp) || return 1
+  if [ "$(cat "$RUN/swatch/tags.fp" 2>/dev/null)" != "$_wfp" ] || [ "$WATCH" -nt "$RUN/swatch/tags" ]; then
+    _wcfg=$(seen_json) || return 1
+    : > "$RUN/swatch/tags.t"
+    while IFS="$TAB" read -r _ws _wm _wn; do
+      [ -n "$_wm" ] || continue
+      printf '%s\t%s\t%s\t%s\n' "$_ws" "$_wm" "$_wn" "$(swatch_tag "$_wcfg" "$_ws" "$_wm")" >> "$RUN/swatch/tags.t"
+    done < "$WATCH"
+    mv "$RUN/swatch/tags.t" "$RUN/swatch/tags"; echo "$_wfp" > "$RUN/swatch/tags.fp"
+  fi
+  cat "$RUN/swatch/tags"
+}
+
+# swatch_round: every 4th daemon round (about a minute) while sing-box runs
+swatch_round() {
+  if [ ! -s "$WATCH" ]; then rm -rf "$RUN/swatch"; return 0; fi
+  command -v clash_get >/dev/null 2>&1 || return 0
+  _wround=$(( (${_wround:-0} + 1) % 4 ))
+  [ "$_wround" = 1 ] || return 0
+  mkdir -p "$RUN/swatch"
+  _wpx=$(proxies 2>/dev/null); [ -n "$_wpx" ] || return 0
+  swatch_tags > "$RUN/swatch/now" || return 0
+  _wpids=""
+  while IFS="$TAB" read -r _ws _wm _wn _wt; do
+    if [ -z "$_wt" ] || ! printf '%s' "$_wpx" | jq -e --arg t "$_wt" '.proxies[$t]' >/dev/null 2>&1; then
+      echo gone > "$RUN/swatch/$_wm.r"; continue
+    fi
+    ( if clash_get "/proxies/$_wt/delay" --data-urlencode "url=$WATCH_URL" --data "timeout=5000" 2>/dev/null |
+           jq -e '(.delay // 0) > 0' >/dev/null 2>&1; then echo up; else echo fail; fi > "$RUN/swatch/$_wm.r" ) &
+    _wpids="$_wpids $!"
+  done < "$RUN/swatch/now"
+  # their own pids only: a bare wait would wait for the guard's watcher too
+  for _wpid in $_wpids; do wait "$_wpid" 2>/dev/null; done
+  _wnow=$(date +%s); _wan=""
+  : > "$RUN/swatch/status.t"
+  while IFS="$TAB" read -r _ws _wm _wn _wt; do
+    _wres=$(cat "$RUN/swatch/$_wm.r" 2>/dev/null); rm -f "$RUN/swatch/$_wm.r"
+    read -r _wst _wf _wsince 2>/dev/null < "$RUN/swatch/$_wm.s" || { _wst=up; _wf=0; _wsince=$_wnow; }
+    case "$_wres" in
+      up)
+        [ "$_wst" = down ] && event server_up "$(jq -nc --arg s "$_ws" --arg n "$_wn" --argjson d "$((_wnow - _wsince))" \
+          '{section: $s, name: $n, down_for: $d}')"
+        [ "$_wst" = up ] || _wsince=$_wnow
+        _wst=up; _wf=0 ;;
+      fail)
+        _wf=$((_wf + 1))
+        if [ "$_wf" -ge "$WATCH_FAILS" ] && [ "$_wst" != down ]; then
+          # the provider's line down: every server fails, and that is not their fault
+          [ -n "$_wan" ] || { if ! command -v heal_wan >/dev/null 2>&1 || heal_wan; then _wan=up; else _wan=down; fi; }
+          if [ "$_wan" = up ]; then
+            _wst=down; _wsince=$_wnow
+            event server_down "$(jq -nc --arg s "$_ws" --arg n "$_wn" --arg t "$_wt" '{section: $s, name: $n, server: $t}')"
+          fi
+        fi ;;
+      *) [ "$_wst" = gone ] || _wsince=$_wnow; _wst=gone; _wf=0 ;;
+    esac
+    echo "$_wst $_wf $_wsince" > "$RUN/swatch/$_wm.s"
+    jq -nc --arg s "$_ws" --arg m "$_wm" --arg n "$_wn" --arg t "$_wt" --arg st "$_wst" --argjson f "$_wf" --argjson since "$_wsince" \
+      '{section: $s, md5: $m, name: $n, server: $t, state: $st, fails: $f, since: $since}' >> "$RUN/swatch/status.t"
+  done < "$RUN/swatch/now"
+  jq -sc . "$RUN/swatch/status.t" > "$RUN/swatch/status.json" 2>/dev/null; rm -f "$RUN/swatch/status.t"
+}
+
+swatch_status() {
+  if [ -s "$WATCH" ] && [ -s "$RUN/swatch/status.json" ]; then
+    # the list as set, with the states of the last round (a server added since: "new")
+    while IFS="$TAB" read -r _ws _wm _wn; do
+      jq -nc --arg s "$_ws" --arg m "$_wm" --arg n "$_wn" '{section: $s, md5: $m, name: $n}'
+    done < "$WATCH" | jq -sc --slurpfile st "$RUN/swatch/status.json" 'map(. as $w | (($st[0] // []) | map(select(.md5 == $w.md5 and .section == $w.section)) | first) // ($w + {state: "new"}))'
+  elif [ -s "$WATCH" ]; then
+    while IFS="$TAB" read -r _ws _wm _wn; do
+      jq -nc --arg s "$_ws" --arg m "$_wm" --arg n "$_wn" '{section: $s, md5: $m, name: $n, state: "new"}'
+    done < "$WATCH" | jq -sc .
+  else echo '[]'; fi
+}
+
+# server-watch set: stdin {"servers": [{"section", "md5", "name"}]} (all of them; [] stops) | watch status
+cmd_server_watch() {
+  case "${1:-status}" in
+    status) reply "$(swatch_status)" ;;
+    set)
+      _wq=$(head -c 65536)
+      printf '%s' "$_wq" | jq -e '.servers | type == "array" and length <= 50 and all(.[];
+          (.section | type == "string" and length > 0 and length <= 64
+            and (explode | all(. == 95 or (. >= 48 and . <= 57) or (. >= 65 and . <= 90) or (. >= 97 and . <= 122))))
+          and (.md5 | type == "string" and length == 32 and (explode | all((. >= 48 and . <= 57) or (. >= 97 and . <= 102))))
+          and ((.name // "") | type == "string" and length <= 80 and (explode | all(. >= 32 and . != 127))))' >/dev/null 2>&1 ||
+        fail bad_request 'expected {"servers": [{"section", "md5": "<md5 of the link>", "name"}]}'
+      mkdir -p "$ETC" "$RUN/swatch"
+      printf '%s' "$_wq" | jq -r '.servers | unique_by([.section, .md5])[] | [.section, .md5, (.name // "")] | @tsv' > "$RUN/swatch.new"
+      if [ ! -s "$RUN/swatch.new" ]; then rm -f "$WATCH" "$RUN/swatch.new"; rm -rf "$RUN/swatch"
+      elif ! cmp -s "$RUN/swatch.new" "$WATCH"; then
+        { cp "$RUN/swatch.new" "$WATCH.t" && mv "$WATCH.t" "$WATCH"; } || { rm -f "$RUN/swatch.new"; fail error "could not write $WATCH"; }
+      fi
+      rm -f "$RUN/swatch.new"
+      event watched "$(jq -nc --argjson n "$(wc -l < "$WATCH" 2>/dev/null || echo 0)" '{servers: $n}')"
+      reply "$(swatch_status)" ;;
+    *) fail bad_request "usage: server-watch status|set" ;;
+  esac
+}
+
 # --- commands ---------------------------------------------------------------------
 
 cmd_status() {
@@ -2136,7 +2268,7 @@ cmd_status() {
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" --argjson dns "$(dns_json)" \
-    --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" --argjson zst "$_zst" \
+    --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" --argjson zst "$_zst" --argjson swatch "$(swatch_status)" \
     --argjson safe "$(safe_json)" --argjson prot "$(protected_json)" --argjson sent "$(sentinel_json)" \
     --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
     --arg fdn "$([ -z "$_pid" ] || ls "/proc/$_pid/fd" 2>/dev/null | wc -l)" \
@@ -2149,7 +2281,7 @@ cmd_status() {
       singbox: {version: $fixed.singbox, features: $fixed.features,
                 fds: (if ($fdn | tonumber? // 0) > 0 then {open: ($fdn | tonumber), limit: ($fdm | tonumber? // null)} else null end)},
       fingerprint: $fp, last_good: $lg, pins: $pins, probe: {state: $probe, version: $fixed.probe, cron: $pcron},
-      engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6, zapret: $zst,
+      engine: $fixed.engine, heal: $heal, proxies: $px[0], ipv6: $v6, zapret: $zst, watched: $swatch,
       daemon: {beat: ($beat | tonumber? // null)}, safe_mode: $safe, protected: $prot, sentinel: $sent,
       failsafe: (if $fs == "" then null else {time: $fst, message: $fs} end)}')
   rm -f "$RUN/status.$$.px"
@@ -2902,6 +3034,7 @@ case "$_cmd" in
   dns-guard)     cmd_dns_guard "$@" ;;
   vpn)           cmd_vpn "$@" ;;
   zapret)        cmd_zapret "$@" ;;
+  server-watch)  cmd_server_watch "$@" ;;
   upgrade)       cmd_upgrade ;;
   safe-mode)     cmd_safe_mode "$@" ;;
   protect)       cmd_protect ;;

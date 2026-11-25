@@ -2,6 +2,7 @@
 webhook (JSON POST), set in Settings. Only the events worth waking up for."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import logging
 import urllib.error
@@ -10,7 +11,9 @@ import urllib.request
 
 log = logging.getLogger("podkop_manager.notify")
 
-DEFAULTS = {"telegram_token": "", "telegram_chat": "", "webhook_url": "", "daily": False}
+DEFAULTS = {"telegram_token": "", "telegram_chat": "", "webhook_url": "", "daily": False,
+            "off": [],        # events not sent (their names, see TEXT)
+            "quiet": ""}      # "23:00-08:00": Telegram messages arrive without a sound then
 
 
 def _servers(d: dict) -> str:
@@ -31,6 +34,9 @@ TEXT = {
     "recovery_gave_up": lambda d: "watchdog gave up after 3 tries in an hour",
     "vpn_down": lambda d: "VPN is down" + (f": {d['last']}" if d.get("last") else "") + ("" if d.get("running") else " (OpenVPN is not running)"),
     "vpn_up": lambda d: "VPN is up again",
+    "server_down": lambda d: f"{d.get('section')}: watched server {d.get('name') or d.get('server')} does not answer (3 tests in a row)",
+    "server_up": lambda d: f"{d.get('section')}: watched server {d.get('name')} answers again"
+                           + (f" after {span(d['down_for'])}" if isinstance(d.get("down_for"), (int, float)) else ""),
     "zapret_servers": lambda d: f"{d.get('section')}: zapret does not open its sites now, the rule uses its servers",
     "zapret_direct": lambda d: f"{d.get('section')}: back on zapret (direct)",
     "zapret_missing": lambda d: f"{', '.join(d.get('rules') or [])}: zapret is missing in sing-box and could not be put back"
@@ -87,27 +93,44 @@ def configured(s: dict) -> bool:
     return bool((s.get("telegram_token") and s.get("telegram_chat")) or s.get("webhook_url"))
 
 
-def send(s: dict, message: str, payload: dict | None = None) -> list[str]:
-    """Blocking (run it in a thread). Returns the errors, one per channel that failed."""
-    errors = []
-    if s.get("telegram_token") and s.get("telegram_chat"):
+def channels(s: dict) -> set[str]:
+    return ({"telegram"} if s.get("telegram_token") and s.get("telegram_chat") else set()) | ({"webhook"} if s.get("webhook_url") else set())
+
+
+def quiet_now(s: dict, now: dt.datetime | None = None) -> bool:
+    """Inside the quiet hours ("23:00-08:00", over midnight too)."""
+    q = str(s.get("quiet") or "")
+    try:
+        a, b = (dt.time.fromisoformat(x.strip()) for x in q.split("-"))
+    except ValueError:
+        return False
+    t = (now or dt.datetime.now()).time()
+    return a <= t < b if a <= b else (t >= a or t < b)
+
+
+def send(s: dict, message: str, payload: dict | None = None, only: set[str] | None = None, silent: bool = False) -> dict[str, str]:
+    """Blocking (run it in a thread). only: these channels (the ones that failed
+    before), all by default. Returns {channel: error} for those that failed."""
+    errors: dict[str, str] = {}
+    want = channels(s) if only is None else channels(s) & only
+    if "telegram" in want:
         try:
-            body = urllib.parse.urlencode({"chat_id": s["telegram_chat"], "text": message,
-                                           "disable_web_page_preview": "true"}).encode()
+            body = urllib.parse.urlencode({"chat_id": s["telegram_chat"], "text": message, "disable_web_page_preview": "true",
+                                           **({"disable_notification": "true"} if silent else {})}).encode()
             with urllib.request.urlopen(f"https://api.telegram.org/bot{s['telegram_token']}/sendMessage", body, timeout=20) as r:
                 r.read()
         except urllib.error.HTTPError as e:
-            errors.append(f"Telegram: {e.code} {e.read()[:200].decode(errors='replace')}")
-        except (OSError, ValueError) as e:
-            errors.append(f"Telegram: {e}")
-    if s.get("webhook_url"):
+            errors["telegram"] = f"Telegram: {e.code} {e.read()[:200].decode(errors='replace')}"
+        except Exception as e:  # noqa: BLE001 - any odd address or answer is one failed channel, not a dead alert
+            errors["telegram"] = f"Telegram: {e}"
+    if "webhook" in want:
         try:
             req = urllib.request.Request(s["webhook_url"], json.dumps({"text": message, **(payload or {})}).encode(),
                                          {"Content-Type": "application/json"})
             with urllib.request.urlopen(req, timeout=20) as r:
                 r.read()
         except urllib.error.HTTPError as e:
-            errors.append(f"webhook: {e.code}")
-        except (OSError, ValueError) as e:
-            errors.append(f"webhook: {e}")
+            errors["webhook"] = f"webhook: {e.code}"
+        except Exception as e:  # noqa: BLE001
+            errors["webhook"] = f"webhook: {e}"
     return errors

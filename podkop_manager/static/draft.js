@@ -15,10 +15,12 @@ export async function loadWork(id) {
   const prev = S.work[id];
   if (prev && prev.saving) saveWork(prev);
   if (prev && prev.inflight) await prev.inflight;      // its saves first, or they would look like someone else's
-  const [cur, draft, rules, keys, heal] = await Promise.all([api("GET", `/api/routers/${id}/config`),
+  const caps = ((((S.routers[id] || {}).status || {}).agent || {}).capabilities) || [];
+  const [cur, draft, rules, keys, heal, watched] = await Promise.all([api("GET", `/api/routers/${id}/config`),
     api("GET", `/api/routers/${id}/draft`),
     api("GET", `/api/routers/${id}/auto-rules`).catch(() => []), api("GET", `/api/routers/${id}/rule-keys`).catch(() => ({ subs: [], rules: {}, links: {} })),
-    api("GET", `/api/routers/${id}/heal`).catch(() => null)]);
+    api("GET", `/api/routers/${id}/heal`).catch(() => null),
+    caps.includes("server-watch") ? api("GET", `/api/routers/${id}/watched`).catch(() => null) : null]);
   const old = S.work[id];
   const w = {
     id, orig: cur.config, fp: cur.fingerprint,
@@ -27,6 +29,7 @@ export async function loadWork(id) {
     rev: draft ? draft.updated : null,     // the draft this page started from, see saveWork
     auto: Object.fromEntries(rules.map((r) => [r.section, r])), keys,
     heal,      // self-heal state of the router: strict rules, rules left alone (agent 0.12 for strict)
+    watched,   // servers with an alert when they stop answering (agent 0.30), null without
     problems: old && old.problems && draft && same(old.config, draft.config) ? old.problems : null,
     notes: old && old.notes && draft && same(old.config, draft.config) ? old.notes : [],
     saving: null, inflight: null, loaded: Date.now(), redraw: () => {},
@@ -318,6 +321,29 @@ export function userListField(b, kind) {
     b.problemEls(list), b.problemEls(text));
 }
 
+// --- watched servers (agent 0.30): an alert when one stops answering -------------------------------------
+
+const WATCH_STATE = { up: "answers", down: "does not answer", gone: "not in the rule any more", new: "first test within a minute" };
+
+// the bell beside a server the router runs: watched or not; null when the router can't, or the link is new in the draft
+export function watchButton(w, section, link) {
+  if (!Array.isArray(w.watched)) return null;
+  const on = w.watched.find((x) => x.section === section && x.link === link);
+  const o = (bySection(w.orig).get(section) || {}).options || {};
+  const onRouter = ["urltest_proxy_links", "urltest_fallback_links", "selector_proxy_links", "proxy_string"].some((k) => asList(o[k]).includes(link));
+  const label = on ? `Stop watching ${linkName(link)}` : `Watch ${linkName(link)}: a notification when it stops answering`;
+  return h("button", { type: "button", class: `btn icon${on ? " on" : ""}`, "aria-label": label, "aria-pressed": String(!!on),
+    title: !onRouter ? "Apply first: only servers the router runs can be watched" : on ? `Watched, ${WATCH_STATE[on.state] || on.state}. Click to stop` : label,
+    disabled: !onRouter && !on, style: on ? `color: var(--${on.state === "down" ? "bad" : "accent"})` : null,
+    onclick: async () => {
+      try {
+        w.watched = await api("PUT", `/api/routers/${w.id}/watched`, on ? { remove: [{ section, link }] } : { add: [{ section, link }] });
+        toast(on ? `${linkName(link)}: not watched any more` : `${linkName(link)}: watched; you get a notification when it stops answering`);
+      } catch (e) { toast(e.message, true); }
+      w.redraw();
+    } }, icon("bell", 14, { width: 1.6 }));
+}
+
 // --- links ----------------------------------------------------------------------------------------------
 
 export const LINK_RE = /[a-z0-9]+:\/\/[^\s"'<>]+/gi;
@@ -368,6 +394,7 @@ export function serversField(w, b, opt, { title, help, collapsible }) {
           isNew ? h("span", { class: "tag ok" }, "new") : null),
         h("span", { class: "host ellipsis", title: linkDetails(l) }, linkDetails(l)),
         p ? h("span", { class: "err" }, p.message) : null),
+      watchButton(w, b.name, l),
       h("button", { type: "button", class: "btn icon", "aria-label": `Move ${linkName(l)} up`, title: "Move up", disabled: i === 0,
         onclick: () => move(i, i - 1) }, icon("up", 14, { width: 1.6 })),
       h("button", { type: "button", class: "btn icon", "aria-label": `Remove ${linkName(l)}`, onclick: () => b.set(opt, links.filter((_, j) => j !== i), true) },

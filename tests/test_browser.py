@@ -662,3 +662,67 @@ def test_a_reverted_apply_says_so_and_keeps_the_draft(tmp_path):
     finally:
         srv.should_exit = True
         t.join(timeout=10)
+
+
+def test_the_bell_watches_a_server_and_settings_lists_it(tmp_path):
+    from playwright.sync_api import sync_playwright
+    link = "vless://u@de1.example:443?type=tcp#DE-1"
+
+    class Watching(OnlineAgent):
+        config = {"sections": [
+            {"name": "settings", "type": "settings", "anonymous": False, "options": {}},
+            {"name": "main", "type": "section", "anonymous": False, "options": {
+                "connection_type": "proxy", "proxy_config_type": "selector", "selector_proxy_links": [link]}}]}
+        watched = []
+
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "status":
+                st = await super().call(name, *args, payload=payload, **kwargs)
+                st["agent"]["capabilities"] = st["agent"]["capabilities"] + ["server-watch"]
+                st["watched"] = self.watched
+                st.pop("safe_mode")
+                return st
+            if name == "server-watch":
+                if args[0] == "set":
+                    type(self).watched = [dict(x, state="up", since=0) for x in payload["servers"]]
+                return self.watched
+            return await super().call(name, *args, payload=payload, **kwargs)
+
+    class WHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = Watching()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    srv, t, base = _serve(WHub(db, tmp_path / "id_ed25519", ROOT), db)
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/rules/main")
+            page.wait_for_selector("[aria-label^='Watch DE-1']")
+            page.click("[aria-label^='Watch DE-1']")
+            page.wait_for_selector("[aria-label='Stop watching DE-1']")
+            assert Watching.watched and Watching.watched[0]["section"] == "main" and Watching.watched[0]["name"] == "DE-1"
+            assert db.draft(1) is None                     # watching is no change of the settings
+            page.goto(f"{base}/#/settings")
+            page.wait_for_selector("text=home · main")
+            page.click("text=Which events send a message")
+            page.wait_for_selector("text=server down")
+            assert errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)

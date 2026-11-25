@@ -1,7 +1,7 @@
 // rules.js: part of podkop-manager's web interface (see app.js)
 
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
-  loadWork, tokenField, touch, userListField, workChanges, workFor } from "./draft.js";
+  loadWork, tokenField, touch, userListField, watchButton, workChanges, workFor } from "./draft.js";
 import { bySection, destChip, optionDef, ruleDest, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
@@ -739,7 +739,7 @@ export function autoRuleEditor(w, s, rule) {
             h("th", { scope: "col", class: "r", "aria-sort": ui.byPing ? "ascending" : "none" },
               h("button", { type: "button", class: "alink", style: "font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer", title: ui.byPing ? "Sorted by ping. Click for the picked order" : "In the picked order. Click to sort by ping",
                 onclick: () => { ui.byPing = !ui.byPing; draw(); } }, `Median${ui.byPing ? " ↑" : ""}`)),
-            h("th", { scope: "col", class: "r" }, "Mbit/s")),
+            h("th", { scope: "col", class: "r" }, "Mbit/s"), Array.isArray(w.watched) ? h("th", { scope: "col", class: "r" }, h("span", { class: "sr" }, "Watch")) : null),
           (ui.byPing ? [...matched.map((m) => [m, false]), ...fb.map((m) => [m, true])]
             .sort((a, b) => (parseFloat(a[0].median) || 1e9) - (parseFloat(b[0].median) || 1e9))
             : [...matched.map((m) => [m, false]), ...fb.map((m) => [m, true])]).map(([m, isFb]) => h("tr", {},
@@ -748,7 +748,8 @@ export function autoRuleEditor(w, s, rule) {
               /^[A-Z]{2}$/.test(m.country || "") ? `${flag(m.country)} ${m.country}` : "–"),
             h("td", { class: "mono-cell" }, m.protocol), h("td", { class: "mono-cell", style: "color: var(--text-2)" }, m.exit_ip || "–"),
             h("td", { class: "r num" }, Number.isFinite(parseFloat(m.median)) ? `${parseFloat(m.median).toFixed(2)} s` : "–"),
-            h("td", { class: "r num" }, m.mbit && m.mbit !== "-" ? Math.round(+m.mbit) : "–"))))) : null,
+            h("td", { class: "r num" }, m.mbit && m.mbit !== "-" ? Math.round(+m.mbit) : "–"),
+            Array.isArray(w.watched) ? h("td", { class: "r" }, watchButton(w, s.name, m.link)) : null)))) : null,
         p && p.has_links && matched.length < rule.top ? h("div", { class: "row", style: "align-items: flex-start; flex-wrap: nowrap; gap: 10px; padding: 10px 14px; background: var(--warn-row); border-top: 1px solid var(--line-soft)" },
           h("span", { class: "warn-text", style: "flex: none" }, "!"),
           h("span", { class: "xs", style: "color: var(--warn-deep); line-height: 1.5" }, matched.length

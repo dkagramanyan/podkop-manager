@@ -31,7 +31,7 @@ OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
                 "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high",
-                "zapret_missing", "settings_failed", "zapret_failed")
+                "zapret_missing", "settings_failed", "zapret_failed", "server_down")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
@@ -475,6 +475,8 @@ class Hub:
         elif typ == "safe_mode_off" and (rt.alert or {}).get("type") == "safe_mode":
             rt.alert = None
         elif typ == "zapret_repaired" and (rt.alert or {}).get("type") == "zapret_missing":
+            rt.alert = None
+        elif typ == "server_up" and (rt.alert or {}).get("type") == "server_down":
             rt.alert = None
         elif typ == "apply_interrupted" and data.get("job"):
             # the router rebooted (or the agent was killed) during a change: its job is gone
@@ -1242,26 +1244,55 @@ class Hub:
 
     # --- notifications -----------------------------------------------------------------------
     def _notify(self, rt: RouterRuntime, etype: str, data: dict) -> None:
-        settings = self.db.get_setting("notify", notify.DEFAULTS)
-        if not notify.configured(settings):
+        settings = {**notify.DEFAULTS, **(self.db.get_setting("notify", {}) or {})}
+        if not notify.configured(settings) or etype in (settings.get("off") or []):
             return
         message = notify.text(rt.row.get("name") or rt.row["host"], etype, data)
         if message:
-            self._background_task(self.send_notification(settings, message, {"router": rt.row["host"], "event": etype, "data": data}))
+            self._background_task(self.send_notification(settings, message, {"router": rt.row["host"], "event": etype, "data": data},
+                                                         queue=True))
 
-    async def send_notification(self, settings: dict, message: str, payload: dict | None = None, tries: int = 4) -> list[str]:
-        """Sent off the loop; tried again after 30 s, 2 min and 10 min (this
-        server may reach the internet through the very router that is down)."""
-        errors: list[str] = []
+    async def send_notification(self, settings: dict, message: str, payload: dict | None = None, tries: int = 4,
+                                queue: bool = False) -> list[str]:
+        """Sent off the loop; a channel that failed (only that one) is tried
+        again after 30 s, 2 min and 10 min: this server may reach the internet
+        through the very router that is down. queue: then kept and sent when
+        the channel works again (with its time)."""
+        silent = notify.quiet_now(settings)
+        errors: dict[str, str] = {}
+        only = None
         for wait in (30, 120, 600, 0)[-tries:]:
-            errors = await asyncio.to_thread(notify.send, settings, message, payload)
+            errors = await asyncio.to_thread(notify.send, settings, message, payload, only, silent)
             if not errors or not wait:
                 break
-            log.info("notification not sent (%s), again in %s s", "; ".join(errors), wait)
+            only = set(errors)
+            log.info("notification not sent (%s), again in %s s", "; ".join(errors.values()), wait)
             await asyncio.sleep(wait)
         if errors:
-            log.warning("notification not sent: %s", "; ".join(errors))
-        return errors
+            log.warning("notification not sent: %s", "; ".join(errors.values()))
+            if queue:
+                q = (self.db.get_setting("notify_queue") or [])[-99:]
+                self.db.set_setting("notify_queue", q + [{"t": time.time(), "message": message, "payload": payload,
+                                                          "channels": sorted(errors)}])
+        return list(errors.values())
+
+    async def flush_notifications(self) -> None:
+        """Alerts that could not be sent, now that a channel may work again (oldest first, with their time)."""
+        q = self.db.get_setting("notify_queue") or []
+        if not q:
+            return
+        settings = {**notify.DEFAULTS, **(self.db.get_setting("notify", {}) or {})}
+        left = []
+        for i, m in enumerate(q):
+            when = dt.datetime.fromtimestamp(m["t"]).strftime("%d.%m %H:%M")
+            errors = await asyncio.to_thread(notify.send, settings, f"(late, from {when}) {m['message']}", m.get("payload"),
+                                             set(m.get("channels") or []) or None, notify.quiet_now(settings))
+            if errors:
+                left.append(dict(m, channels=sorted(errors)))
+                if len(errors) == len(set(m.get("channels") or []) or notify.channels(settings)):
+                    left += q[i + 1:]          # still cut off: the rest waits too
+                    break
+        self.db.set_setting("notify_queue", left or None)
 
     def daily_summary(self) -> str:
         lines = []
@@ -1958,6 +1989,12 @@ class Hub:
             except Exception:  # noqa: BLE001 - the nightly probes must still start
                 log.exception("scheduled changes")
             now = dt.datetime.now()
+            try:
+                if now.timestamp() - getattr(self, "_flushed", 0) >= 300:
+                    self._flushed = now.timestamp()
+                    await self.flush_notifications()
+            except Exception:  # noqa: BLE001
+                log.exception("queued notifications")
             try:
                 ns = self.db.get_setting("notify", notify.DEFAULTS)
                 today = now.strftime("%Y-%m-%d")

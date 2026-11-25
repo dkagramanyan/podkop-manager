@@ -173,6 +173,9 @@ export const EVENT_TEXT = {
   settings_on: (d) => `From the applied config: ${(d.done || []).join("; ")}`,
   settings_failed: (d) => `From the applied config: ${(d.done || []).join("; ") || "nothing"} set; not: ${(d.failed || []).join("; ")}`,
   zapret_failed: (d) => `zapret first was not turned on for ${(d.rules || []).join(", ")}: ${d.message || ""}`,
+  server_down: (d) => `${d.section}: watched server ${d.name || d.server} does not answer (3 tests in a row)`,
+  server_up: (d) => `${d.section}: watched server ${d.name} answers again${d.down_for ? ` after ${Math.round(d.down_for / 60)} min` : ""}`,
+  watched: (d) => (d.servers ? `${plural(d.servers, "server")} watched` : "No server watched"),
   zapret: (d) => ((d.rules || []).length ? `zapret first on ${d.rules.join(", ")}` : "zapret first off on every rule"),
   zapret_installed: (d) => `zapret2 ${d.nfqws2 || ""} installed on the router`.replace("  ", " "),
   zapret_removed: () => "zapret2 removed from the router",
@@ -236,7 +239,7 @@ export const EVENT_DOT = {
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
   agent_upgraded: "ok", agent_upgrade_failed: "bad", scheduled: "accent", schedule_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
-  zapret_repaired: "warn", zapret_missing: "bad", zapret_restarted: "warn", zapret_dropped: "warn",
+  server_down: "bad", server_up: "ok", zapret_repaired: "warn", zapret_missing: "bad", zapret_restarted: "warn", zapret_dropped: "warn",
 };
 
 export function serverName(section, tag) {
