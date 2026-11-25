@@ -1730,7 +1730,11 @@ zapret_watch() {
   mkdir -p "$RUN/zapret"
   # once per daemon: the service script of an older agent is brought up to
   # date (written only when it differs)
-  [ -n "${_zinit:-}" ] || { zapret_init >/dev/null 2>&1; _zinit=1; }
+  if [ -z "${_zinit:-}" ]; then
+    zapret_init >/dev/null 2>&1; _zinit=1
+    # a table made by an older agent (no counters) is replaced in one step
+    zapret_table && ! nft list table inet podkop_zapret 2>/dev/null | grep -q counter && zapret_nft >/dev/null 2>&1
+  fi
   zapret_prune
   [ -s "$ZAPRET_RULES" ] || return 0
   zapret_table || { zapret_nft && logger -t podkop-agent "zapret: firewall table was missing, added again"; }
@@ -1739,11 +1743,16 @@ zapret_watch() {
   # the instances that do not run and leaves the others alone (not more
   # often than every 2 minutes)
   _zdown=$(jq -r --argjson run "$(zapret_running)" 'keys - $run | join(" ")' "$ZAPRET_RULES" 2>/dev/null)
-  if [ -n "$_zdown" ] && ! find "$RUN/zapret/started" -mmin -2 2>/dev/null | grep -q .; then
+  if [ -z "$_zdown" ]; then rm -f "$RUN/zapret/down-told"
+  elif ! find "$RUN/zapret/started" -mmin -2 2>/dev/null | grep -q .; then
     : > "$RUN/zapret/started"
     "$ZAPRET_INIT" start >/dev/null 2>&1 7>&- 8>&- 9>&-
     logger -t podkop-agent "zapret: nfqws2 of $_zdown did not run, started again"
-    event zapret_restarted "$(jq -nc --arg r "$_zdown" '{rules: ($r | split(" "))}')"
+    # told once while the same rules keep stopping (a strategy that crashes, a missing module)
+    if [ "$(cat "$RUN/zapret/down-told" 2>/dev/null)" != "$_zdown" ]; then
+      echo "$_zdown" > "$RUN/zapret/down-told"
+      event zapret_restarted "$(jq -nc --arg r "$_zdown" '{rules: ($r | split(" "))}')"
+    fi
   fi
   # sing-box tests a URLTest only while connections use it: with no traffic a
   # failing zapret path would stay chosen (and the next connection fail), so
@@ -1786,6 +1795,8 @@ zapret_watch() {
 # podkop starts or an apply runs, and after a failed try not again for 5
 # minutes. One event when it starts failing, one when it is mended.
 zapret_repair() {
+  # without the table zapret_filter leaves the rules out on purpose: nothing to mend here
+  zapret_table || return 0
   _zm=$(printf '%s' "$1" | jq -r --argjson r "$(zapret_rules_json)" --argjson skip "$(zapret_skip_json)" '
     .proxies as $p | $r | keys[] | select(($skip | index(.)) == null)
     | select($p[. + "-out"] != null and $p[. + "-zapret-out"] == null)' 2>/dev/null | tr '\n' ' ')
@@ -1799,11 +1810,14 @@ zapret_repair() {
   [ "$_zmn" -ge 2 ] || return 0
   find "$RUN/zapret/repair-failed" -mmin -5 2>/dev/null | grep -q . && return 0
   [ "$(podkop_start_state)" = 0 ] || return 0
-  if _zwhy=$( (flock -n 9 || { echo busy; exit 1; }; hot_apply "zapret: outbounds of $_zm were missing in sing-box, added again") 9> "$RUN/apply.lock"); then
+  if _zwhy=$( (flock -n 9 || { echo busy; exit 1; }; hot_apply "zapret: outbounds of $_zm were missing in sing-box, added again") 9> "$RUN/apply.lock") &&
+     _zafter=$(proxies 2>/dev/null) &&
+     printf '%s' "$_zafter" | jq -e --arg r "$_zm" '.proxies as $p | all($r | split(" ")[]; $p[. + "-zapret-out"] != null)' >/dev/null 2>&1; then
     reapply_pins >/dev/null 2>&1
     rm -f "$RUN/zapret/missing" "$RUN/zapret/repair-failed"
     event zapret_repaired "$(jq -nc --arg r "$_zm" '{rules: ($r | split(" "))}')"
   elif [ "$_zwhy" != busy ]; then
+    [ -n "$_zwhy" ] || _zwhy="sing-box was reloaded but still runs without them"
     # (told once: the file stays until the outbounds are there again)
     [ -f "$RUN/zapret/repair-failed" ] ||
       event zapret_missing "$(jq -nc --arg r "$_zm" --arg w "$_zwhy" '{rules: ($r | split(" ")), reason: $w}')"
@@ -2156,12 +2170,14 @@ swatch_round() {
   mkdir -p "$RUN/swatch"
   _wpx=$(proxies 2>/dev/null); [ -n "$_wpx" ] || return 0
   swatch_tags > "$RUN/swatch/now" || return 0
-  _wpids=""
+  _wpids=""; _wcp=$(uci -q get podkop.settings.config_path)
   while IFS="$TAB" read -r _ws _wm _wn _wt; do
     if [ -z "$_wt" ] || ! printf '%s' "$_wpx" | jq -e --arg t "$_wt" '.proxies[$t]' >/dev/null 2>&1; then
       echo gone > "$RUN/swatch/$_wm.r"; continue
     fi
-    ( if clash_get "/proxies/$_wt/delay" --data-urlencode "url=$WATCH_URL" --data "timeout=5000" 2>/dev/null |
+    # the address its rule's group tests with: sing-box's URLTest picks by the history these tests leave
+    _wu=$(jq -r --arg g "$_ws-urltest-out" '[.outbounds[]? | select(.tag == $g) | .url // empty][0] // empty' "$_wcp" 2>/dev/null)
+    ( if clash_get "/proxies/$_wt/delay" --data-urlencode "url=${_wu:-$WATCH_URL}" --data "timeout=5000" 2>/dev/null |
            jq -e '(.delay // 0) > 0' >/dev/null 2>&1; then echo up; else echo fail; fi > "$RUN/swatch/$_wm.r" ) &
     _wpids="$_wpids $!"
   done < "$RUN/swatch/now"
@@ -2249,6 +2265,7 @@ cmd_status() {
   # the groups and servers come along, so the manager needs one call per look
   _px=null; [ -z "$_pid" ] || _px=$(proxies_json) || _px=null
   printf '%s' "${_px:-null}" > "$RUN/status.$$.px"      # in a file: too long for one argument with many servers
+  _sw=$(swatch_status 2>/dev/null); [ -n "$_sw" ] || _sw='[]'
   _zst='{}'
   if [ -s "$ZAPRET_RULES" ]; then
     jq -c '[(.groups // [])[] | {(.name): (.now // "")}] + [(.servers // [])[] | {(.name): ""}] | add // {}' \
@@ -2268,7 +2285,7 @@ cmd_status() {
     --arg mem "$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo 2>/dev/null)" \
     --argjson heal "$(if command -v heal_status >/dev/null 2>&1; then heal_status; else echo null; fi)" \
     --slurpfile px "$RUN/status.$$.px" --argjson v6 "$(ipv6_json)" --argjson dns "$(dns_json)" \
-    --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" --argjson zst "$_zst" --argjson swatch "$(swatch_status)" \
+    --arg now "$(date +%s)" --arg clk "$(clock_ok && echo 1 || echo 0)" --argjson zst "$_zst" --argjson swatch "$_sw" \
     --argjson safe "$(safe_json)" --argjson prot "$(protected_json)" --argjson sent "$(sentinel_json)" \
     --arg beat "$(_b=$(date -r "$RUN/beat" +%s 2>/dev/null) && echo $(( $(date +%s) - _b )))" \
     --arg fdn "$([ -z "$_pid" ] || ls "/proc/$_pid/fd" 2>/dev/null | wc -l)" \

@@ -162,3 +162,37 @@ def test_switches_of_a_busy_router_are_tried_again(tmp_path, monkeypatch):
     assert calls == ["strict", "strict"] and db.get_setting(f"router_pending:{rid}") is None
     ev = db.events(rid, 5)[0]
     assert ev["type"] == "settings_on" and ev["data"]["done"] == ["kill switch: main"]
+
+
+def test_a_revert_after_a_poll_saw_the_new_settings_keeps_the_draft_and_its_switches(tmp_path):
+    # the poll during the restart stored the new settings; the router then put the old ones back
+    db, hub, rt, rid = _hub(tmp_path)
+    target = changed(BASE, "main", user_domains=["n.com"])
+    db.set_draft(rid, target, "fp1", base_config=BASE)
+    db.set_setting(f"router_pending:{rid}", {"kill_switch": ["main"]})
+    fired = []
+    hub.after_apply_now = lambda r: fired.append(r.id)
+
+    class RevertsLater(Agent):
+        state = "restarting"
+
+        async def call(self, name, *args, **kw):
+            if name == "job":
+                if self.state == "reverted":
+                    return {"state": "reverted", "message": "podkop did not come up"}
+                return {"state": self.state}
+            return await super().call(name, *args, **kw)
+
+    rt.agent = RevertsLater(BASE)
+
+    async def go():
+        await hub.apply(rid, "fp1", target)
+        rt.agent.config, rt.agent.fp = copy.deepcopy(target), "fp2"
+        hub._got_config(rt, _cfg(rt.agent))                 # the poll mid-restart
+        rt.agent.config, rt.agent.fp = copy.deepcopy(BASE), "fp1"
+        rt.agent.state = "reverted"
+        for t in list(hub.jobs):
+            await t
+        assert db.draft(rid)["config"] == target and fired == []
+        assert db.get_setting(f"router_pending:{rid}") == {"kill_switch": ["main"]}
+    asyncio.run(go())

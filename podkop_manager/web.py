@@ -529,26 +529,6 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         hub.publish({"type": "router", "router": rt.snapshot()})
         return watched_view(rt)
 
-    # names whose path the report shows: slow Apple and Google answers, YouTube's video servers
-    REPORT_NAMES = ("www.apple.com", "www.icloud.com", "www.google.com", "www.gstatic.com", "www.youtube.com",
-                    "rr1---sn-4g5e6nzz.googlevideo.com", "www.instagram.com", "discord.com")
-
-    async def report_routes(rt) -> str:
-        if "route" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
-            return "the router's agent is too old (0.28 or newer)"
-
-        gate = asyncio.Semaphore(2)       # the router's CPU and memory: two at a time
-
-        async def one(name: str) -> str:
-            try:
-                async with gate:
-                    m = (await rt.agent.call("route", payload={"target": name, "from": ""}, timeout=40)).get("match") or {}
-            except AgentError as e:
-                return f"{name}: not checked ({e.message})"
-            return f"{name}: {m.get('outbound') or 'final (no rule)'}" + (f" by {m['list']}" if m.get("list") else "")
-
-        return "\n".join(await asyncio.gather(*(one(n) for n in REPORT_NAMES)))
-
     @app.get("/api/routers/{rid}/support-report", dependencies=[api])
     async def support_report(rid: int, at: float = 0, minutes: int = 30):
         """Versions, state, settings, last changes, events and the log of one
@@ -567,7 +547,6 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             except AgentError as e:     # an agent before 0.30 has no diag
                 with contextlib.suppress(AgentError):
                     extra["zapret"] = {"status": await rt.agent.call("zapret", "status", timeout=30), "diag": e.message}
-        extra["Where common names go"] = await report_routes(rt)
         if at:
             m = max(1, min(int(minutes), 240)) * 60
             rows = db.logs(rid, limit=5000, since=at - m, until=at + m)

@@ -487,6 +487,7 @@ event() { echo "$1 $2" >> "$RUN/events"; }
 podkop_start_state() { echo 0; }
 reapply_pins() { :; }
 hot_apply() { echo "$1" >> "$RUN/hot"; [ ! -f "$RUN/hot-fails" ] || { echo "sing-box did not take the new servers"; return 1; }; }
+proxies() { if [ -f "$RUN/hot" ] && [ ! -f "$RUN/still-missing" ]; then echo '{"proxies": {"meta-zapret-out": {}, "youtube-zapret-out": {}}}'; else echo '{"proxies": {}}'; fi; }
 '''
 MISSING = json.dumps({"proxies": {"meta-out": {"now": "main-out"}, "youtube-out": {"now": "main-out"},
                                   "youtube-zapret-out": {"now": "youtube-zapret-direct"}}})
@@ -629,6 +630,35 @@ def test_support_report_has_zapret_where_names_go_and_the_stored_log_of_a_moment
         r = c.get(f"/api/routers/1/support-report?at={t + 600}", headers=H)
         assert r.status_code == 200, r.text
         assert '"youtube": "missing"' in r.text and "counter packets 5" in r.text
-        assert "www.apple.com: youtube-zapret-out by youtube-community-ruleset" in r.text
         assert "stored-line-42" in r.text and "now line" in r.text
         assert "stored-line-42" not in c.get(f"/api/routers/1/support-report?at={t + 7200}", headers=H).text
+
+
+def test_a_reload_that_still_lacks_them_is_a_failure_told_once_and_no_table_means_no_repair(tmp_path):
+    # 1.60 review: with the table gone for good, every reload "succeeded" without zapret: a reload every 30 s
+    _setup(tmp_path)
+    (tmp_path / "still-missing").write_text("")
+    body = REPAIR + f"mkdir -p \"$RUN/zapret\"; zapret_repair '{MISSING}'"
+    for _ in range(4):
+        assert _sh(tmp_path, body).returncode == 0
+    assert len((tmp_path / "hot").read_text().splitlines()) == 1
+    assert [e.split(" ")[0] for e in _events(tmp_path)] == ["zapret_missing"]
+    (tmp_path / "t2").mkdir()
+    _setup(tmp_path / "t2", table=False)
+    for _ in range(3):
+        assert _sh(tmp_path / "t2", body).returncode == 0
+    assert not (tmp_path / "t2" / "hot").exists() and _events(tmp_path / "t2") == []
+
+
+def test_a_rule_whose_nfqws2_keeps_stopping_is_told_once(tmp_path):
+    _setup(tmp_path)
+    init = tmp_path / "init"
+    init.write_text('#!/bin/sh\n')
+    init.chmod(0o755)
+    body = REPAIR + """
+zapret_running() { echo '["youtube"]'; }
+zapret_init() { :; }
+proxies() { :; }
+zapret_watch; rm -f "$RUN/zapret/started"; zapret_watch; rm -f "$RUN/zapret/started"; zapret_watch"""
+    assert _sh(tmp_path, body).returncode == 0
+    assert _events(tmp_path) == ['zapret_restarted {"rules":["meta"]}']

@@ -817,6 +817,8 @@ def test_a_loaded_configs_zapret_first_is_turned_on_once_it_is_applied(tmp_path,
         if (name, args[:1]) == ("zapret", ("set",)):
             state["rules"] = payload["rules"]
             return {"refused": []}
+        if name == "config-get":            # read after the change ended (1.60): the applied settings
+            return {"config": db.version(max(v["id"] for v in db.versions(rid, 5)))["config"], "fingerprint": "fp-new"}
         raise AssertionError(name)
 
     async def install(agent, cache, machine):
@@ -855,7 +857,7 @@ def test_a_loaded_configs_switches_and_probe_settings_are_set_once_it_is_applied
     calls = []
 
     async def call(name, *args, payload=None, **kw):
-        if name == "job":
+        if name in ("job", "config-get"):       # (no settings in the answer: the hub leaves them unread)
             return {"state": "applied"}
         calls.append((name, payload))
         if name == "protect":

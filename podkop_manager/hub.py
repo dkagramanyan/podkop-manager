@@ -868,6 +868,7 @@ class Hub:
                 # ended by the router's own word meanwhile (apply_interrupted after a reboot)
                 data = dict(v.get("details") or {}, state=v.get("state"), message=v.get("message"))
                 self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
+                await self._fresh_config(rt)
                 self._job_ended(rt, vid, v.get("state") or "unknown", data)
                 return data
             try:
@@ -895,8 +896,18 @@ class Hub:
             self.db.update_version(vid, state=state, message=(data or {}).get("message", "no answer from the router"),
                                    details=data)
         self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": dict(data or {}, state=state)})
+        await self._fresh_config(rt)
         self._job_ended(rt, vid, state, data)
         return data
+
+    async def _fresh_config(self, rt: RouterRuntime) -> None:
+        """The router's settings now, read after a change ended: a poll during
+        the change may have stored the new ones, which a revert took back.
+        Unread, nothing is decided on the old copy (the next poll reads it)."""
+        try:
+            await self.config(rt.id)
+        except (AgentError, KeyError, TypeError):      # (an answer without settings: unread too)
+            rt.config, rt.names_fp = None, ""
 
     def _job_ended(self, rt: RouterRuntime, vid: int, state: str, data: dict | None) -> None:
         """A change ended on the router: History, alerts, the draft, the

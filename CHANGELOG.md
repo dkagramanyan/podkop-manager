@@ -23,9 +23,8 @@ agent 0.30.0). Update the agent on every router (Settings → Update agent).
 - **zapret's state on every page**: zapret, on its servers, missing,
   stopped, paused (kill switch or Protected); firewall counters (QUIC
   refused) in the support report.
-- **Support report**: zapret's state, table and log, where common Apple,
-  Google, YouTube, Meta and Discord names go, 1000 log lines, 200 events,
-  and the stored log around a moment you pick on the Logs page.
+- **Support report**: zapret's state, table and log, 1000 log lines, 200
+  events, and the stored log around a moment you pick on the Logs page.
 - **Watched servers**: the bell beside a server watches it. The router
   tests it every minute, whether its rule uses it or not; after 3 failed
   minutes you get `server_down` (not while the provider's line is down),
