@@ -239,8 +239,14 @@ class DB:
                rid, time.time(), line, source, level)
 
     def logs(self, rid: int, q: str = "", limit: int = 500, sources: list[str] | None = None,
-             levels: list[str] | None = None) -> list[dict]:
+             levels: list[str] | None = None, since: float | None = None, until: float | None = None) -> list[dict]:
         sql, args = "SELECT * FROM logs WHERE router_id = ?", [rid]
+        if since is not None:
+            sql += " AND t >= ?"
+            args.append(since)
+        if until is not None:
+            sql += " AND t <= ?"
+            args.append(until)
         if q:
             sql += " AND line LIKE ?"
             args.append(f"%{q}%")

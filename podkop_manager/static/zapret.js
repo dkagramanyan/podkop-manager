@@ -14,11 +14,28 @@ export const zapretSupported = (rt) => ((((rt || {}).status || {}).agent || {}).
 
 // the rules list: a rule on zapret, or one zapret's check moved to its servers
 export function zapretTag(rt, s) {
+  const st = (((rt || {}).status || {}).zapret || {})[s.name];      // agent 0.30
+  if (st && ZAPRET_STATE[st]) {
+    const [cls, label, title] = ZAPRET_STATE[st];
+    return h("span", { class: `tag ${cls}`, title }, label);
+  }
   const g = (((rt || {}).proxies || {}).groups || []).find((x) => x.name === `${s.name}-zapret-out`);
   if (!g) return null;
   return g.now === `${s.name}-zapret-direct` ? h("span", { class: "tag ok", title: "Its web traffic goes out direct, through zapret2" }, "zapret")
     : h("span", { class: "tag warn", title: "zapret does not open its sites now: the rule uses its servers" }, "zapret → servers");
 }
+
+// a zapret rule's state on the router (agent 0.30): [class, short label, what it means]
+export const ZAPRET_STATE = {
+  zapret: ["ok", "zapret", "Its web traffic goes out direct, through zapret2"],
+  servers: ["warn", "zapret → servers", "zapret does not open its sites now: the rule uses its servers"],
+  missing: ["bad", "zapret missing", "zapret is on, but sing-box runs without it: the router puts it back within a minute"],
+  stopped: ["bad", "zapret stopped", "zapret2 (nfqws2) does not run: the router starts it again"],
+  no_table: ["bad", "zapret firewall missing", "zapret's firewall table is missing: the router adds it again"],
+  refused: ["", "zapret paused", "zapret waits while the rule has a kill switch or Protected on"],
+  no_rule: ["", "zapret waits", "the rule is not running on the router yet"],
+  not_installed: ["bad", "zapret not installed", "zapret2 is gone from the router: turn zapret first on again"],
+};
 
 const ms = (x) => (x >= 1000 ? `${(x / 1000).toFixed(1)} s` : `${x} ms`);
 
@@ -44,7 +61,10 @@ export function zapretParts(w, s, redraw) {
   const st = z.router;
   const on = st.rules[s.name];
   const known = z.rules.find((r) => r.name === s.name);       // the rule is on the router (not only in the draft)
-  const refused = (st.refused || []).includes(s.name);
+  // the router's lists as the last status said (a kill switch turned off a moment ago counts)
+  const hl = w.heal || {};
+  const liveSkip = Array.isArray(hl.strict) || Array.isArray(hl.protected) ? [...(hl.strict || []), ...(hl.protected || [])] : st.refused || [];
+  const refused = liveSkip.includes(s.name);
   const run = z.run && z.run.rules.includes(s.name) ? z.run : null;
   const running = !!(z.run && z.run.state === "running");
   w.ui = w.ui || {};
@@ -58,20 +78,33 @@ export function zapretParts(w, s, redraw) {
   }
   const urls = () => ui.urls.split(/\s+/).filter(Boolean);
 
-  const reload = async () => { try { w.zapret = await api("GET", `/api/routers/${w.id}/zapret`); } catch (e) { toast(e.message, true); } redraw(); };
+  // this page still shows this router's rules (a timer of a page left behind stops)
+  const shown = () => S.work[w.id] === w && location.hash.startsWith(`#/r/${w.id}/rules`);
+  // the page is drawn again only when something changed, and not while one types
+  const reload = async () => {
+    const before = JSON.stringify(w.zapret);
+    try { w.zapret = await api("GET", `/api/routers/${w.id}/zapret`); } catch (e) { toast(e.message, true); }
+    if (JSON.stringify(w.zapret) === before) return;
+    const a = document.activeElement;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.type !== "checkbox") return;
+    redraw();
+  };
   const follow = async () => {
     for (let i = 0; i < 1200; i++) {
       await new Promise((r) => setTimeout(r, 3000));
+      if (!shown()) return;
       await reload();
       if (!w.zapret.run || w.zapret.run.state !== "running") return;
     }
   };
-  const setRules = async (rules, msg) => {
-    try { await api("PUT", `/api/routers/${w.id}/zapret`, { rules }); toast(msg); ui.since = Date.now(); } catch (e) { toast(e.message, true); }
+  // one rule on (cfg) or off (null); the router's other zapret rules stay as they are
+  const setRule = async (cfg, msg) => {
+    try {
+      await api("PUT", `/api/routers/${w.id}/zapret`, cfg ? { set: { [s.name]: cfg } } : { off: [s.name] });
+      toast(msg); ui.since = Date.now();
+    } catch (e) { toast(e.message, true); }
     await reload();
   };
-  const current = () => Object.fromEntries(Object.entries(st.rules).map(([k, v]) =>
-    [k, { args: v.args, url: v.url, name: v.name || "", service: v.service || "" }]));
 
   const search = busyClick(async () => {
     if (!urls().length) { toast("Give at least one address that zapret should open", true); return; }
@@ -90,19 +123,24 @@ export function zapretParts(w, s, redraw) {
     redraw();
     const out = w.zapret.run && w.zapret.run.outcome[s.name];
     if (out) toast(out.on ? `${s.name}: zapret first, with ${out.strategy}` : `${s.name}: ${out.why}`, !out.on);
+    else if (w.zapret.run && w.zapret.run.state === "failed") toast(`The search failed: ${w.zapret.run.error}`, true);
   });
   if (running && !w.zapretFollow) { w.zapretFollow = follow().finally(() => { w.zapretFollow = null; }); }
 
   // sing-box tests the new group within a minute; until then it may sit on the servers
-  const checking = on && st.using[s.name] !== "zapret" && ui.since && Date.now() - ui.since < 120e3;
-  const now = !on ? null : st.using[s.name] === "zapret" ? ["ok", "Now: direct, through zapret"]
-    : checking || !st.using[s.name] ? ["", "Checking whether zapret opens its sites…"] : ["warn", "Now: on its servers (zapret's check fails)"];
+  const using = (st.state || {})[s.name] || st.using[s.name];
+  const checking = on && using !== "zapret" && ui.since && Date.now() - ui.since < 120e3;
+  const now = !on ? null : using === "zapret" ? ["ok", "Now: direct, through zapret"]
+    : checking ? ["", "Checking whether zapret opens its sites…"]
+      : using === "servers" ? ["warn", "Now: on its servers (zapret's check fails)"]
+        : ZAPRET_STATE[using] ? [ZAPRET_STATE[using][0] || "warn", `Now: ${ZAPRET_STATE[using][2]}`]
+          : ["warn", "Now: unknown (sing-box's API does not answer)"];
   const state = now ? h("span", { class: `pill ${now[0]}` }, now[1]) : null;
   // while the page shows this rule: look again until zapret carries it (and now and then after)
   if (on && !running && !w.zapretTimer) {
     w.zapretTimer = setTimeout(() => {
       w.zapretTimer = null;
-      if (/\/rules(\/[A-Za-z0-9_]+)?$/.test(location.hash) && document.querySelector("[aria-label='Zapret first']")) reload();
+      if (shown() && document.querySelector("[aria-label='Zapret first']")) reload();
     }, checking ? 5000 : 30000);
   }
   const job = run && run.jobs[s.name];
@@ -117,7 +155,7 @@ export function zapretParts(w, s, redraw) {
         h("td", { class: "small" }, r.ok ? h("span", { class: "pill ok" }, `opens, ${ms(r.urls.reduce((a, u) => a + (u.ms || 0), 0))}`)
           : h("span", { class: "muted" }, r.error || (r.urls.find((u) => !u.ok) || {}).detail || "does not open")),
         h("td", {}, r.ok && !(on && on.name === r.name) ? h("button", { type: "button", class: "btn xs", disabled: running,
-          onclick: busyClick(() => setRules({ ...current(), [s.name]: { args: r.args, url: urls()[0], name: r.name, service: ui.service } },
+          onclick: busyClick(() => setRule({ args: r.args, url: urls()[0], name: r.name, service: ui.service },
             `${s.name}: zapret first, with ${r.name}`)) }, "Use this") : null))))))) : null;
   const outcome = run && run.outcome[s.name];
 
@@ -126,15 +164,14 @@ export function zapretParts(w, s, redraw) {
   ZAPRET_SERVICES.map(([k, label]) => h("option", { value: k, selected: k === ui.service }, label)));
   const searching = running && run ? (job && job.trying ? `Searching: trying ${job.trying.name}…` : "Searching…") : null;
   const toggle = h("label", { class: "check", "aria-label": "Zapret first" },
-    h("input", { type: "checkbox", role: "switch", checked: !!on || (running && !!run), disabled: refused || !known || running,
+    h("input", { type: "checkbox", role: "switch", checked: !!on || (running && !!run), disabled: (!on && (refused || !known)) || running,
       onchange: async (e) => {
         if (e.target.checked) { await search(e); return; }
         e.target.disabled = true;
-        const rest = current(); delete rest[s.name];
-        await setRules(rest, `${s.name}: through its servers only`);
+        await setRule(null, `${s.name}: through its servers only`);
       } }),
     h("span", { class: "col" }, h("span", { style: "font-weight: 500" }, "Zapret first"),
-      h("span", {}, searching || (refused ? "Not with a kill switch or Protected on"
+      h("span", {}, searching || (refused ? (on ? "Paused while the kill switch or Protected is on" : "Not with a kill switch or Protected on")
         : !known ? "Apply the rule first: zapret works on rules the router has"
           : now ? now[1] : outcome && !outcome.on ? outcome.why : "Web traffic direct through zapret2; its servers when that fails"))));
   const service = on && (ZAPRET_SERVICES.find(([k]) => k === (on.service || "other")) || ["other", "Other"])[1];

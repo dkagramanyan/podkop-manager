@@ -39,6 +39,7 @@ class FakeHub:
     usage = Hub.usage
     load_config = Hub.load_config
     zapret_on = Hub.zapret_on
+    zapret_current = Hub.zapret_current
     keep_rules = Hub.keep_rules
     restore_rules = Hub.restore_rules
     probe_config = Hub.probe_config

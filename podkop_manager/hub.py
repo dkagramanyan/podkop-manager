@@ -30,7 +30,8 @@ FINAL_JOB_STATES = {"applied", "saved", "unchanged", "rejected", "reverted", "fa
 OK_JOB_STATES = {"applied", "saved", "unchanged"}
 # events shown next to the router's name until something newer happens
 ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", "schedule_failed", "change_not_applied",
-                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high")
+                "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high",
+                "zapret_missing", "settings_failed", "zapret_failed")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
@@ -470,6 +471,8 @@ class Hub:
         elif typ == "vpn_up" and (rt.alert or {}).get("type") == "vpn_down":
             rt.alert = None
         elif typ == "safe_mode_off" and (rt.alert or {}).get("type") == "safe_mode":
+            rt.alert = None
+        elif typ == "zapret_repaired" and (rt.alert or {}).get("type") == "zapret_missing":
             rt.alert = None
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])
@@ -1400,6 +1403,11 @@ class Hub:
         self.update_draft(rt)
         self.publish({"type": "router", "router": rt.snapshot()})
         return config
+
+    async def zapret_current(self, rt: RouterRuntime) -> dict:
+        """The router's zapret rules as it has them now, in the shape "zapret set" takes."""
+        st = await rt.agent.call("zapret", "status", timeout=30)
+        return {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in (st.get("rules") or {}).items()}
 
     async def zapret_on(self, rt: RouterRuntime, rules: dict) -> dict:
         """zapret first for these rules ({rule: {args, url, name, service}}),

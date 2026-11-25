@@ -38,7 +38,10 @@ export const alertText = (a) => (a.type === "group_down" ? `a rule's servers sto
   : a.type === "agent_stuck" ? `the router's watchdog stands still since ${ago(a.t)}`
   : a.type === "fds_high" ? `sing-box is running out of open files since ${ago(a.t)}`
   : a.type === "vpn_down" ? `the VPN went down ${ago(a.t)}`
-  : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}` : `a change was undone ${ago(a.t)}`);
+  : a.type === "clash_api_silent" ? `sing-box stopped answering ${ago(a.t)}`
+  : a.type === "zapret_missing" ? `zapret could not be put back ${ago(a.t)}`
+  : a.type === "settings_failed" || a.type === "zapret_failed" ? `a loaded config's switches were not all set ${ago(a.t)}`
+  : `a change was undone ${ago(a.t)}`);
 export const draftChanges = (rt) => (rt.draft && rt.draft.changes) || 0;
 
 // "running, 4 changes not applied" and its color, for the router list

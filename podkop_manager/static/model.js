@@ -173,6 +173,13 @@ export const EVENT_TEXT = {
   settings_on: (d) => `From the applied config: ${(d.done || []).join("; ")}`,
   settings_failed: (d) => `From the applied config: ${(d.done || []).join("; ") || "nothing"} set; not: ${(d.failed || []).join("; ")}`,
   zapret_failed: (d) => `zapret first was not turned on for ${(d.rules || []).join(", ")}: ${d.message || ""}`,
+  zapret: (d) => ((d.rules || []).length ? `zapret first on ${d.rules.join(", ")}` : "zapret first off on every rule"),
+  zapret_installed: (d) => `zapret2 ${d.nfqws2 || ""} installed on the router`.replace("  ", " "),
+  zapret_removed: () => "zapret2 removed from the router",
+  zapret_repaired: (d) => `${(d.rules || []).join(", ")}: zapret was missing in sing-box (after a podkop restart?) and was put back`,
+  zapret_missing: (d) => `${(d.rules || []).join(", ")}: zapret is missing in sing-box and could not be put back: ${d.reason || ""}`,
+  zapret_restarted: (d) => `${(d.rules || []).join(", ")}: zapret2 (nfqws2) did not run and was started again`,
+  zapret_dropped: (d) => `${(d.rules || []).join(", ")}: left zapret (the rule is gone or is no proxy rule any more)`,
   vpn_restart: (d) => `VPN: gateway ${d.gateway} stopped answering, reconnecting`,
   strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
   strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
@@ -229,6 +236,7 @@ export const EVENT_DOT = {
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
   agent_upgraded: "ok", agent_upgrade_failed: "bad", scheduled: "accent", schedule_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
+  zapret_repaired: "warn", zapret_missing: "bad", zapret_restarted: "warn", zapret_dropped: "warn",
 };
 
 export function serverName(section, tag) {
@@ -236,4 +244,11 @@ export function serverName(section, tag) {
   return (rt && rt.names && rt.names[tag]) || tag;
 }
 
-export const eventText = (type, d) => (EVENT_TEXT[type] ? EVENT_TEXT[type](d || {}) : `${type} ${JSON.stringify(d || {})}`);
+// an event this page has no words for: its name and its plain fields, not raw JSON
+const plainEvent = (type, d) => {
+  const parts = Object.entries(d || {}).filter(([, v]) => v !== null && v !== "" && (typeof v !== "object" || Array.isArray(v)))
+    .map(([k, v]) => `${k.replace(/_/g, " ")}: ${Array.isArray(v) ? v.join(", ") : v}`);
+  const name = type.replace(/_/g, " ");
+  return name.charAt(0).toUpperCase() + name.slice(1) + (parts.length ? ` (${parts.join("; ")})` : "");
+};
+export const eventText = (type, d) => (EVENT_TEXT[type] ? EVENT_TEXT[type](d || {}) : plainEvent(type, d));

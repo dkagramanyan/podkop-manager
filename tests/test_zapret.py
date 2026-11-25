@@ -588,3 +588,47 @@ def test_each_rule_has_a_state(tmp_path, now, strict, running, want):
     p = _sh(tmp_path, f"\nzapret_running() {{ echo '{json.dumps(running)}'; }}\nzapret_state \"$RUN/now.json\"")
     assert p.returncode == 0, p.stderr
     assert json.loads(p.stdout) == {"meta": want}
+
+
+def test_one_rule_on_or_off_keeps_the_rules_another_page_turned_on(tmp_path, monkeypatch):
+    # 1.59: the page sent the whole list it had loaded, so a rule turned on elsewhere meanwhile was turned off
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        rt = FakeRouter()
+        rt.agent, rt.status = ZapretAgent(), {"agent": {"capabilities": ["zapret"]}}
+        rt.agent.rules = {"meta": {"args": ["--a=1"], "url": "https://www.instagram.com/", "name": "a", "service": "meta", "n": 1}}
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        yt = {"args": ["--b=1"], "url": "https://www.youtube.com/", "name": "b", "service": "youtube"}
+        r = c.put("/api/routers/1/zapret", headers=H, json={"set": {"youtube": yt}})
+        assert r.status_code == 200, r.text
+        assert sorted(rt.agent.rules) == ["meta", "youtube"] and "n" not in rt.agent.rules["meta"]
+        assert c.put("/api/routers/1/zapret", headers=H, json={"off": ["meta"]}).status_code == 200
+        assert list(rt.agent.rules) == ["youtube"]
+        assert c.put("/api/routers/1/zapret", headers=H, json={}).status_code == 400
+
+
+def test_support_report_has_zapret_where_names_go_and_the_stored_log_of_a_moment(tmp_path, monkeypatch):
+    class ReportAgent:
+        async def call(self, *args, payload=None, timeout=60):
+            if args[0] == "logs":
+                return ["now line"]
+            if args[:2] == ("zapret", "diag"):
+                return {"status": {"state": {"youtube": "missing"}}, "table": "table inet podkop_zapret { counter packets 5 }", "log": []}
+            if args[0] == "route":
+                return {"match": {"outbound": "youtube-zapret-out", "list": "youtube-community-ruleset"}}
+            raise AssertionError(args)
+
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        rt = FakeRouter()
+        rt.agent, rt.status, rt.row = ReportAgent(), {"agent": {"capabilities": ["zapret", "route"]}}, {"name": "home"}
+        rt.config, rt.proxies = None, None
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        c.db.add_log(1, "stored-line-42", "agent")
+        t = c.db.logs(1)[0]["t"]
+        r = c.get(f"/api/routers/1/support-report?at={t + 600}", headers=H)
+        assert r.status_code == 200, r.text
+        assert '"youtube": "missing"' in r.text and "counter packets 5" in r.text
+        assert "www.apple.com: youtube-zapret-out by youtube-community-ruleset" in r.text
+        assert "stored-line-42" in r.text and "now line" in r.text
+        assert "stored-line-42" not in c.get(f"/api/routers/1/support-report?at={t + 7200}", headers=H).text

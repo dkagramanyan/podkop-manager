@@ -473,18 +473,54 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                            "zapret": None if not zg else zg.get("now") == f"{section}-zapret-direct"}
         return out
 
+    # names whose path the report shows: slow Apple and Google answers, YouTube's video servers
+    REPORT_NAMES = ("www.apple.com", "www.icloud.com", "www.google.com", "www.gstatic.com", "www.youtube.com",
+                    "rr1---sn-4g5e6nzz.googlevideo.com", "www.instagram.com", "discord.com")
+
+    async def report_routes(rt) -> str:
+        if "route" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
+            return "the router's agent is too old (0.28 or newer)"
+
+        gate = asyncio.Semaphore(2)       # the router's CPU and memory: two at a time
+
+        async def one(name: str) -> str:
+            try:
+                async with gate:
+                    m = (await rt.agent.call("route", payload={"target": name, "from": ""}, timeout=40)).get("match") or {}
+            except AgentError as e:
+                return f"{name}: not checked ({e.message})"
+            return f"{name}: {m.get('outbound') or 'final (no rule)'}" + (f" by {m['list']}" if m.get("list") else "")
+
+        return "\n".join(await asyncio.gather(*(one(n) for n in REPORT_NAMES)))
+
     @app.get("/api/routers/{rid}/support-report", dependencies=[api])
-    async def support_report(rid: int):
+    async def support_report(rid: int, at: float = 0, minutes: int = 30):
         """Versions, state, settings, last changes, events and the log of one
-        router as a text file with the secrets taken out (report.py)."""
+        router as a text file with the secrets taken out (report.py). With
+        at (seconds since 1970), also the stored log lines from `minutes`
+        before to `minutes` after that moment: for something that happened
+        earlier and is over now."""
         rt = router_or_404(rid)
         logs = []
         with contextlib.suppress(AgentError):
-            logs = await rt.agent.call("logs", "400")
+            logs = await rt.agent.call("logs", "1000")
+        extra: dict = {"Connection check": getattr(rt, "connection_check", None) or "none yet"}
+        if "zapret" in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
+            try:
+                extra["zapret"] = await rt.agent.call("zapret", "diag", timeout=40)
+            except AgentError as e:     # an agent before 0.30 has no diag
+                with contextlib.suppress(AgentError):
+                    extra["zapret"] = {"status": await rt.agent.call("zapret", "status", timeout=30), "diag": e.message}
+        extra["Where common names go"] = await report_routes(rt)
+        if at:
+            m = max(1, min(int(minutes), 240)) * 60
+            rows = db.logs(rid, limit=5000, since=at - m, until=at + m)
+            stamp = lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))  # noqa: E731
+            extra[f"Stored log around {stamp(at)} (±{m // 60} min, this server's time)"] = \
+                "\n".join(f"{stamp(r['t'])} {r['line']}" for r in rows) or "no lines stored then"
         status = dict(rt.status, proxies=rt.proxies) if rt.status else None
-        text = report.build({"name": rt.row["name"]}, status, (rt.config or {}).get("config"), db.events(rid, 60),
-                            db.versions(rid, 15), logs,
-                            {"Connection check": getattr(rt, "connection_check", None) or "none yet"},
+        text = report.build({"name": rt.row["name"]}, status, (rt.config or {}).get("config"), db.events(rid, 200),
+                            db.versions(rid, 15), logs, extra,
                             hide=[k["url"] for k in db.keys(rid)] + db.probe_settings(rid)["keys"],
                             entry_ips=db.get_setting(f"entry_ips:{rid}", {}) or {})
         return Response(text, media_type="text/plain; charset=utf-8", headers={
@@ -750,10 +786,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 if "zapret" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
                     continue
                 try:
-                    cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
+                    cur = await hub.zapret_current(rt)
                     if cur:
-                        await rt.agent.call("zapret", "set", payload={"interval": iv, "rules": {
-                            k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in cur.items()}}, timeout=120)
+                        await rt.agent.call("zapret", "set", payload={"interval": iv, "rules": cur}, timeout=120)
                         told.append(rt.row["name"])
                 except AgentError as e:
                     missed.append(f"{rt.row['name']}: {e.message}")
@@ -784,18 +819,28 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     @app.put("/api/routers/{rid}/zapret", dependencies=[api])
     async def zapret_set(rid: int, body: dict):
-        """All zapret rules of the router: {"rules": {rule: {args, url, name}}};
-        {} turns zapret off everywhere."""
+        """zapret first on or off for some rules: {"set": {rule: {args, url,
+        name, service}}, "off": [rule]}; the router's other zapret rules stay as
+        the router has them now (a page open for a while does not undo another
+        page's change). {"rules": {...}} replaces them all; {} turns zapret off."""
         rt = router_or_404(rid)
         needs(rt, "zapret", "0.29")
-        rules = body.get("rules")
-        if not isinstance(rules, dict):
-            raise HTTPException(400, "rules must be {rule: {args, url, name}}")
         run = zapret_runs.get(rid)
         if run and run.get("state") == "running":
             raise HTTPException(409, "a strategy search is running on this router")
-        out = await rt.agent.call("zapret", "set", payload={"rules": {k: zapret_rule(k, v) for k, v in rules.items()},
-                                                            "interval": zapret_interval()}, timeout=120)
+        if "rules" in body:
+            rules = body.get("rules")
+            if not isinstance(rules, dict):
+                raise HTTPException(400, "rules must be {rule: {args, url, name}}")
+            rules = {k: zapret_rule(k, v) for k, v in rules.items()}
+        else:
+            on, off = body.get("set") or {}, body.get("off") or []
+            if not isinstance(on, dict) or not isinstance(off, list) or not (on or off):
+                raise HTTPException(400, 'expected {"set": {rule: {args, url, name}}, "off": [rule]}')
+            on = {k: zapret_rule(k, v) for k, v in on.items()}
+            cur = await hub.zapret_current(rt)
+            rules = {**{k: v for k, v in cur.items() if k not in off}, **on}
+        out = await rt.agent.call("zapret", "set", payload={"rules": rules, "interval": zapret_interval()}, timeout=120)
         await hub.refresh(rt)
         return out
 
@@ -862,12 +907,14 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
         async def go():
             try:
-                cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
-                cur = {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in cur.items()}
+                cur = await hub.zapret_current(rt)
                 new = await zapret.auto(rt.agent, rules, strategies, cur, state)
-                if apply and new != cur:
+                found = {k: v for k, v in new.items() if k in state["rules"] and v != cur.get(k)}
+                if apply and found:
                     state["now"] = "turning zapret on"
-                    await rt.agent.call("zapret", "set", payload={"rules": new, "interval": zapret_interval()}, timeout=120)
+                    # read again: the search took minutes, and another change may have come meanwhile
+                    fresh = await hub.zapret_current(rt)
+                    await rt.agent.call("zapret", "set", payload={"rules": {**fresh, **found}, "interval": zapret_interval()}, timeout=120)
                     await hub.refresh(rt)
                 state["state"] = "done"
             except Exception as e:        # noqa: BLE001 - shown on the page
