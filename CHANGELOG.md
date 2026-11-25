@@ -3,6 +3,60 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.60.0 — 2026-11-26
+
+zapret mends itself, watched servers, a reworked apply (manager 0.47.0,
+agent 0.30.0). Update the agent on every router (Settings → Update agent).
+
+- **zapret no longer drops off by itself.** The agent puts a zapret rule's
+  outbounds back into sing-box when they are missing for two rounds (after
+  a podkop restart the one try could fail silently and every zapret rule
+  stayed on its servers), starts nfqws2 again when it does not run (procd
+  gave up after 5 crashes), and adds a missing firewall table instead of
+  leaving every rule out. Each case is an event; `zapret_missing` (could
+  not be mended) is an alert.
+- **One stale zapret rule no longer blocks the others.** A rule that is
+  gone or no proxy rule leaves zapret by itself; `zapret set` checks only
+  the rules it adds or changes. The rule page turns zapret on or off for
+  its own rule only, so a page open for a while no longer turns off rules
+  set elsewhere; the strategy search merges into the rules as they are then.
+- **zapret's state on every page**: zapret, on its servers, missing,
+  stopped, paused (kill switch or Protected); firewall counters (QUIC
+  refused) in the support report.
+- **Support report**: zapret's state, table and log, where common Apple,
+  Google, YouTube, Meta and Discord names go, 1000 log lines, 200 events,
+  and the stored log around a moment you pick on the Logs page.
+- **Watched servers**: the bell beside a server watches it. The router
+  tests it every minute, whether its rule uses it or not; after 3 failed
+  minutes you get `server_down` (not while the provider's line is down),
+  and `server_up` when it answers again. Settings → Notifications lists
+  them.
+- **Notifications**: each event can be switched off; quiet hours send
+  Telegram messages without a sound; only a failed channel is retried (the
+  working one got the same alert four times); an alert that could not be
+  sent goes out later with its time.
+- **Apply**: the draft stays while the router applies and ends with the
+  job (a status poll mid-apply dropped it, with its cleanup and a loaded
+  config's switches); a draft follows settings the router changed since
+  (nightly probe, self-heal) unless the same setting changed on both
+  sides; a loaded config's switches and zapret are kept until set, retried
+  on a busy router, dropped with Discard, carried by a scheduled change; a
+  reboot mid-apply ends the change from the router's event; the last
+  change that did not stay is shown above the draft until dismissed.
+- **Apply dialog**: Cancel before applying, a red check block and "Back to
+  the draft" when the router undid it, buttons always in view, full screen
+  on phones. Opening a probe rule no longer edits the draft ("Use them").
+- **Overview** says whether every rule works and names the ones that
+  don't; a dot per rule there and in the Rules list.
+- **Phones**: the menu folds into a button, one rule panel open at a time,
+  stacked forms, larger tap targets.
+- Fixed: a key's edit sent its full subscription address to the browser;
+  a raised limit left the key avoided until the next reset; monthly usage
+  counted 15 days; a busy router skipped the nightly probe; the newest full
+  probe result could be pruned behind heal runs; a VPN password being
+  typed was cut by a finished check; Stop podkop asks first; sysupgrade
+  keeps zapret's files, uninstall removes them.
+
 ## 1.59.0 — 2026-11-21
 
 - **Nightly probe has a card of its own, at the bottom of Keys and usage**
