@@ -18,6 +18,8 @@ class FakeAgent:
 class FakeRouter:
     id = 1
     draft = None
+    config = None
+    undone = None
     agent = FakeAgent()
     status = {"fingerprint": "fp1", "podkop": {"version": "0.7.24"}}
     row = {"name": "home"}
@@ -79,6 +81,13 @@ class FakeHub:
 
     async def import_found(self, rid):
         pass
+
+    def drop_pending(self, rid):
+        for name in ("zapret_pending", "router_pending", "pending_version"):
+            self.db.set_setting(f"{name}:{rid}", None)
+
+    def _set_undone(self, rt, value):
+        rt.undone = value
 
     def update_draft(self, rt):
         d = self.db.draft(rt.id)

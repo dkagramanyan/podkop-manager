@@ -353,7 +353,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         # the draft the page started from: another tab, or "Load into draft", may have changed it since
         if "rev" in body and body["rev"] != ((db.draft(rid) or {}).get("updated")):
             raise HTTPException(409, "the draft was changed elsewhere")
-        db.set_draft(rid, cfg, str(body.get("base", "")))
+        base = str(body.get("base", ""))
+        # the router's settings the draft is made on, so it can follow them when they move
+        known = (rt.config or {}).get("config") if (rt.config or {}).get("fingerprint") == base else None
+        db.set_draft(rid, cfg, base, base_config=known)
         hub.update_draft(rt)
         hub.publish({"type": "router", "router": rt.snapshot()})
         return rt.draft
@@ -368,7 +371,18 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if discard:
             hub.restore_rules(rid)
         db.delete_draft(rid)
+        # a loaded config's switches and zapret went with the draft (not those of a scheduled change)
+        if db.get_setting(f"pending_version:{rid}") is None:
+            hub.drop_pending(rid)
         hub.update_draft(rt)
+        hub.publish({"type": "router", "router": rt.snapshot()})
+        return {"ok": True}
+
+    @app.delete("/api/routers/{rid}/undone", dependencies=[api])
+    async def dismiss_undone(rid: int):
+        """The note about the last change that did not stay, read."""
+        rt = router_or_404(rid)
+        hub._set_undone(rt, None)
         hub.publish({"type": "router", "router": rt.snapshot()})
         return {"ok": True}
 

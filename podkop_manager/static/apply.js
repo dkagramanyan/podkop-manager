@@ -115,7 +115,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
   const steps = h("section", { class: "steps", "aria-label": "Progress", "aria-live": "polite", hidden: true });
   const result = h("div", { "aria-live": "polite" });
   const info = h("span", {}, "Will be saved in History");
-  const close = h("button", { type: "button", class: "btn" }, "Close, keep going");
+  const close = h("button", { type: "button", class: "btn" }, "Cancel");
   const go = h("button", { type: "button", class: "btn primary", disabled: true }, "Apply");
   let problems = null, notes = [], finished = false;
   // Now, or Later at a time of the browser's clock (the next 03:00 to start with)
@@ -155,7 +155,9 @@ export async function openApply(id, { base, config, note, trigger, done }) {
     if (problems === null) return;
     if (problems.length) {
       put(checks, h("span", {}, "podkop would not start with these settings"),
-        problems.map((p) => h("span", { class: "bad-text" }, problemText(p))));
+        problems.map((p) => h("span", { class: "bad-text" }, p.section && rulesOf(config).some((r) => r.name === p.section)
+          ? h("a", { href: `#/r/${id}/rules/${p.section}`, style: "color: inherit; text-decoration: underline", onclick: () => m.close() }, problemText(p))
+          : problemText(p))));
       checks.className = "checks bad";
     } else {
       const links = linkCount(config);
@@ -196,6 +198,7 @@ export async function openApply(id, { base, config, note, trigger, done }) {
     if (later) return scheduleIt();
     put(whenBox);
     go.disabled = true; go.textContent = "Applying"; noteInput.disabled = true;
+    close.textContent = "Close, keep going";
     steps.hidden = false;
     const marks = { check: Date.now() };
     let state = "pending", timer, vid;
@@ -215,11 +218,19 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       finished = true; marks.end = t; clearInterval(timer); S.jobWatch.delete(vid);
       const ok = ["applied", "saved", "unchanged"].includes(job.state);
       if (job.problems && job.problems.length) { problems = job.problems; showChecks(); }
-      put(result, h("div", { class: `result ${ok ? "ok" : "bad"}` }, ok ? (job.state === "applied" ? (job.hot ? `Applied without restarting podkop: ${(job.message.match(/\((.*)\)/) || [])[1] || "only sing-box's config changed"}.` : "Applied, podkop is running.") : job.message)
-        : job.state === "reverted" ? `podkop did not start with these settings, so the router put the old ones back: ${job.reason || job.message}` : job.message));
-      go.textContent = ok ? "Done" : "Applying failed";
+      // the check before the apply passed, but the router did not keep the settings: say that, not "accepted"
+      if (!ok && !(job.problems && job.problems.length)) {
+        put(checks, h("span", {}, job.state === "unknown" ? "The router did not say how the change ended"
+          : job.state === "rejected" ? "The router refused these settings" : "These settings did not stay on the router"));
+        checks.className = "checks bad";
+      }
+      put(result, h("div", { class: `result ${ok ? "ok" : "bad"}` }, ok ? (job.state === "applied" ? (job.hot ? `Applied without restarting podkop: ${((job.message || "").match(/\((.*)\)/) || [])[1] || "only sing-box's config changed"}.` : "Applied, podkop is running.") : job.message)
+        : job.state === "reverted" ? `podkop did not start with these settings, so the router put the old ones back: ${job.reason || job.message}`
+          : job.state === "unknown" ? `${job.message || "No answer from the router"}. Overview shows what it runs now; the draft is kept.`
+            : job.message));
+      go.textContent = ok ? "Done" : "Back to the draft";
       close.textContent = "Close";
-      go.disabled = !ok;
+      go.disabled = false;
       go.onclick = () => m.close();
       done && done(ok);
     };
@@ -239,8 +250,12 @@ export async function openApply(id, { base, config, note, trigger, done }) {
       setTimeout(poll, 3000);
     } catch (e) {
       clearInterval(timer); finished = true;
+      // not sent, or sent with no answer: the draft stays, the steps stop
+      steps.hidden = true;
       put(result, h("div", { class: "result bad" }, e.message));
-      go.textContent = "Apply"; close.textContent = "Close";
+      go.textContent = "Back to the draft"; go.disabled = false; go.onclick = () => m.close();
+      close.textContent = "Close";
+      done && done(false);
     }
   };
 }

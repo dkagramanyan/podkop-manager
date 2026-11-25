@@ -108,6 +108,17 @@ export function modal({ title, sub, body, foot, narrow, onclose }) {
   return { close, el: dialog };
 }
 
+// the app's own yes/no dialog (not the browser's): resolves true when confirmed
+export function confirmDialog(title, text, label = "OK", cls = "danger") {
+  return new Promise((resolve) => {
+    let done = false;
+    const end = (v) => { if (!done) { done = true; resolve(v); } };
+    const m = modal({ title, narrow: true, body: h("p", { class: "small" }, text), onclose: () => end(false),
+      foot: [h("span"), h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => m.close() }, "Cancel"),
+        h("button", { type: "button", class: `btn ${cls}`, onclick: () => { end(true); m.close(); } }, label))] });
+  });
+}
+
 export const clone = (x) => JSON.parse(JSON.stringify(x));
 export const asList = (v) => (v === undefined || v === null || v === "" ? [] : Array.isArray(v) ? v : [v]);
 export const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;

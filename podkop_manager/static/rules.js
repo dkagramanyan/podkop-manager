@@ -1,7 +1,7 @@
 // rules.js: part of podkop-manager's web interface (see app.js)
 
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
-  tokenField, touch, userListField, workChanges, workFor } from "./draft.js";
+  loadWork, tokenField, touch, userListField, workChanges, workFor } from "./draft.js";
 import { bySection, destChip, optionDef, ruleDest, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
@@ -113,7 +113,14 @@ export async function viewRules(main, id, sub) {
     leave: () => { w.drawBar = null; },
     onRouter: (r) => {
       if (r.id !== id || !r.status) return;
-      if (r.status.fingerprint !== w.fp) w.fp = r.status.fingerprint;
+      // the router's settings moved (an apply, the probe, self-heal) or the manager moved
+      // the draft onto them: read both again, unless an edit is still on its way
+      const moved = r.status.fingerprint !== w.fp || (r.draft && r.draft.updated !== w.rev && !(r.draft || {}).applying);
+      if (moved && !w.saving && !w.putting && S.work[id] === w && !(r.status.podkop || {}).busy) {
+        w.fp = r.status.fingerprint;
+        loadWork(id).then(() => { if (S.at === `${id}/rules`) render(); }).catch(() => {});
+        return;
+      }
       w.drawBar && w.drawBar();
     },
     // a probe started or finished: the rules that take its servers read them again
@@ -573,20 +580,25 @@ export function autoRuleEditor(w, s, rule) {
   const ui = w.ui[`${s.name}:auto`] || (w.ui[`${s.name}:auto`] = { preview: null, loading: false });
   let saveTimer;
 
-  // the preview's servers go into the draft right away, so the rule can be applied now
-  const fillDraft = (p) => {
+  // the preview's servers differ from the rule's: only a change of the filter, or
+  // "Use them", puts them into the draft (opening the rule changes nothing)
+  const differs = (p) => {
     const links = p.matched.map((m) => m.link), fb = p.fallback.map((m) => m.link);
-    if (!links.length || S.work[w.id] !== w) return;
     const o = s.options;
-    if (same(asList(o.urltest_proxy_links), links) && same(asList(o.urltest_fallback_links), fb)) return;
+    return links.length > 0 && !(same(asList(o.urltest_proxy_links), links) && same(asList(o.urltest_fallback_links), fb));
+  };
+  const fillDraft = (p) => {
+    if (!p || !differs(p) || S.work[w.id] !== w) return;
+    const links = p.matched.map((m) => m.link), fb = p.fallback.map((m) => m.link);
+    const o = s.options;
     o.urltest_proxy_links = links;
     if (fb.length) o.urltest_fallback_links = fb; else delete o.urltest_fallback_links;
     touch(w);
     w.redraw();
   };
-  const preview = async () => {
+  const preview = async (fill) => {
     ui.loading = true; keepFocus(draw);
-    try { ui.preview = await api("GET", `/api/routers/${w.id}/auto-rules/${s.name}/preview`); fillDraft(ui.preview); }
+    try { ui.preview = await api("GET", `/api/routers/${w.id}/auto-rules/${s.name}/preview`); if (fill) fillDraft(ui.preview); }
     catch (e) { toast(e.message, true); }
     ui.loading = false;
     // fillDraft may have redrawn the editor: then this box is gone and the new one shows the result
@@ -603,7 +615,7 @@ export function autoRuleEditor(w, s, rule) {
     Object.assign(rule, patch);
     clearTimeout(saveTimer);
     const go = async () => {
-      try { w.auto[s.name] = Object.assign(rule, await api("PUT", `/api/routers/${w.id}/auto-rules/${s.name}`, rule)); await preview(); }
+      try { w.auto[s.name] = Object.assign(rule, await api("PUT", `/api/routers/${w.id}/auto-rules/${s.name}`, rule)); await preview(true); }
       catch (e) { toast(e.message, true); }
     };
     if (now) go(); else saveTimer = setTimeout(go, 600);
@@ -712,6 +724,9 @@ export function autoRuleEditor(w, s, rule) {
               ? `Probe at ${shortWhen(agentTime(p.finished))}.${sched ? ` Next at ${sched}.` : ""}` : p ? "No probe run yet" : "")),
           h("button", { type: "button", class: "btn sm", disabled: running || !p, onclick: runProbe },
             running ? spinner() : icon("probe", 14), running ? "Running" : "Run probe")),
+        p && !running && differs(p) ? h("div", { class: "row", style: "flex-wrap: nowrap; gap: 10px; padding: 10px 14px; background: var(--accent-row, var(--warn-row)); border-top: 1px solid var(--line-soft)" },
+          h("span", { class: "xs grow", style: "line-height: 1.5" }, `The probe picks other servers than the rule has now (${matched.length}${fb.length ? ` + ${fb.length} fallback` : ""}). Nothing changes until you take them.`),
+          h("button", { type: "button", class: "btn xs", onclick: () => fillDraft(p) }, "Use them")) : null,
         run.state === "failed" ? h("details", { style: "border-top: 1px solid var(--line-soft)" },
           h("summary", { class: "bad-text", style: "padding: 10px 14px; font-size: 13px; font-weight: 500" }, icon("right", 14, { width: 1.6, class: "chev" }),
             "The last probe run failed"),

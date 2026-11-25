@@ -583,3 +583,82 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
         srv.should_exit = True
         t.join(timeout=10)
         zapret.POLL = 3.0
+
+
+def _serve(hub, db):
+    import uvicorn
+    app = create_app(db, hub, "ssh-ed25519 AAAA test", "secret-pass")
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    srv = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
+    t = threading.Thread(target=lambda: asyncio.run(srv.serve()), daemon=True)
+    t.start()
+    for _ in range(100):
+        if srv.started:
+            break
+        time.sleep(0.05)
+    return srv, t, f"http://127.0.0.1:{port}"
+
+
+def test_a_reverted_apply_says_so_and_keeps_the_draft(tmp_path):
+    # 1.59: the dialog kept "podkop accepts these settings" above the red result, a disabled
+    # "Applying failed" button, and nothing outside it said the change was undone
+    import copy
+    from playwright.sync_api import sync_playwright
+
+    class Reverting(OnlineAgent):
+        async def call(self, name, *args, payload=None, **kwargs):
+            if name == "apply":
+                return {"job": "1-1"}
+            if name == "job":
+                await asyncio.sleep(0.3)
+                return {"state": "reverted", "message": "podkop did not come up; the old settings are back",
+                        "reason": "sing-box: unknown transport"}
+            return await super().call(name, *args, payload=payload, **kwargs)
+
+    class RevHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = Reverting()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    draft = copy.deepcopy(OnlineAgent.config)
+    draft["sections"][1]["options"]["user_domains"] = ["a.com", "b.com"]
+    db.set_draft(1, draft, "fp1")
+    srv, t, base = _serve(RevHub(db, tmp_path / "id_ed25519", ROOT), db)
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/rules")
+            page.locator("text=Review and apply").first.dispatch_event("click")
+            page.wait_for_selector("text=podkop accepts these settings")
+            assert page.locator(".dialog-foot >> text=Cancel").count() == 1
+            page.click(".dialog-foot >> text=Apply")
+            page.wait_for_selector("text=did not stay on the router")
+            assert page.locator("text=podkop accepts these settings").count() == 0
+            page.wait_for_selector(".dialog-foot >> button:has-text('Back to the draft'):not([disabled])")
+            page.screenshot(path=str(tmp_path / "reverted-dialog.png"))
+            page.click(".dialog-foot >> text=Back to the draft")
+            page.wait_for_selector("[aria-label='Last apply'] >> text=unknown transport")
+            assert db.draft(1) is not None
+            page.click("[aria-label='Last apply'] >> text=Dismiss")
+            page.wait_for_selector("[aria-label='Last apply']", state="detached")
+            assert db.get_setting("last_undone:1") is None and errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)

@@ -145,13 +145,14 @@ class RouterRuntime:
         self.offline_told = False                   # "router_offline" was reported for this outage
         self.probe_cache: tuple | None = None       # (time, the router's probe-status)
         self.scheduled: list = []                   # changes waiting for their time: {id, due, note, changes}
+        self.undone: dict | None = None             # the last change from the web that did not stay: {version, state, message, t}
 
     def snapshot(self) -> dict:
         return {"id": self.id, "name": self.row["name"], "host": self.row["host"], "port": self.row["port"],
                 "online": self.online, "error": self.error, "checked": self.checked, "down_since": self.down_since,
                 "status": self.status, "proxies": self.proxies, "names": self.names,
                 "draft": self.draft, "alert": self.alert, "usage": self.usage, "exits": self.exits,
-                "connection_check": self.connection_check, "scheduled": self.scheduled}
+                "connection_check": self.connection_check, "scheduled": self.scheduled, "undone": self.undone}
 
 
 class Hub:
@@ -210,6 +211,7 @@ class Hub:
                          f"({', '.join('?' * len(ALERT_EVENTS))}) ORDER BY id DESC LIMIT 1", rt.id, *ALERT_EVENTS)
         rt.alert = ev
         rt.scheduled = self.db.scheduled(rt.id)
+        rt.undone = self.db.get_setting(f"last_undone:{rt.id}")
         self.update_draft(rt)
         self.db.sync_sub_keys(rt.id, self.db.probe_settings(rt.id)["keys"])
         try:
@@ -474,6 +476,13 @@ class Hub:
             rt.alert = None
         elif typ == "zapret_repaired" and (rt.alert or {}).get("type") == "zapret_missing":
             rt.alert = None
+        elif typ == "apply_interrupted" and data.get("job"):
+            # the router rebooted (or the agent was killed) during a change: its job is gone
+            # with the RAM, this event says how it ended
+            for v in self.db.q("SELECT id FROM versions WHERE router_id = ? AND job = ? AND state IN ('pending', 'running')",
+                               rt.id, data["job"]):
+                bad = "could not" in str(data.get("message") or "")
+                self.db.update_version(v["id"], state="failed" if bad else "reverted", message=data.get("message") or "interrupted")
         if m.get("id"):
             self.db.update_router(rt.id, last_event=m["id"])
         self._notify(rt, typ, data)
@@ -605,20 +614,65 @@ class Hub:
         return cfg
 
     # --- the draft: changes made in the web interface, not applied yet ---------------
+    def apply_in_flight(self, rid: int) -> bool:
+        """A change is on its way to the router or running there now."""
+        return bool(self.db.one("SELECT 1 AS x FROM versions WHERE router_id = ? AND state IN ('pending', 'running')", rid))
+
     def update_draft(self, rt: RouterRuntime) -> None:
-        """Recount the draft's changes against the router's settings; a draft
-        without changes is dropped."""
+        """Recount the draft's changes against the router's settings. While a
+        change runs on the router nothing else happens: its settings move, and
+        whether the draft is done is the job's to say (_track_job). Otherwise a
+        draft the router has already is done (_draft_done), and one made on
+        settings the router changed since (the nightly probe, self-heal, new
+        servers of a key) is moved onto the router's settings now when no
+        setting was changed on both sides (podkop.rebase)."""
         d = self.db.draft(rt.id)
         if not d or not rt.config:
             rt.draft = {"changes": None, "base": d["base"], "updated": d["updated"], "stale": None} if d else None
             return
-        n = len(podkop.diff(rt.config["config"], d["config"]))
-        if n == 0:
-            self.db.delete_draft(rt.id)
-            rt.draft = None
+        cur, fp = rt.config["config"], rt.config["fingerprint"]
+        n = len(podkop.diff(cur, d["config"]))
+        if self.apply_in_flight(rt.id):
+            rt.draft = {"changes": n, "base": d["base"], "updated": d["updated"], "stale": False, "applying": True}
             return
-        rt.draft = {"changes": n, "base": d["base"], "updated": d["updated"],
-                    "stale": d["base"] != rt.config["fingerprint"]}
+        if n == 0:
+            self._draft_done(rt)
+            return
+        conflicts: list = []
+        if d["base"] != fp and d.get("base_config") is not None:
+            config, conflicts = podkop.rebase(d["base_config"], d["config"], cur)
+            if not conflicts:
+                n = len(podkop.diff(cur, config))
+                if n == 0:
+                    self._draft_done(rt)
+                    return
+                self.db.set_draft(rt.id, config, fp, base_config=cur)
+                d = self.db.draft(rt.id)
+                log.info("router %s: draft moved onto the router's new settings", rt.id)
+        rt.draft = {"changes": n, "base": d["base"], "updated": d["updated"], "stale": d["base"] != fp,
+                    "conflicts": conflicts}
+
+    def _draft_done(self, rt: RouterRuntime) -> None:
+        """The router runs the draft now: it goes, with what was kept to undo it,
+        and the switches and zapret of a loaded config are set (the router has
+        its rules now). Not those of a scheduled change: they wait for it."""
+        self.db.delete_draft(rt.id)
+        for name in ("rules_base", "rule_keys_base", "rule_links_base"):
+            self.db.set_setting(f"{name}:{rt.id}", None)
+        rt.draft = None
+        if self.db.get_setting(f"pending_version:{rt.id}") is None and self.has_pending(rt.id):
+            self.after_apply_now(rt)
+
+    def has_pending(self, rid: int) -> bool:
+        return bool(self.db.get_setting(f"zapret_pending:{rid}") or self.db.get_setting(f"router_pending:{rid}"))
+
+    def drop_pending(self, rid: int) -> None:
+        for name in ("zapret_pending", "router_pending", "pending_version"):
+            self.db.set_setting(f"{name}:{rid}", None)
+
+    def _set_undone(self, rt: RouterRuntime, value: dict | None) -> None:
+        rt.undone = value
+        self.db.set_setting(f"last_undone:{rt.id}", value)
 
     async def diff(self, rid: int, config: dict) -> dict:
         cur = await self.config(rid)
@@ -640,8 +694,12 @@ class Hub:
             job = (await rt.agent.call("apply", payload={"base": base, "config": config}, timeout=30))["job"]
         except AgentError as e:
             # no answer in time: the router may have started the job all the same
-            self.db.update_version(vid, state="unknown" if e.code == "timeout" else "failed",
-                                   message=e.message + ("; the router may have applied it: look at its settings" if e.code == "timeout" else ""))
+            state = "unknown" if e.code == "timeout" else "failed"
+            message = e.message + ("; the router may have applied it: look at its settings" if e.code == "timeout" else "")
+            self.db.update_version(vid, state=state, message=message)
+            v = self.db.version(vid) or {}
+            if v.get("trigger") == "web" or v.get("due"):
+                self._set_undone(rt, {"version": vid, "state": state, "t": time.time(), "message": message})
             raise
         self.db.update_version(vid, job=job, state="running")
         self._follow_job(rt, vid, job)
@@ -665,6 +723,9 @@ class Hub:
         vid = self.db.add_version(rid, config, d, note, base, trigger, due=due, base_config=cur["config"])
         if (draft := self.db.draft(rid)) and draft["config"] == config:
             self.db.delete_draft(rid)
+            # a loaded config's switches and zapret wait for this change now
+            if self.has_pending(rid):
+                self.db.set_setting(f"pending_version:{rid}", vid)
             self.update_draft(rt)
         self._event(rt, "scheduled", {"version": vid, "due": due, "changes": len(d), "note": note})
         self._scheduled_changed(rt)
@@ -745,7 +806,13 @@ class Hub:
             cur, config, conflicts = await self._on_router_now(rt, v)
             if conflicts:
                 raise AgentError("config_changed", "the router's settings changed since it was scheduled: " + "; ".join(conflicts))
-            self.db.set_draft(rt.id, config, cur["fingerprint"])
+            self.db.set_draft(rt.id, config, cur["fingerprint"], base_config=cur["config"])
+        if self.db.get_setting(f"pending_version:{rt.id}") == vid:
+            if to_draft:        # they go with the draft again
+                self.db.set_setting(f"pending_version:{rt.id}", None)
+            else:
+                self.drop_pending(rt.id)
+        if to_draft:
             self.update_draft(rt)
         self.db.update_version(vid, state="cancelled", message="moved back to the draft" if to_draft else "cancelled")
         self._event(rt, "schedule_cancelled", {"version": vid, "to_draft": to_draft})
@@ -792,13 +859,28 @@ class Hub:
 
     async def _track_job(self, rt: RouterRuntime, vid: int, job: str) -> dict | None:
         deadline = time.time() + 600
-        data = None
+        data, lost = None, 0
         while time.time() < deadline:
+            v = self.db.version(vid) or {}
+            if v.get("state") not in ("pending", "running"):
+                # ended by the router's own word meanwhile (apply_interrupted after a reboot)
+                data = dict(v.get("details") or {}, state=v.get("state"), message=v.get("message"))
+                self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
+                self._job_ended(rt, vid, v.get("state") or "unknown", data)
+                return data
             try:
                 # short waits, so the browser sees checking -> restarting -> done
                 data = await rt.agent.call("job", job, "2", timeout=30) or {}
+                lost = 0
             except AgentError as e:
                 log.info("job %s on %s: %s", job, rt.row["host"], e.message)
+                # the router forgot the job (jobs live in its RAM): it rebooted, and its
+                # apply_interrupted event says how; without one, it is unknown after 30 s
+                lost = lost + 1 if e.code == "not_found" else 0
+                if lost >= 6:
+                    data = {"state": "unknown", "message": "the router has no record of this change any more (it restarted?): "
+                                                         "look at its settings and the events in History"}
+                    break
                 await asyncio.sleep(5)
                 continue
             self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
@@ -807,26 +889,45 @@ class Hub:
         state = (data or {}).get("state", "unknown")
         if state not in FINAL_JOB_STATES:
             state = "unknown"
-        self.db.update_version(vid, state=state, message=(data or {}).get("message", "no answer from the router"),
-                               details=data)
+        if (self.db.version(vid) or {}).get("state") in ("pending", "running"):
+            self.db.update_version(vid, state=state, message=(data or {}).get("message", "no answer from the router"),
+                                   details=data)
+        self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": dict(data or {}, state=state)})
+        self._job_ended(rt, vid, state, data)
+        return data
+
+    def _job_ended(self, rt: RouterRuntime, vid: int, state: str, data: dict | None) -> None:
+        """A change ended on the router: History, alerts, the draft, the
+        switches and zapret waiting for it."""
         version = self.db.version(vid) or {}
         # ("reverted" has the router's own event)
         if state in ("rejected", "failed", "unknown") and (version.get("trigger") != "web" or version.get("due")):
             self._event(rt, "change_not_applied", {"version": vid, "state": state, "trigger": version.get("trigger"),
                                                    "message": (data or {}).get("message", "no answer from the router")})
+        carried = self.db.get_setting(f"pending_version:{rt.id}") == vid
         if state in OK_JOB_STATES:
+            if version.get("trigger") == "web" and not version.get("due"):
+                self._set_undone(rt, None)
             # the draft that was applied is done with
-            draft, version = self.db.draft(rt.id), self.db.version(vid)
+            draft = self.db.draft(rt.id)
             if draft and version and not podkop.diff(draft["config"], version["config"]):
-                self.db.delete_draft(rt.id)
-                self.db.set_setting(f"rules_base:{rt.id}", None)
-                self.db.set_setting(f"rule_keys_base:{rt.id}", None)
-                self.db.set_setting(f"rule_links_base:{rt.id}", None)
-                rt.draft = None
-                if self.db.get_setting(f"zapret_pending:{rt.id}") or self.db.get_setting(f"router_pending:{rt.id}"):
+                self._draft_done(rt)
+            if carried:
+                self.db.set_setting(f"pending_version:{rt.id}", None)
+                if self.has_pending(rt.id):
                     self.after_apply_now(rt)
+        else:
+            if version.get("trigger") == "web" or version.get("due"):
+                self._set_undone(rt, {"version": vid, "state": state, "t": time.time(),
+                                      "message": (data or {}).get("reason") or (data or {}).get("message") or ""})
+            if carried:
+                self.drop_pending(rt.id)
+                self._event(rt, "settings_failed", {"done": [], "failed": [f"change #{vid} did not stay on the router, "
+                                                                            "so its switches and zapret were not set"]})
+        # the draft is recounted now that nothing runs (it may move onto the new settings)
+        self.update_draft(rt)
+        self.publish({"type": "router", "router": rt.snapshot()})
         rt.wake.set()
-        return data
 
     async def wait_version(self, vid: int, timeout: float = 600) -> dict:
         end = time.time() + timeout
@@ -1395,7 +1496,9 @@ class Hub:
             else:
                 self._event(rt, "stale_probe_not_used", {"message": "the last probe is older than a day: the file's "
                                                          "servers are kept; run the probe to pick new ones"})
-        self.db.set_draft(rid, config, (rt.status or {}).get("fingerprint") or "")
+        fp = (rt.status or {}).get("fingerprint") or ""
+        self.db.set_draft(rid, config, fp, base_config=(rt.config or {}).get("config") if (rt.config or {}).get("fingerprint") == fp else None)
+        self.db.set_setting(f"pending_version:{rid}", None)
         # its zapret first and the router's switches: set once this draft is applied (the router
         # needs the rules first)
         self.db.set_setting(f"zapret_pending:{rid}", saved.get("zapret") or None)
@@ -1426,24 +1529,40 @@ class Hub:
         return {"rules": sorted(rules), "refused": sorted(set(rules) & set((out or {}).get("refused") or [])), "installed": installed}
 
     def after_apply_now(self, rt: RouterRuntime) -> None:
-        """The loaded config's switches and zapret first, in the background (events tell how it went)."""
-        task = asyncio.create_task(self._after_apply(rt))
+        """The loaded config's switches and zapret first, in the background (events tell how it went);
+        one at a time per router."""
+        if getattr(rt, "after_task", None) and not rt.after_task.done():
+            return
+        task = rt.after_task = asyncio.create_task(self._after_apply(rt))
         self.jobs.add(task)
         task.add_done_callback(self.jobs.discard)
 
-    async def _after_apply(self, rt: RouterRuntime) -> None:
-        await self._router_after_apply(rt)
-        await self._zapret_after_apply(rt)
+    # an agent answer worth another try a little later: the router is busy (an
+    # apply, a probe) or away for a moment
+    AGAIN_CODES = ("busy", "unreachable", "timeout")
+    AFTER_APPLY_WAITS = (30, 120, 600)
 
-    async def _router_after_apply(self, rt: RouterRuntime) -> None:
+    async def _after_apply(self, rt: RouterRuntime) -> None:
+        """Kept in the database until set: a busy or unreachable router is tried
+        again after 30 s, 2 and 10 minutes; then what is left is reported."""
+        for wait in (0, *self.AFTER_APPLY_WAITS):
+            if wait:
+                await asyncio.sleep(wait)
+            last = wait == self.AFTER_APPLY_WAITS[-1]
+            again = await self._router_after_apply(rt, last)
+            again = await self._zapret_after_apply(rt, last) or again
+            if not again:
+                return
+
+    async def _router_after_apply(self, rt: RouterRuntime, last: bool = True) -> bool:
         """A loaded config's kill switches, Protected rules, self-heal off and
         nightly probe settings (the router's lists are replaced; what the
-        file leaves out stays). Each one on its own: one refused, the others go on."""
+        file leaves out stays). Each one on its own: one refused, the others
+        go on. -> True when some wait for another try."""
         part = self.db.get_setting(f"router_pending:{rt.id}") or {}
-        self.db.set_setting(f"router_pending:{rt.id}", None)
         if not part:
-            return
-        done, failed = [], []
+            return False
+        done, failed, left = [], [], {}
         if "probe" in part and part["probe"]:
             self.db.set_probe_settings(rt.id, **part["probe"])
             done.append("nightly probe")
@@ -1455,22 +1574,33 @@ class Hub:
                 await rt.agent.call(command, payload={"sections": part[key]}, timeout=60)
                 done.append(f"{what}: {', '.join(part[key]) or 'none'}")
             except AgentError as e:
-                failed.append(f"{what}: {e.message}")
+                if e.code in self.AGAIN_CODES and not last:
+                    left[key] = part[key]
+                else:
+                    failed.append(f"{what}: {e.message}")
+        self.db.set_setting(f"router_pending:{rt.id}", left or None)
         with contextlib.suppress(AgentError):
             await self.refresh(rt)
-        self._event(rt, "settings_failed" if failed else "settings_on", {"done": done, "failed": failed})
+        if done or failed:
+            self._event(rt, "settings_failed" if failed else "settings_on",
+                        {"done": done, "failed": failed, **({"later": sorted(left)} if left else {})})
+        return bool(left)
 
-    async def _zapret_after_apply(self, rt: RouterRuntime) -> None:
-        """A loaded config's zapret first, now that its rules are on the router."""
+    async def _zapret_after_apply(self, rt: RouterRuntime, last: bool = True) -> bool:
+        """A loaded config's zapret first, now that its rules are on the router.
+        -> True when it waits for another try."""
         rules = self.db.get_setting(f"zapret_pending:{rt.id}") or {}
-        self.db.set_setting(f"zapret_pending:{rt.id}", None)
         if not rules:
-            return
+            return False
         try:
             r = await self.zapret_on(rt, rules)
         except (AgentError, ValueError, OSError) as e:
+            if isinstance(e, AgentError) and e.code in self.AGAIN_CODES and not last:
+                return True
+            self.db.set_setting(f"zapret_pending:{rt.id}", None)
             self._event(rt, "zapret_failed", {"rules": sorted(rules), "message": getattr(e, "message", "") or str(e)})
-            return
+            return False
+        self.db.set_setting(f"zapret_pending:{rt.id}", None)
         self._event(rt, "zapret_on", {"rules": [x for x in r["rules"] if x not in r["refused"]], "refused": r["refused"],
                                       "installed": r["installed"]})
 

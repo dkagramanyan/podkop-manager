@@ -2,7 +2,7 @@
 
 import { pageHead, seg } from "./shell.js";
 import { S } from "./state.js";
-import { ago, api, duration, h, hhmm, icon, longWhen, modal, plural, put, toast } from "./ui.js";
+import { ago, api, confirmDialog, duration, h, hhmm, icon, longWhen, modal, plural, put, toast } from "./ui.js";
 
 // --- keys and usage -----------------------------------------------------------------------------------
 
@@ -266,7 +266,7 @@ export async function viewUsage(main, id) {
     redraw();
     const m = modal({ title: k.label, narrow: true, body: box,
       foot: [h("button", { type: "button", class: "btn danger", onclick: async () => {
-        if (!confirm(k.kind === "sub" ? `Remove ${k.label}? The probe stops testing its servers.` : `Remove ${k.label}?`)) return;
+        if (!await confirmDialog(`Remove ${k.label}?`, k.kind === "sub" ? "The probe stops testing its servers." : "This cannot be undone.", "Remove")) return;
         try { await api("DELETE", `/api/keys/${k.id}`); m.close(); await load(); draw(); } catch (e) { toast(e.message, true); }
       } }, "Remove"),
       h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => m.close() }, "Cancel"),

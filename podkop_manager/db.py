@@ -94,6 +94,7 @@ KEY_FIELDS = {"label", "limit_source", "limit_gb", "period", "reset_time", "acti
 
 # columns added after the first release: (table, column, declaration)
 COLUMNS = [
+    ("drafts", "base_config", "TEXT"),       # the router's settings the draft was made on (for a rebase)
     ("logs", "source", "TEXT NOT NULL DEFAULT ''"),
     ("logs", "level", "TEXT NOT NULL DEFAULT 'info'"),
     ("versions", "trigger", "TEXT NOT NULL DEFAULT 'web'"),
@@ -219,7 +220,8 @@ class DB:
         # the hub's per-router settings, so a router that gets this id later starts clean
         for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
                      "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced",
-                     "reliability", "server_health", "kuma_token", "heal_probe", "entry_ips"):
+                     "reliability", "server_health", "kuma_token", "heal_probe", "entry_ips",
+                     "zapret_pending", "router_pending", "pending_version", "last_undone", "watch"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -486,15 +488,20 @@ class DB:
 
     # --- drafts: unapplied changes, one per router ----------------------------------------
     def draft(self, rid: int) -> dict | None:
-        r = self.one("SELECT config, base, updated FROM drafts WHERE router_id = ?", rid)
+        r = self.one("SELECT config, base, updated, base_config FROM drafts WHERE router_id = ?", rid)
         if r:
             r["config"] = json.loads(r["config"])
+            r["base_config"] = json.loads(r["base_config"]) if r["base_config"] else None
         return r
 
-    def set_draft(self, rid: int, config: dict, base: str) -> None:
-        self.x("INSERT INTO drafts (router_id, config, base, updated) VALUES (?, ?, ?, ?) "
+    def set_draft(self, rid: int, config: dict, base: str, base_config: dict | None = None) -> None:
+        """base_config: the router's settings with fingerprint base; left out, the
+        draft keeps the one it had while its base stays the same."""
+        self.x("INSERT INTO drafts (router_id, config, base, updated, base_config) VALUES (?, ?, ?, ?, ?) "
                "ON CONFLICT (router_id) DO UPDATE SET config = excluded.config, base = excluded.base, "
-               "updated = excluded.updated", rid, json.dumps(config), base, time.time())
+               "updated = excluded.updated, base_config = CASE WHEN excluded.base_config IS NULL AND "
+               "drafts.base = excluded.base THEN drafts.base_config ELSE excluded.base_config END",
+               rid, json.dumps(config), base, time.time(), json.dumps(base_config) if base_config is not None else None)
 
     def delete_draft(self, rid: int) -> None:
         self.x("DELETE FROM drafts WHERE router_id = ?", rid)

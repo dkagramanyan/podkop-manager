@@ -510,3 +510,14 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
   /* the rule's page stays in sight while the list scrolls */
   .split > .edit-col { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; border-radius: 12px; }
 }
+
+/* --- 1.60: dialogs keep their buttons in sight; the draft bar stays at the top while one edits --- */
+.dialog { max-height: 88vh; }
+.dialog-body { overflow-y: auto; padding-top: 2px; }
+.dialog-head, .dialog-foot { flex: none; }
+@media (max-width: 600px) {
+  .modal-bg { padding: 0; }
+  .dialog { border-radius: 0; max-height: 100dvh; min-height: 100dvh; }
+  .dialog-body { flex: 1; }
+}
+.banner.sticky-bar { position: sticky; top: 8px; z-index: 5; box-shadow: 0 6px 18px rgba(20, 24, 28, .10); }

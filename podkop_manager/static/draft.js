@@ -5,7 +5,7 @@ import { problemText, shortValue } from "./history.js";
 import { bySection, configDiff, rulesOf, same, sectionsOf } from "./model.js";
 import { render, seg } from "./shell.js";
 import { S } from "./state.js";
-import { OLD_FP, api, asList, clone, fixFingerprint, h, icon, linkDetails, linkName, linkProto, longWhen, oldFingerprint, plural, put, toast } from "./ui.js";
+import { OLD_FP, api, asList, clone, confirmDialog, fixFingerprint, h, icon, linkDetails, linkName, linkProto, longWhen, oldFingerprint, plural, put, toast } from "./ui.js";
 
 // --- the routing draft ---------------------------------------------------------------------------------
 // One per router, shared by Rules and Global settings, kept on the manager
@@ -57,10 +57,13 @@ export function saveWork(w) {
 
 export async function putWork(w) {
   if (w.stale) return;
+  w.putting = true;       // its own change comes back as a router update: not someone else's
   try {
     if (workChanges(w).length) {
       const d = await api("PUT", `/api/routers/${w.id}/draft`, { config: w.config, base: w.base, rev: w.rev });
       w.rev = d ? d.updated : null;
+      // the manager moved it onto settings the router changed meanwhile: show that one
+      if (d && d.base && d.base !== w.base && S.work[w.id] === w) loadWork(w.id).then(render).catch(() => {});
     } else {
       await api("DELETE", `/api/routers/${w.id}/draft${w.rev !== null ? `?rev=${w.rev}` : ""}`);
       w.rev = null;
@@ -72,7 +75,7 @@ export async function putWork(w) {
     w.stale = true;
     // not awaited: loadWork waits for this save to end
     if (S.work[w.id] === w) loadWork(w.id).then(render).catch((e2) => toast(e2.message, true));
-  }
+  } finally { w.putting = false; }
 }
 
 // after every edit: save the draft a moment later, update the bar
@@ -131,29 +134,44 @@ export function draftBar(w) {
   w.drawBar = () => {
     const n = workChanges(w).length;
     const rt = S.routers[w.id];
-    // while the router applies, its fingerprint moves; that is not someone else's change
-    const busy = !!(rt && rt.status && rt.status.podkop.busy);
-    const stale = w.base !== w.fp && !busy;
+    // while the router applies, its fingerprint moves; that is not someone else's change.
+    // The manager moves a draft onto the router's new settings by itself; stale is
+    // what it could not move (the same setting changed on both sides)
+    const busy = !!(rt && rt.status && rt.status.podkop.busy) || !!(rt && rt.draft && rt.draft.applying);
+    const stale = rt && rt.draft ? !!rt.draft.stale && !busy : w.base !== w.fp && !busy && n > 0;
+    const conflicts = (rt && rt.draft && rt.draft.conflicts) || [];
+    const undone = rt && rt.undone;
+    const undoneLine = undone ? h("div", { class: "banner bad", role: "region", "aria-label": "Last apply", style: "margin-bottom: 8px" },
+      h("span", { class: "dot bad" }),
+      h("span", { class: "grow small" }, h("b", {}, undone.state === "unknown" ? `Change #${undone.version}: the router never said how it ended`
+        : `Change #${undone.version} did not stay on the router`), undone.message ? `: ${undone.message}` : "",
+      n ? ". Your changes are still here: fix them and apply again." : "."),
+      h("a", { class: "alink", href: `#/r/${w.id}/history` }, "History"),
+      h("button", { type: "button", class: "btn ghost sm", onclick: async () => {
+        try { await api("DELETE", `/api/routers/${w.id}/undone`); rt.undone = null; w.drawBar(); } catch (e) { toast(e.message, true); }
+      } }, "Dismiss")) : null;
     const sched = (rt && rt.scheduled) || [];
     const schedLine = sched.length ? h("div", { class: "banner", role: "region", "aria-label": "Scheduled changes", style: "margin-bottom: 8px" },
       h("span", { class: "dot accent" }),
       h("span", { class: "grow small" }, h("b", {}, `${plural(sched.length, "change")} scheduled`),
         `, next ${longWhen(sched[0].due)}${sched[0].note ? `: ${sched[0].note}` : ""}`),
       h("a", { class: "alink", href: `#/r/${w.id}/history` }, "History")) : null;
-    if (!n && !stale) { put(box, schedLine); return; }
+    if (!n && !stale) { put(box, undoneLine, schedLine); return; }
     const probs = w.problems || [];
-    put(box, schedLine, h("div", { class: `banner${stale ? " bad" : ""}`, role: "region", "aria-label": "Unapplied changes" },
+    put(box, undoneLine, schedLine, h("div", { class: `banner sticky-bar${stale ? " bad" : ""}`, role: "region", "aria-label": "Unapplied changes" },
       h("span", { class: `dot ${stale ? "bad" : "accent"}` }),
       h("div", { class: "row grow", style: "flex: 1 1 300px; align-items: baseline; gap: 4px 12px" },
         h("span", { style: "font-size: 14px; font-weight: 600" }, n ? `${plural(n, "change")} not applied` : "Draft"),
-        stale ? h("span", { class: "small bad-text" }, "Settings changed on the router since. Discard and edit again.")
+        stale ? h("span", { class: "small bad-text" }, conflicts.length
+          ? `Changed on the router too since: ${conflicts.join("; ")}. Discard and edit again.`
+          : "Settings changed on the router since. Discard and edit again.")
           : busy ? h("span", { class: "small muted" }, "The router is applying settings now…")
             : w.checking ? h("span", { class: "small muted" }, "Checking on the router…")
             : w.problems ? h("span", { class: `small ${probs.length ? "bad-text" : "ok-text"}` },
               probs.length ? `${plural(probs.length, "problem")} found by Check${w.problems.stale ? ", changed since" : ""}` : `Check found no problems${w.problems.stale ? ", changed since" : ""}`) : null),
       h("div", { class: "row" },
         h("button", { type: "button", class: "btn ghost", onclick: async () => {
-          if (confirm(`Discard ${plural(n, "change")}? The router keeps its settings.`)) await discardWork(w);
+          if (await confirmDialog(`Discard ${plural(n, "change")}?`, "The router keeps its settings.", "Discard")) await discardWork(w);
         } }, "Discard"),
         !stale ? h("button", { type: "button", class: "btn", disabled: w.checking, onclick: () => checkWork(w) }, w.problems ? "Check again" : "Check") : null,
         !stale ? h("button", { type: "button", class: "btn primary", onclick: () => reviewWork(w) }, "Review and apply") : null)),
