@@ -21,7 +21,17 @@ export function connect() {
     S.live = on; drawSide();
     S.view && S.view.onLive && S.view.onLive();
   };
-  es.onopen = () => live(true);
+  es.onopen = () => {
+    const back = S.live === false;
+    live(true);
+    // back after a break: what changed meanwhile came on the stream nobody heard
+    if (back) {
+      api("GET", "/api/routers").then((list) => {
+        for (const r of list) { S.routers[r.id] = r; S.view && S.view.onRouter && S.view.onRouter(r); }
+        drawSide();
+      }).catch(() => {});
+    }
+  };
   es.onerror = () => {
     live(false);
     // a 401 or a proxy error closes it for good: check the login, then connect again

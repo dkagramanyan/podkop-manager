@@ -271,8 +271,10 @@ class DB:
         # each version holds a whole config and each probe run all its rows: keep the newest
         self.x("DELETE FROM versions WHERE state != 'scheduled' AND id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER "
                "(PARTITION BY router_id ORDER BY id DESC) AS n FROM versions) WHERE n > ?)", versions)
+        # (counted among runs that still have a result; the newest full run's stays, however many heal runs came after)
         self.x("UPDATE probe_runs SET result = NULL WHERE result IS NOT NULL AND id IN (SELECT id FROM (SELECT id, "
-               "ROW_NUMBER() OVER (PARTITION BY router_id ORDER BY id DESC) AS n FROM probe_runs) WHERE n > ?)",
+               "ROW_NUMBER() OVER (PARTITION BY router_id ORDER BY id DESC) AS n FROM probe_runs WHERE result IS NOT NULL) WHERE n > ?) "
+               "AND id NOT IN (SELECT max(id) FROM probe_runs WHERE result IS NOT NULL AND trigger != 'heal' GROUP BY router_id)",
                probe_results)
 
     # --- config versions ------------------------------------------------------------

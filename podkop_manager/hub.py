@@ -1879,7 +1879,9 @@ class Hub:
 
     def usage(self, rid: int) -> dict:
         now = time.time()
-        since = now - 15 * usage.DAY
+        # 15 days for the charts, and the whole month for a monthly limit (counted from the 1st)
+        month = dt.datetime.now().astimezone().replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+        since = min(now - 15 * usage.DAY, month - usage.DAY)
         traffic = self.db.traffic(rid, since)
         rows = self.db.keys(rid)
         keys = [usage.key_usage(k, self.db.key_usage(k["id"], since), [r for r in traffic if r["key_id"] == k["id"]], now)
@@ -2034,8 +2036,9 @@ class Hub:
             try:
                 await self.start_probe(rid, "schedule")
             except AgentError as e:
-                if e.code in ("unreachable", "timeout"):
-                    return          # the router is away: try again in 30 s, within the hour
+                # the router is away, or busy (an apply, a heal probe): try again in 30 s, within the hour
+                if e.code in ("unreachable", "timeout", "busy") and late < 3600 - 60:
+                    return
                 self._event(self.routers[rid], "probe_not_started", {"message": e.message})
             self.db.set_probe_settings(rid, last_run_day=day)
         elif late < 3600 + 120 and not self.routers[rid].online:

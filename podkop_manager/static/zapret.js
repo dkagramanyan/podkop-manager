@@ -223,8 +223,10 @@ export function strategiesCard() {
           catch (e) { toast(e.message, true); }
         }) }, "Save"),
         h("button", { type: "button", class: "btn", onclick: busyClick(async () => {
-          await api("PUT", "/api/zapret/strategies", { text: "" });
-          const d = await api("GET", "/api/zapret/strategies"); ta.value = d.text; toast("Back to the default list");
+          try {
+            await api("PUT", "/api/zapret/strategies", { text: "" });
+            const d = await api("GET", "/api/zapret/strategies"); ta.value = d.text; toast("Back to the default list");
+          } catch (e) { toast(e.message, true); }
         }) }, "Back to defaults")));
   }).catch(() => card.remove());
   return card;

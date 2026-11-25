@@ -1092,6 +1092,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             fields["keys"] = [str(k).strip() for k in body["keys"]
                               if re.fullmatch(r"https?://\S+", str(k).strip())]
         if "options" in body:
+            if not isinstance(body["options"], list) or len(body["options"]) > 50:
+                raise HTTPException(400, "options must be a list of podkop-probe options")
             fields["options"] = [str(o) for o in body["options"]]
         if "schedule" in body:
             s = str(body["schedule"]).strip()
@@ -1181,10 +1183,16 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                 raise HTTPException(400, "the threshold is 50 to 100%")
         if k["kind"] == "link":
             fields.pop("limit_source", None)
+        # a new limit, threshold or action is looked at afresh: rules moved off the key come back
+        # when it is under the new threshold (it stayed avoided until the next reset)
+        if any(f in fields for f in ("limit_gb", "threshold", "action", "period", "limit_source")):
+            fields["acted_until"] = None
         db.update_key(kid, **fields)
         if rt := hub.routers.get(k["router_id"]):
             await hub.check_usage(rt)
-        return db.key(kid)
+        out = db.key(kid)
+        # a subscription's address is a secret nobody needs to read back
+        return dict(out, url=usage.mask(out["url"])) if out and out.get("kind") == "sub" else out
 
     @app.delete("/api/keys/{kid}", dependencies=[api])
     async def delete_key(kid: int):
@@ -1203,7 +1211,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     async def probe_take_over(rid: int):
         """podkop-probe ran by itself on the router (cron): the manager runs it
         from now on, at the same time, applying the result like it did."""
-        return await hub.take_over_probe(router_or_404(rid))
+        ps = await hub.take_over_probe(router_or_404(rid))
+        return dict(ps, keys=[usage.mask(k) for k in ps.get("keys") or []]) if isinstance(ps, dict) else ps
 
     @app.post("/api/routers/{rid}/probe/start", dependencies=[api])
     async def probe_start(rid: int):
