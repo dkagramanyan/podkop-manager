@@ -189,9 +189,39 @@ def interval(db) -> int:
     return v if v in INTERVALS else 30
 
 
+URL = re.compile(r"https?://[!-~]{1,290}")
+MAX_URLS = 8        # check addresses a rule keeps on the router
+
+
+def check_url(u):
+    """One check address: a URL, or one learnt on the router's line
+    ({"from": URL, "field": n, "tr": [a, b], "url": "https://x-{}.y/"}: word n of
+    the first line of "from", its characters mapped a -> b, in place of {});
+    a line of JSON text is read as the latter. Raises ValueError."""
+    if isinstance(u, str) and u.lstrip().startswith("{"):
+        try:
+            u = json.loads(u)
+        except ValueError:
+            raise ValueError(f"not an address: {u[:80]}") from None
+    if isinstance(u, str) and URL.fullmatch(u):
+        return u
+    if (isinstance(u, dict) and all(isinstance(u.get(k), str) and URL.fullmatch(u[k]) for k in ("from", "url"))
+            and u["url"].count("{}") == 1 and isinstance(u.get("field"), int) and not isinstance(u["field"], bool)
+            and 1 <= u["field"] <= 20 and isinstance(u.get("tr"), list) and len(u["tr"]) == 2
+            and all(isinstance(t, str) and re.fullmatch(r"[a-z0-9]{1,64}", t) for t in u["tr"])
+            and len(u["tr"][0]) == len(u["tr"][1])):
+        return {"from": u["from"], "field": u["field"], "tr": list(u["tr"]), "url": u["url"]}
+    raise ValueError(f"not an address: {str(u)[:80]}")
+
+
+def url_text(u) -> str:
+    """A check address as one line of text (a learnt one as JSON)."""
+    return u if isinstance(u, str) else json.dumps(u, separators=(",", ":"))
+
+
 def check_rule(name: str, r) -> dict:
-    """One rule's zapret ({args, url, name, service}) as the router takes it;
-    raises ValueError naming the rule."""
+    """One rule's zapret ({args, url, name, service, urls}) as the router
+    takes it; raises ValueError naming the rule."""
     if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", str(name)) or not isinstance(r, dict):
         raise ValueError(f"bad rule {name!r}")
     args = r.get("args")
@@ -204,7 +234,15 @@ def check_rule(name: str, r) -> dict:
     service = str(r.get("service") or "")
     if service and service not in DEFAULTS["services"] and service != "other":
         raise ValueError(f"{name}: unknown service {service!r}")
-    return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120], "service": service}
+    urls = r.get("urls") or []
+    if not isinstance(urls, list) or len(urls) > MAX_URLS:
+        raise ValueError(f"{name}: up to {MAX_URLS} check addresses expected")
+    try:
+        urls = [check_url(u) for u in urls]
+    except ValueError as e:
+        raise ValueError(f"{name}: {e}") from None
+    return {"args": args, "url": url, "name": str(r.get("name") or "").replace("\n", " ")[:120], "service": service,
+            "urls": urls}
 
 
 def check_rules(rules, config: dict) -> dict:
@@ -230,6 +268,13 @@ def rules_view(config: dict) -> list[dict]:
         out.append({"name": s["name"], "service": key, "default": bool(svc.get("default")),
                     "urls": svc.get("urls") or [], "test": svc.get("test") or "", "note": svc.get("note") or ""})
     return out
+
+
+def service_urls(service: str) -> list:
+    """The check addresses a rule of this service keeps on the router (its
+    first one, the service's test address, apart)."""
+    svc = DEFAULTS["services"].get(service) or {}
+    return [u for u in svc.get("urls") or [] if u != svc.get("test")][:MAX_URLS]
 
 
 def best(results: list[dict]) -> dict | None:
@@ -276,8 +321,11 @@ async def auto(agent, rules: list[dict], strategies: list[dict], current: dict, 
         elif not pick:
             state["outcome"][r["name"]] = {"on": False, "why": "no strategy opened every test address; the rule stays on its servers"}
         else:
-            new[r["name"]] = {"args": pick["args"], "url": r["test"] or r["urls"][0], "name": pick.get("name") or "",
-                              "service": r.get("service") or ""}
+            test = r["test"] or next(u for u in r["urls"] if isinstance(u, str))
+            new[r["name"]] = {"args": pick["args"], "url": test, "name": pick.get("name") or "",
+                              "service": r.get("service") or "",
+                              # the router keeps checking them all: a site that opens only partly goes to its servers
+                              "urls": [u for u in r["urls"] if u != test][:MAX_URLS]}
             state["outcome"][r["name"]] = {"on": True, "strategy": pick.get("name") or ""}
     state["now"] = None
     return new

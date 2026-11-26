@@ -838,7 +838,9 @@ def test_a_loaded_configs_zapret_first_is_turned_on_once_it_is_applied(tmp_path,
         await asyncio.gather(*hub.jobs)
     asyncio.run(apply(out, "j1"))
     assert installs == ["aarch64"] and db.get_setting(f"zapret_pending:{rid}") is None
-    assert state["rules"] == {"kept": {"args": ["--a=1"], "url": "https://k/", "name": "k", "service": ""}, **zap}
+    assert state["rules"] == {"kept": {"args": ["--a=1"], "url": "https://k/", "name": "k", "service": ""},
+                              # (a file from before 0.48 has no check addresses: its service's are given)
+                              "main": dict(zap["main"], urls=["https://abs.twimg.com/"])}
     ev = db.q("SELECT type, data FROM events WHERE router_id = ? ORDER BY id DESC LIMIT 1", rid)[0]
     assert ev["type"] == "zapret_on" and json.loads(ev["data"]) == {"rules": ["main"], "refused": [], "installed": True}
     # another config without zapret: nothing pending; an agent without zapret: the event says why

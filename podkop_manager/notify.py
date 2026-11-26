@@ -39,6 +39,11 @@ TEXT = {
                            + (f" after {span(d['down_for'])}" if isinstance(d.get("down_for"), (int, float)) else ""),
     "zapret_servers": lambda d: f"{d.get('section')}: zapret does not open its sites now, the rule uses its servers",
     "zapret_direct": lambda d: f"{d.get('section')}: back on zapret (direct)",
+    "zapret_partial": lambda d: (f"{d.get('section')}: zapret opens it only partly "
+                                 f"({', '.join(d.get('failed') or [])} did not open), the rule uses its servers"),
+    "zapret_whole": lambda d: f"{d.get('section')}: every check address opens again, back on zapret",
+    "zapret_fitted": lambda d: f"{d.get('section')}: zapret has a new strategy, {d.get('strategy')}",
+    "zapret_unfit": lambda d: f"{d.get('section')}: no better zapret strategy ({d.get('why')}); the rule stays on its servers",
     "zapret_missing": lambda d: f"{', '.join(d.get('rules') or [])}: zapret is missing in sing-box and could not be put back"
                                 f" ({d.get('reason') or ''}); the rule uses its servers",
     "zapret_repaired": lambda d: f"{', '.join(d.get('rules') or [])}: zapret was missing in sing-box and was put back",

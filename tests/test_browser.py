@@ -531,7 +531,8 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             assert "null" not in page.locator("[aria-label='Zapret first']").inner_text()
             assert checks[-1]["urls"][0] == "https://www.instagram.com/"
             assert sets[-1]["rules"] == {"meta": {"args": ["--payload=tls_client_hello"], "url": "https://www.instagram.com/",
-                                                  "name": "fake md5", "service": "meta"}}
+                                                  "name": "fake md5", "service": "meta",
+                                                  "urls": ["https://www.facebook.com/"]}}       # the rest are kept and checked
             # the other working strategy can be picked by hand
             page.click("summary:has-text('Strategies tried')")
             page.click("button:has-text('Use this')")
@@ -571,7 +572,7 @@ def test_zapret_first_on_a_rules_page_finds_a_strategy_and_shows_in_the_list(tmp
             page.click("button:has-text('Turn on')")
             page.wait_for_selector("text=zapret first on github")
             assert sets[-1]["rules"]["github"] == {"args": ["--payload=tls_client_hello"], "url": "https://github.com/",
-                                                   "name": "from a file", "service": "other"}
+                                                   "name": "from a file", "service": "other", "urls": []}
             assert page.locator("text=No saved configs").count() == 1
             # the strategy list lives in Settings
             page.goto(f"{base}/#/settings")

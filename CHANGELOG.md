@@ -3,6 +3,46 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.61.0 — 2026-11-26
+
+A zapret rule is checked with all of its addresses, and gets its strategy by
+itself (agent 0.31.0, manager 0.48.0). Update the manager, then the agent
+on every router with zapret rules; nothing else to do.
+
+- **A site that opens only partly no longer stays on zapret.** The check
+  used one address per rule (YouTube: `www.youtube.com`). With the strategy
+  the routers had, that page opened while `youtubei.googleapis.com` (what
+  the YouTube apps talk to) and the provider's own video servers
+  (`rr…googlevideo.com`) got no answer: the rule showed "zapret", and
+  YouTube did not play. A rule now keeps a list of check addresses; the
+  router opens each of them through zapret at every check. When one fails
+  3 checks in a row while the first still opens, the rule's traffic goes to
+  its servers (state "partial", event `zapret_partial` with the addresses
+  that failed), and comes back after 6 checks in a row with all of them
+  open, or when its strategy changes. A rule that goes to its servers
+  again within 6 hours of coming back stays there for 6 hours (each move
+  reloads sing-box; an address that opens now and then must not move the
+  rule back and forth). The first address works as before (sing-box's own
+  check).
+- **The strategy is fitted by itself.** When the router reports a partly
+  opening rule, the manager runs the strategy search on that router with
+  all of the rule's addresses and sets the fastest strategy that opens
+  every one (`zapret_fitted`), or tells that none does (`zapret_unfit`; the
+  rule stays on its servers, tried again every 6 hours). Rules set before
+  this version get their service's addresses on the first look, so a wrong
+  strategy is found and replaced without a click.
+- **An address learnt on the router's line.** YouTube's video servers
+  differ per provider. A check address may be a rule for finding one
+  (`zapret.json`: where to read it, which word, how its letters map), so
+  the search and the check test the video server of the router's own
+  provider. YouTube's list: the site, the apps' API, the pictures' host
+  and that video server.
+- A router whose agent is older than 0.31 keeps working as before: it is
+  searched with the plain addresses only and has no check of the others.
+- The rule page's "Check addresses" are all kept and checked (one per
+  line), and shows the ones that did not open in the last check. A config
+  file carries them (`urls`); a file from before gets its service's.
+
 ## 1.60.2 — 2026-11-26
 
 Agent 0.30.2, manager 0.47.1.

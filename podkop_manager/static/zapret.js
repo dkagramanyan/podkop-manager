@@ -29,6 +29,7 @@ export function zapretTag(rt, s) {
 export const ZAPRET_STATE = {
   zapret: ["ok", "zapret", "Its web traffic goes out direct, through zapret2"],
   servers: ["warn", "zapret → servers", "zapret does not open its sites now: the rule uses its servers"],
+  partial: ["warn", "zapret → servers", "zapret opens its sites only partly: the rule uses its servers while another strategy is looked for"],
   missing: ["bad", "zapret missing", "zapret is on, but sing-box runs without it: the router puts it back within a minute"],
   stopped: ["bad", "zapret stopped", "zapret2 (nfqws2) does not run: the router starts it again"],
   no_table: ["bad", "zapret firewall missing", "zapret's firewall table is missing: the router adds it again"],
@@ -73,10 +74,11 @@ export function zapretParts(w, s, redraw) {
   ui.service = ui.service || (on && on.service) || guess;
   const svc = z.services[ui.service] || { urls: [], test: "", note: "" };
   if (ui.urls === undefined || ui.forService !== ui.service) {
-    ui.urls = (on && (on.service || "other") === ui.service && ui.service === "other" ? [on.url] : svc.urls).join("\n");
+    const own = on && (on.service || "other") === ui.service && ui.service === "other";
+    ui.urls = (own ? [on.url, ...(on.urls || []).map((u) => (typeof u === "string" ? u : JSON.stringify(u)))] : svc.urls).join("\n");
     ui.forService = ui.service;
   }
-  const urls = () => ui.urls.split(/\s+/).filter(Boolean);
+  const urls = () => ui.urls.split(/\n+/).map((x) => x.trim()).filter(Boolean);
 
   // this page still shows this router's rules (a timer of a page left behind stops)
   const shown = () => S.work[w.id] === w && location.hash.startsWith(`#/r/${w.id}/rules`);
@@ -155,7 +157,7 @@ export function zapretParts(w, s, redraw) {
         h("td", { class: "small" }, r.ok ? h("span", { class: "pill ok" }, `opens, ${ms(r.urls.reduce((a, u) => a + (u.ms || 0), 0))}`)
           : h("span", { class: "muted" }, r.error || (r.urls.find((u) => !u.ok) || {}).detail || "does not open")),
         h("td", {}, r.ok && !(on && on.name === r.name) ? h("button", { type: "button", class: "btn xs", disabled: running,
-          onclick: busyClick(() => setRule({ args: r.args, url: urls()[0], name: r.name, service: ui.service },
+          onclick: busyClick(() => setRule({ args: r.args, url: urls()[0], urls: urls().slice(1), name: r.name, service: ui.service },
             `${s.name}: zapret first, with ${r.name}`)) }, "Use this") : null))))))) : null;
   const outcome = run && run.outcome[s.name];
 
@@ -189,7 +191,8 @@ export function zapretParts(w, s, redraw) {
       h("label", { class: "lbl" }, "Check addresses"), h("div", { class: "ctl" },
         h("textarea", { class: "input mono xs", rows: 2, spellcheck: "false", disabled: running, "aria-label": "Check addresses",
           placeholder: "https://example.com/", oninput: (e) => { ui.urls = e.target.value; } }, ui.urls),
-        h("span", { class: "xs muted" }, `Sites that must open through zapret; the first one is checked every ${z.interval || 30} s (Settings)`))),
+        h("span", { class: "xs muted" }, `One per line. All must open through zapret, and all are checked every ${z.interval || 30} s (Settings): when the first fails the rule uses its servers until it opens again; when another fails, it uses its servers and another strategy is looked for by itself.`),
+        (st.failed || {})[s.name] && st.failed[s.name].length ? h("span", { class: "xs warn-text" }, `Did not open in the last check: ${st.failed[s.name].join(", ")}`) : null)),
     known && !refused ? h("div", { class: "row" },
       h("button", { type: "button", class: "btn", disabled: running, onclick: search }, on ? "Find the best strategy again" : "Find a strategy and turn on"),
       st.installed ? h("span", { class: "xs muted" }, `zapret2 ${st.installed} on this router · sites see the router's own address · QUIC refused there, so apps use TCP`)
@@ -213,7 +216,7 @@ export function strategiesCard() {
     const sub = h("span", { class: "small muted" }, z.custom ? `Your list, ${z.count} strategies.` : `The default list, ${z.count} strategies: zapret2's docs and blockcheck2, and Flowseal's lists ported to zapret2.`);
     card.replaceChildren(h("h2", { id: "s-zap" }, "Zapret"),
       h("div", { class: "row" }, h("span", { style: "font-size: 13px; font-weight: 500" }, "Check a zapret rule every"), every),
-      h("span", { class: "small muted" }, "The router opens each zapret rule's first check address through zapret at this interval (sing-box's own check uses the same one). When it fails, the rule's web traffic goes through its servers until it opens again; the move is reported after two rounds of the agent (about 30 s)."),
+      h("span", { class: "small muted" }, "The router opens every check address of each zapret rule through zapret at this interval (sing-box's own check of the first one uses the same). When the first fails, the rule's web traffic goes through its servers until it opens again. When another fails 3 checks in a row, the rule goes to its servers too, the strategy list is tried again by itself, and the rule comes back with a strategy that opens them all (or after 6 checks with all of them open; a rule that leaves again within 6 hours stays on its servers for 6 hours)."),
       h("span", { style: "font-size: 13px; font-weight: 500" }, "Strategies"), sub,
       h("span", { class: "small muted" }, "Tried in this order when a rule turns on “Zapret first”. One nfqws2 strategy per line: name | options. Fake files are named plainly, like tls_clienthello_www_google_com.bin."),
       ta,
