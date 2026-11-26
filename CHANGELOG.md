@@ -3,6 +3,22 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.61.1 — 2026-11-26
+
+Manager 0.48.1 (no agent change). Update the manager; nothing else to do.
+
+- **YouTube's zapret state tells the truth about videos.** With 1.61.0 the
+  rule was "zapret" while only some videos played: the provider's own
+  video server opened, the video servers of Google itself (where the
+  videos it does not hold come from) got no answer with any strategy of
+  the list. Two of Google's video servers are now among YouTube's check
+  addresses, so such a rule shows "zapret opens its sites only partly", its
+  traffic goes through its servers (YouTube plays), and the search for a
+  strategy that opens everything goes on by itself every 6 hours.
+- A rule whose check addresses are a shorter list of its service's gets the
+  rest on the manager's first look after an update; a list of your own is
+  left as it is.
+
 ## 1.61.0 — 2026-11-26
 
 A zapret rule is checked with all of its addresses, and gets its strategy by

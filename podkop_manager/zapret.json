@@ -57,10 +57,12 @@
      "field": 3,
      "tr": ["uzpkfa50vqlgb61wrmhc72xsnid83ytoje94", "0123456789abcdefghijklmnopqrstuvwxyz"],
      "url": "https://rr1---sn-{}.googlevideo.com/generate_204"
-    }
+    },
+    "https://rr1---sn-ixh7rn76.googlevideo.com/generate_204",
+    "https://rr1---sn-5go7yner.googlevideo.com/generate_204"
    ],
    "test": "https://www.youtube.com/generate_204",
-   "note": "The last address is the provider's own video server: its name is learnt on the router's line (word 3 of the first line of report_mapping, letters mapped as YouTube does)."
+   "note": "The learnt address is the provider's own video server (word 3 of the first line of report_mapping, letters mapped as YouTube does). The last two are video servers of Google itself: videos the provider's server does not hold come from such ones, and some providers let only the provider's own through."
   },
   "meta": {
    "names": [
