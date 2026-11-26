@@ -1586,8 +1586,12 @@ class Hub:
     async def _zapret_tend(self, rt: RouterRuntime, states: dict) -> None:
         if not getattr(rt, "zapret_urls_given", False):
             cur = await self.zapret_current(rt)
-            add = {k: dict(v, urls=zapret.service_urls(v.get("service") or "")) for k, v in cur.items()
-                   if not v.get("urls") and zapret.service_urls(v.get("service") or "")}
+            # none yet, or only some of its service's (the list grew with an update); a list of the user's own stays
+            def behind(v: dict) -> bool:
+                want = zapret.service_urls(v.get("service") or "")
+                have = v.get("urls") or []
+                return bool(want) and len(have) < len(want) and all(u in want for u in have)
+            add = {k: dict(v, urls=zapret.service_urls(v.get("service") or "")) for k, v in cur.items() if behind(v)}
             if add:
                 await rt.agent.call("zapret", "set", payload={"rules": {**cur, **add}, "interval": zapret.interval(self.db)}, timeout=120)
                 self._event(rt, "zapret_addresses", {"rules": sorted(add)})

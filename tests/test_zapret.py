@@ -839,6 +839,8 @@ def test_the_manager_reads_an_address_learnt_on_the_line_from_a_line_of_text():
     # YouTube's own: the API the apps use and the provider's video server are among them
     urls = zapret.service_urls("youtube")
     assert "https://youtubei.googleapis.com/generate_204" in urls and NODE in urls
+    # and video servers of Google itself: a provider may let only its own through
+    assert sum(isinstance(u, str) and "googlevideo.com" in u for u in urls) == 2 and len(urls) <= zapret.MAX_URLS
     assert zapret.DEFAULTS["services"]["youtube"]["test"] not in urls
 
 
@@ -879,6 +881,13 @@ def test_a_partly_opening_rule_gets_its_addresses_and_a_new_strategy_by_itself(t
         n = len(rt.agent.calls)
         await hub.zapret_tend(rt)
         assert len(rt.agent.calls) == n and hub.zapret_runs == {}
+        # the service's list grew with an update: a rule with the shorter one gets the rest; a list of the user's own stays
+        rt.agent.rules["youtube"]["urls"] = zapret.service_urls("youtube")[:3]
+        rt.agent.rules["meta"]["urls"] = ["https://x/"]
+        rt.zapret_urls_given = False
+        await hub.zapret_tend(rt)
+        assert rt.agent.rules["youtube"]["urls"] == zapret.service_urls("youtube") and rt.agent.rules["meta"]["urls"] == ["https://x/"]
+        hub.events.pop()
         # the router moved it to its servers: the list is tried with all of its addresses, the fastest is set
         rt.status["zapret"]["youtube"] = "partial"
         await hub.zapret_tend(rt)
