@@ -113,6 +113,10 @@ def test_nft_table_queues_each_rule_and_the_search_and_gives_podkops_mark(tmp_pa
     assert "type filter hook output priority -160" in t and "type route hook output priority -155" in t
     assert "ct mark & 0xff000000 == 0x08000000 meta mark set 0x00200000" in t
     assert "udp dport 443 counter reject" in t
+    # 1.60.1: the devices' QUIC to FakeIP addresses is refused with an answer,
+    # before podkop's chain (-150), so apps do not wait for a timeout
+    assert "type filter hook prerouting priority -160" in t
+    assert "ip daddr 198.18.0.0/15 udp dport 443 counter reject" in t
 
 
 def test_exec_passes_each_option_as_one_argument(tmp_path):

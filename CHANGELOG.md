@@ -3,6 +3,19 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.60.1 — 2026-11-26
+
+Agent 0.30.1. Update the agent on every router with zapret rules.
+
+- **Sites of a zapret rule open at once on phones and TVs.** QUIC of a
+  zapret rule was refused on the router's side only: the device got no
+  answer and waited for its own timeout on every connection (YouTube and
+  Instagram apps looked dead on Wi-Fi). While there are zapret rules, the
+  devices' QUIC (UDP 443) to podkop's FakeIP addresses is now refused with
+  an ICMP answer before podkop takes it, so apps switch to TCP at once.
+  That covers every rule by domain: one on its servers loses only QUIC
+  inside the tunnel. A table of an older agent is replaced by the daemon.
+
 ## 1.60.0 — 2026-11-26
 
 zapret mends itself, watched servers, a reworked apply (manager 0.47.0,

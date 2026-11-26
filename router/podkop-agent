@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.30.0"
+AGENT_VERSION="0.30.1"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -1575,7 +1575,12 @@ run_vpn_install() {
 # go back into sing-box. So once nfqws2 has seen them, the packets of a zapret
 # connection (and the ones nfqws2 makes) get that mark, before podkop's chain
 # (priority mangle, -150). QUIC is refused on the direct path, so apps use
-# TCP, which zapret handles. The table stays while there are zapret rules
+# TCP, which zapret handles. sing-box cannot tell a device that its QUIC
+# was refused (the device would wait for its own timeout on every
+# connection), so while the table stands the devices' QUIC to podkop's
+# FakeIP addresses is refused before podkop takes it, with an ICMP answer:
+# apps switch to TCP at once. That covers every rule by domain; one on its
+# servers loses nothing but QUIC inside the tunnel. The table stays while there are zapret rules
 # (the daemon puts it back): without it their traffic would loop.
 # not under $ETC: nfqws2 drops its root rights after the start and must still
 # read its Lua and fake files
@@ -1615,6 +1620,8 @@ zapret_nft_text() {
       "  chain out_fix {", "    type route hook output priority -155; policy accept;",
       "    ct mark & 0xff000000 == 0x08000000 meta mark set 0x00200000",
       "    meta mark & 0x40000000 != 0 meta mark set 0x00200000", "  }",
+      "  chain lan_quic {", "    type filter hook prerouting priority -160; policy accept;",
+      "    ip daddr 198.18.0.0/15 udp dport 443 counter reject", "  }",
       "  chain in_q {", "    type filter hook input priority -160; policy accept;",
       "    icmp type time-exceeded ct mark & 0xff000000 == 0x08000000 drop",
       ($ns[] | "    ct mark \($base + .) tcp sport { 80, 443 } ct reply packets 1-10 queue num \(300 + .) bypass"),
@@ -1732,8 +1739,9 @@ zapret_watch() {
   # date (written only when it differs)
   if [ -z "${_zinit:-}" ]; then
     zapret_init >/dev/null 2>&1; _zinit=1
-    # a table made by an older agent (no counters) is replaced in one step
-    zapret_table && ! nft list table inet podkop_zapret 2>/dev/null | grep -q counter && zapret_nft >/dev/null 2>&1
+    # a table made by an older agent (no QUIC answer to the devices) is
+    # replaced in one step
+    zapret_table && ! nft list table inet podkop_zapret 2>/dev/null | grep -q lan_quic && zapret_nft >/dev/null 2>&1
   fi
   zapret_prune
   [ -s "$ZAPRET_RULES" ] || return 0
