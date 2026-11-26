@@ -374,3 +374,29 @@ fail() {{ echo "$*" >&2; exit 1; }}
     assert (tmp_path / "commits").read_text().count("commit") == 2
     assert (tmp_path / "events").read_text().splitlines() == ['dns_guard {"on":true}', 'dns_guard {"on":false}']
     assert code_run("cmd_dns_guard maybe").returncode == 1
+
+
+def test_dns_guard_keeps_the_resolvers_names_without_an_address(tmp_path):
+    """1.60.2: a rule by domain may carry dns.google.com through its server;
+    while the guard is on dnsmasq answers the resolvers' names NXDOMAIN."""
+    code = _agent_code("# --- the router.s DNS for every device", "# --- OpenVPN client")
+    script = f'''
+uci() {{ [ -f "{tmp_path}/on" ]; }}
+guard_dnsmasq_dir() {{ printf %s "{tmp_path}/d"; }}
+guard_dnsmasq_restart() {{ echo r >> "{tmp_path}/restarts"; }}
+{code}
+dns_names_sync
+'''
+    run = lambda: subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)  # noqa: E731
+    f, restarts = tmp_path / "d/podkop-agent-doh.conf", tmp_path / "restarts"
+    assert run().returncode == 0 and not f.exists() and not restarts.exists()      # guard off: nothing
+    (tmp_path / "on").write_text("")
+    run()
+    lines = f.read_text().splitlines()
+    assert "address=/dns.google.com/" in lines and "address=/cloudflare-dns.com/" in lines and "address=/mask.icloud.com/" in lines
+    run()
+    assert restarts.read_text().count("r") == 1                                    # unchanged: dnsmasq is left alone
+    f.unlink(); run()                                                              # lost (a boot): put back
+    assert f.exists() and restarts.read_text().count("r") == 2
+    (tmp_path / "on").unlink(); run()
+    assert not f.exists() and restarts.read_text().count("r") == 3

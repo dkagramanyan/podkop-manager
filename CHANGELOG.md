@@ -3,6 +3,23 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.60.2 — 2026-11-26
+
+Agent 0.30.2, manager 0.47.1.
+
+- **"Make the LAN's devices use the router's DNS" also closes the
+  resolvers' names.** A rule by domain could carry dns.google.com or
+  chrome.cloudflare-dns.com through its server; the firewall rule (by
+  address) did not see that, apps (YouTube) got the sites' real addresses
+  and went past podkop and zapret into the provider's block. While the
+  switch is on, dnsmasq answers the well-known resolvers' names NXDOMAIN (a
+  file in RAM, put back by the daemon), so apps use the router's DNS. This
+  also turns iCloud Private Relay off on the network.
+
+- **On by default.** A router gets the switch turned on when it is added
+  (manager 0.47.1); Connection health turns it off. Routers added earlier
+  are left as they are.
+
 ## 1.60.1 — 2026-11-26
 
 Agent 0.30.1. Update the agent on every router with zapret rules.

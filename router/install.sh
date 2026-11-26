@@ -358,7 +358,8 @@ if [ "$UNINSTALL" = 1 ]; then
     uci -q delete firewall.podkop_agent_ipv6_block; uci commit firewall && /etc/init.d/firewall reload >/dev/null 2>&1
   fi
   nft delete table inet podkop_agent_guard 2>/dev/null
-  for _f in /tmp/dnsmasq.d/podkop-agent-strict.conf /tmp/dnsmasq.*.d/podkop-agent-strict.conf; do
+  for _f in /tmp/dnsmasq.d/podkop-agent-strict.conf /tmp/dnsmasq.*.d/podkop-agent-strict.conf \
+            /tmp/dnsmasq.d/podkop-agent-doh.conf /tmp/dnsmasq.*.d/podkop-agent-doh.conf; do
     [ -f "$_f" ] && { rm -f "$_f"; /etc/init.d/dnsmasq restart >/dev/null 2>&1; }
   done
   for _f in $KEEP; do
