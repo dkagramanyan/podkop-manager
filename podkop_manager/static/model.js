@@ -130,6 +130,7 @@ export function ruleHealth(rt, sec) {
   const down = ((st.watched || []).filter((x) => x.section === sec.name && x.state === "down"));
   if (down.length) return { cls: "warn", text: `watched server ${down.map((x) => x.name).join(", ")} does not answer` };
   if (z === "servers") return { cls: "warn", text: "zapret does not open its sites: on its servers" };
+  if (z === "partial") return { cls: "warn", text: "zapret opens its sites only partly: on its servers" };
   if (o.connection_type === "proxy" && !g) return { cls: "", text: "" };
   return { cls: "ok", text: z === "zapret" ? "working, web through zapret" : "working" };
 }
@@ -187,6 +188,11 @@ export const EVENT_TEXT = {
   vpn_up: (d) => `VPN is up again${d.address ? `, ${d.address}` : ""}`,
   zapret_servers: (d) => `${d.section}: zapret does not open its sites now, the rule uses its servers`,
   zapret_direct: (d) => `${d.section}: back on zapret (direct)`,
+  zapret_partial: (d) => `${d.section}: zapret opens it only partly (${(d.failed || []).join(", ")} did not open), the rule uses its servers`,
+  zapret_whole: (d) => `${d.section}: every check address opens again, back on zapret`,
+  zapret_fitted: (d) => `${d.section}: zapret has a new strategy, ${d.strategy}`,
+  zapret_unfit: (d) => `${d.section}: no better zapret strategy (${d.why}); the rule stays on its servers`,
+  zapret_addresses: (d) => `${(d.rules || []).join(", ")}: got the check addresses of their service`,
   zapret_on: (d) => `${d.installed ? "zapret2 installed; " : ""}zapret first on ${(d.rules || []).join(", ") || "no rule"} (from the applied config)`
     + ((d.refused || []).length ? `; not on ${d.refused.join(", ")}: kill switch or Protected` : ""),
   settings_on: (d) => `From the applied config: ${(d.done || []).join("; ")}`,
@@ -258,7 +264,7 @@ export const EVENT_DOT = {
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
   agent_upgraded: "ok", agent_upgrade_failed: "bad", scheduled: "accent", schedule_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
-  server_down: "bad", server_up: "ok", zapret_repaired: "warn", zapret_missing: "bad", zapret_restarted: "warn", zapret_dropped: "warn",
+  server_down: "bad", server_up: "ok", zapret_repaired: "warn", zapret_missing: "bad", zapret_partial: "warn", zapret_whole: "ok", zapret_fitted: "ok", zapret_unfit: "warn", zapret_restarted: "warn", zapret_dropped: "warn",
 };
 
 export function serverName(section, tag) {

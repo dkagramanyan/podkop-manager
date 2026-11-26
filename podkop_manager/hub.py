@@ -52,6 +52,7 @@ HEAL_PROBE_SECONDS = 1800    # self-heal starts at most one probe per router in 
 HEAL_LINKS = 5               # servers of earlier versions lent to a group that is down
 HEAL_RETRY_SECONDS = 10      # the router was busy reloading: try again after this
 STALE_PICKS = 86400          # a loaded config takes the last probe's servers only if it is this recent
+ZAPRET_REFIT_EVERY = 6 * 3600    # a zapret rule that opens only partly gets a new strategy searched at most this often
 LOW_MEM_MB = 60              # a router with less free memory tests its servers on the manager
 # podkop-engine-full's sing-box (static, with the SSH outbound) for probes run
 # here: downloaded once, when asked for, into the data folder (bin/)
@@ -167,6 +168,8 @@ class Hub:
         self.subscribers: set[asyncio.Queue] = set()
         self.tasks: list[asyncio.Task] = []
         self.probes: dict[int, asyncio.Task] = {}
+        self.zapret_runs: dict[int, dict] = {}            # router -> the running or last zapret strategy search
+        self.zapret_tried: dict[tuple, float] = {}        # (router, rule) -> when a strategy was last searched for it
         self.jobs: set[asyncio.Task] = set()      # apply jobs being followed
         self._probe_rows: dict = {}               # router id -> (run id, its rows' links and verdicts)
 
@@ -424,6 +427,8 @@ class Hub:
             rt.wake.clear()         # before: a wake during the refresh starts the next one at once
             try:
                 await self.refresh(rt)
+                if (rt.status or {}).get("zapret"):
+                    self._background(rt, self.zapret_tend(rt))
             except Exception:  # noqa: BLE001 - polling must go on whatever happens
                 log.exception("poll %s", rt.row["host"])
             with contextlib.suppress(asyncio.TimeoutError):
@@ -476,6 +481,8 @@ class Hub:
             rt.alert = None
         elif typ == "zapret_repaired" and (rt.alert or {}).get("type") == "zapret_missing":
             rt.alert = None
+        elif typ == "zapret_partial" and data.get("section"):
+            self._background(rt, self.zapret_refit(rt, [str(data["section"])]))
         elif typ == "server_up" and (rt.alert or {}).get("type") == "server_down":
             rt.alert = None
         elif typ == "apply_interrupted" and data.get("job"):
@@ -1552,7 +1559,87 @@ class Hub:
     async def zapret_current(self, rt: RouterRuntime) -> dict:
         """The router's zapret rules as it has them now, in the shape "zapret set" takes."""
         st = await rt.agent.call("zapret", "status", timeout=30)
-        return {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in (st.get("rules") or {}).items()}
+        return {k: {f: v[f] for f in ("args", "url", "name", "service", "urls") if f in v} for k, v in (st.get("rules") or {}).items()}
+
+    def zapret_strategies(self) -> list[dict]:
+        text = self.db.get_setting("zapret_strategies")
+        return zapret.parse_strategies(text) if text else zapret.default_strategies()
+
+    async def zapret_tend(self, rt: RouterRuntime) -> None:
+        """After a look at the router (agent 0.31): a zapret rule of a known
+        service that has no check addresses yet gets the service's, and one
+        that opens only partly (on its servers) gets a new strategy searched,
+        ZAPRET_REFIT_EVERY apart. Nothing is asked of the router otherwise."""
+        states = (rt.status or {}).get("zapret") or {}
+        if not states or "zapret-urls" not in ((((rt.status or {}).get("agent") or {}).get("capabilities")) or []):
+            return
+        run = self.zapret_runs.get(rt.id)
+        if run and run.get("state") == "running":
+            return
+        try:
+            await self._zapret_tend(rt, states)
+        except AgentError as e:        # the router is busy or away: the next look tries again
+            log.info("zapret of %s: %s", rt.row["host"], e.message)
+        except Exception:  # noqa: BLE001 - a background task: nobody else would see it
+            log.exception("zapret of %s", rt.row["host"])
+
+    async def _zapret_tend(self, rt: RouterRuntime, states: dict) -> None:
+        if not getattr(rt, "zapret_urls_given", False):
+            cur = await self.zapret_current(rt)
+            add = {k: dict(v, urls=zapret.service_urls(v.get("service") or "")) for k, v in cur.items()
+                   if not v.get("urls") and zapret.service_urls(v.get("service") or "")}
+            if add:
+                await rt.agent.call("zapret", "set", payload={"rules": {**cur, **add}, "interval": zapret.interval(self.db)}, timeout=120)
+                self._event(rt, "zapret_addresses", {"rules": sorted(add)})
+            rt.zapret_urls_given = True
+        partial = [k for k, v in states.items() if v == "partial"]
+        if partial:
+            await self.zapret_refit(rt, partial)
+
+    async def zapret_refit(self, rt: RouterRuntime, names: list[str]) -> None:
+        """A new strategy for rules that zapret opens only partly: the
+        strategy list is tried on the router with all of the rule's check
+        addresses, and the fastest one that opens them all is set (the router
+        then gives the rule a fresh try). One search per router at a time; a
+        rule is not searched again within ZAPRET_REFIT_EVERY."""
+        run = self.zapret_runs.get(rt.id)
+        if run and run.get("state") == "running":
+            return
+        now = time.time()
+        names = [n for n in names if now - self.zapret_tried.get((rt.id, n), 0) >= ZAPRET_REFIT_EVERY]
+        if not names:
+            return
+        state = {"state": "running", "started": now, "now": None, "rules": names, "apply": True, "jobs": {}, "outcome": {},
+                 "error": "", "auto": True}
+        self.zapret_runs[rt.id] = state
+        try:
+            cur = await self.zapret_current(rt)
+            names = [n for n in names if n in cur]
+            for n in names:
+                self.zapret_tried[(rt.id, n)] = now
+            rules = [{"name": n, "urls": [cur[n]["url"], *[u for u in cur[n].get("urls") or [] if u != cur[n]["url"]]],
+                      "test": cur[n]["url"], "service": cur[n].get("service") or ""} for n in names]
+            new = await zapret.auto(rt.agent, rules, self.zapret_strategies(), cur, state)
+            found = {k: v for k, v in new.items() if k in names and v.get("args") != cur[k].get("args")}
+            if found:
+                fresh = await self.zapret_current(rt)
+                await rt.agent.call("zapret", "set", payload={"rules": {**fresh, **{k: v for k, v in found.items() if k in fresh}},
+                                                              "interval": zapret.interval(self.db)}, timeout=120)
+            for n in names:
+                out = state["outcome"].get(n) or {}
+                if n in found:
+                    self._event(rt, "zapret_fitted", {"section": n, "strategy": found[n].get("name") or ""})
+                else:
+                    self._event(rt, "zapret_unfit", {"section": n, "why": out.get("why") or (
+                        "the strategy it has is still the best of the list" if out.get("on") else "the search did not finish")})
+            state["state"] = "done"
+        except Exception as e:        # noqa: BLE001 - shown on the rule's page; tried again later
+            state.update(state="failed", error=getattr(e, "message", "") or str(e))
+        finally:
+            state["now"] = None
+            state["finished"] = time.time()
+        with contextlib.suppress(AgentError):
+            await self.refresh(rt)
 
     async def zapret_on(self, rt: RouterRuntime, rules: dict) -> dict:
         """zapret first for these rules ({rule: {args, url, name, service}}),
@@ -1565,7 +1652,9 @@ class Hub:
         installed = not st.get("installed")
         if installed:
             await zapret.install(rt.agent, self.key.parent / "zapret", st.get("arch") or "")
-        cur = {k: {f: v[f] for f in ("args", "url", "name", "service") if f in v} for k, v in (st.get("rules") or {}).items()}
+        cur = {k: {f: v[f] for f in ("args", "url", "name", "service", "urls") if f in v} for k, v in (st.get("rules") or {}).items()}
+        # a rule of a known service without check addresses of its own (a file from before 0.47.2) gets the service's
+        rules = {k: v if v.get("urls") else dict(v, urls=zapret.service_urls(v.get("service") or "")) for k, v in rules.items()}
         out = await rt.agent.call("zapret", "set", payload={"rules": {**cur, **rules}, "interval": zapret.interval(self.db)}, timeout=120)
         await self.refresh(rt)
         return {"rules": sorted(rules), "refused": sorted(set(rules) & set((out or {}).get("refused") or [])), "installed": installed}

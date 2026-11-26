@@ -234,7 +234,23 @@ def test_search_turns_zapret_on_with_the_fastest_working_strategy(tmp_path, monk
                 break
             time.sleep(0.02)
         assert run["state"] == "done", run["error"]
-        assert rt.agent.rules == {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast", "service": ""}}
+        assert rt.agent.rules == {"meta": {"args": ["--b=1"], "url": "https://www.instagram.com/", "name": "fast", "service": "", "urls": []}}
+        # an agent before 0.31 knows plain addresses only: the one learnt on the line is left out for it
+        node = json.dumps({"from": "https://a/map", "field": 3, "tr": ["ab", "cd"], "url": "https://rr-{}.x/"})
+        body = {"apply": True, "rules": [{"name": "meta", "urls": ["https://www.instagram.com/", node], "test": "https://www.instagram.com/"}]}
+        assert c.post("/api/routers/1/zapret/search", headers=H, json=body).status_code == 200
+        assert [p for a, p in rt.agent.calls if a[:2] == ("zapret", "check")][-1]["urls"] == ["https://www.instagram.com/"]
+        for _ in range(100):
+            if c.get("/api/routers/1/zapret", headers=H).json()["run"]["state"] != "running":
+                break
+            time.sleep(0.02)
+        rt.status = {"agent": {"capabilities": ["zapret", "zapret-urls"]}}
+        assert c.post("/api/routers/1/zapret/search", headers=H, json=body).status_code == 200
+        assert [p for a, p in rt.agent.calls if a[:2] == ("zapret", "check")][-1]["urls"] == ["https://www.instagram.com/", json.loads(node)]
+        for _ in range(100):
+            if c.get("/api/routers/1/zapret", headers=H).json()["run"]["state"] != "running":
+                break
+            time.sleep(0.02)
         assert run["outcome"]["meta"] == {"on": True, "strategy": "fast"}
         # a strategy list sent by the page
         bad = c.put("/api/routers/1/zapret", headers=H, json={"rules": {"meta": {"args": ["rm"], "url": "https://x/"}}})
@@ -280,7 +296,9 @@ def test_a_zapret_file_turns_its_rules_on_installs_zapret_first_and_keeps_the_ot
         r = c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": rule}})
         assert r.status_code == 200, r.text
         assert r.json() == {"rules": ["main"], "refused": [], "installed": True} and installs == ["aarch64"]
-        assert agent.rules == {"other": {"args": ["--a=1"], "url": "https://o.example/", "name": "kept", "service": ""}, "main": rule}
+        assert agent.rules == {"other": {"args": ["--a=1"], "url": "https://o.example/", "name": "kept", "service": ""},
+                               # a rule of a known service gets the service's check addresses along
+                               "main": dict(rule, urls=zapret.service_urls("youtube"))}
         # installed now: not again
         assert c.post("/api/routers/1/zapret/import", headers=H, json={"rules": {"main": rule}}).json()["installed"] is False
         assert installs == ["aarch64"]
@@ -298,7 +316,7 @@ def test_a_saved_config_takes_the_routers_zapret_first_and_its_file_brings_it_ba
         row = c.post("/api/configs", headers=H, json={"router_id": 1}).json()
         assert row["zapret"] == ["main"]                        # a rule the config does not have is left out
         text = c.get(f"/api/configs/{row['id']}/file", headers=H).text
-        assert json.loads(text)["zapret"] == {"main": {"args": ["--b=1"], "url": "https://x.com/", "name": "fast", "service": "twitter"}}
+        assert json.loads(text)["zapret"] == {"main": {"args": ["--b=1"], "url": "https://x.com/", "name": "fast", "service": "twitter", "urls": []}}
         again = c.post("/api/configs/import", headers=H, json={"text": text, "file": "x.json"}).json()
         assert again["zapret"] == ["main"]
         # the router's switches and probe settings go along; its keys do not
@@ -666,3 +684,247 @@ proxies() { :; }
 zapret_watch; rm -f "$RUN/zapret/started"; zapret_watch; rm -f "$RUN/zapret/started"; zapret_watch"""
     assert _sh(tmp_path, body).returncode == 0
     assert _events(tmp_path) == ['zapret_restarted {"rules":["meta"]}']
+
+
+# --- check addresses (agent 0.31): a site that opens only partly goes to its servers ---
+
+NODE = {"from": "https://redirector.googlevideo.com/report_mapping?di=no", "field": 3,
+        "tr": ["uzpkfa50vqlgb61wrmhc72xsnid83ytoje94", "0123456789abcdefghijklmnopqrstuvwxyz"],
+        "url": "https://rr1---sn-{}.googlevideo.com/generate_204"}
+YT = dict(RULES["youtube"], urls=["https://youtubei.googleapis.com/generate_204", "https://i.ytimg.com/generate_204"])
+
+
+def test_a_rule_on_its_servers_for_a_partly_opening_site_keeps_only_its_probe(tmp_path):
+    _setup(tmp_path)
+    (tmp_path / "zapret/parked").mkdir()
+    (tmp_path / "zapret/parked/youtube").write_text("")
+    out = _filter(tmp_path)
+    tags = [o["tag"] for o in out["outbounds"] if "zapret" in o["tag"]]
+    assert tags == ["meta-zapret-probe", "meta-zapret-direct", "meta-zapret-out", "youtube-zapret-probe"]
+    assert [r["outbound"] for r in out["route"]["rules"]] == ["youtube-out", "meta-zapret-out", "meta-zapret-out", "meta-out", "main-out"]
+    probe = next(o for o in out["outbounds"] if o["tag"] == "youtube-zapret-probe")
+    assert probe == {"type": "direct", "tag": "youtube-zapret-probe", "routing_mark": 0x08000002}
+    # back: the same config as without the mark, and running again changes nothing
+    (tmp_path / "zapret/parked/youtube").unlink()
+    (tmp_path / "again.json").write_text(json.dumps(out))
+    back = _filter(tmp_path, "again.json")
+    assert back == _filter(tmp_path) and "youtube-zapret-out" in [o["tag"] for o in back["outbounds"]]
+
+
+PARTS = '''
+TAB=$(printf '\\t')
+event() { echo "$1 $2" >> "$RUN/events"; }
+logger() { :; }
+podkop_start_state() { echo 0; }
+reapply_pins() { :; }
+hot_apply() { echo "$1" >> "$RUN/applies"; [ ! -f "$RUN/refuse" ]; }
+clash_get() {
+  case "$*" in *"$(cat "$RUN/dead")"*) echo '{"message":"Timeout"}' ;; *) echo '{"delay":120}' ;; esac
+  echo "$1 $3" >> "$RUN/probes"
+}
+zapret_parts "$(cat "$RUN/px.json")"
+'''
+
+
+def _parts(tmp_path, now="youtube-zapret-direct", dead="youtubei"):
+    (tmp_path / "dead").write_text(dead)
+    px = {"proxies": {"youtube-zapret-probe": {}, "youtube-out": {}}}
+    if now:
+        px["proxies"]["youtube-zapret-out"] = {"now": now}
+    (tmp_path / "px.json").write_text(json.dumps(px))
+    p = _sh(tmp_path, PARTS)
+    assert p.returncode == 0, p.stderr
+    return sorted(x.name for x in (tmp_path / "zapret/parked").iterdir())
+
+
+def test_a_site_that_opens_only_partly_goes_to_its_servers_and_comes_back(tmp_path):
+    _setup(tmp_path, rules={"youtube": YT, "meta": RULES["meta"]})
+    # two failed rounds are not enough; a round with every address open starts the count again
+    assert _parts(tmp_path) == [] and _parts(tmp_path) == []
+    assert _parts(tmp_path, dead="nothing") == []
+    assert _parts(tmp_path) == [] and _parts(tmp_path) == []
+    assert not (tmp_path / "applies").exists()
+    assert _parts(tmp_path) == ["youtube"]
+    assert (tmp_path / "applies").read_text().count("\n") == 1
+    assert _events(tmp_path) == ['zapret_partial {"section":"youtube","failed":["https://youtubei.googleapis.com/generate_204"]}']
+    p = _sh(tmp_path, "\nzapret_running() { echo '[\"youtube\",\"meta\"]'; }\nzapret_bad_json; echo '{\"youtube-out\": \"\", \"meta-out\": \"\"}' > \"$RUN/n.json\"; zapret_state \"$RUN/n.json\"")
+    assert [json.loads(x) for x in p.stdout.splitlines()] == [
+        {"youtube": ["https://youtubei.googleapis.com/generate_204"]}, {"youtube": "partial", "meta": "missing"}]
+    # there: its first address is checked too (the probe carries all of them); 6 whole rounds bring it back
+    (tmp_path / "probes").unlink()
+    for _ in range(5):
+        assert _parts(tmp_path, now=None, dead="nothing") == ["youtube"]
+    assert sorted((tmp_path / "probes").read_text().splitlines()[:3]) == [          # (at once: in any order)
+        "/proxies/youtube-zapret-probe/delay url=https://i.ytimg.com/generate_204",
+        "/proxies/youtube-zapret-probe/delay url=https://www.youtube.com/generate_204",
+        "/proxies/youtube-zapret-probe/delay url=https://youtubei.googleapis.com/generate_204"]
+    assert _parts(tmp_path, now=None, dead="youtube.com/generate_204") == ["youtube"]      # one failure: from the start
+    for _ in range(5):
+        assert _parts(tmp_path, now=None, dead="nothing") == ["youtube"]
+    assert _parts(tmp_path, now=None, dead="nothing") == []
+    assert _events(tmp_path)[-1] == 'zapret_whole {"section":"youtube"}'
+    assert (tmp_path / "applies").read_text().count("\n") == 2
+
+
+def test_a_rule_on_its_servers_by_its_first_address_is_not_this_checks_case(tmp_path):
+    # the line is down, or zapret stopped opening the site at all: sing-box's own check has moved it
+    _setup(tmp_path, rules={"youtube": YT})
+    for _ in range(5):
+        assert _parts(tmp_path, now="youtube-out") == []
+    assert not (tmp_path / "applies").exists() and not (tmp_path / "probes").exists()
+
+
+def test_a_move_sing_box_refuses_is_tried_again(tmp_path):
+    _setup(tmp_path, rules={"youtube": YT})
+    (tmp_path / "refuse").write_text("")
+    for _ in range(4):
+        assert _parts(tmp_path) == []
+    assert not (tmp_path / "events").exists()
+    (tmp_path / "refuse").unlink()
+    assert _parts(tmp_path) == ["youtube"]
+
+
+def test_an_address_is_learnt_on_the_routers_line(tmp_path):
+    _setup(tmp_path, rules={"youtube": dict(YT, urls=[NODE, "https://i.ytimg.com/generate_204"])})
+    body = '''
+TAB=$(printf '\\t')
+uci() { return 1; }
+zapret_fetch() { echo "$2" >> "$RUN/fetched"; if [ -f "$RUN/line" ]; then cp "$RUN/line" "$4"; echo "ok 100 60"; else echo "fail 8000 no answer in 8 s"; fi; }
+zapret_urls youtube
+'''
+    (tmp_path / "line").write_text("178.213.115.217 => mtwru-svo1 (178.213.112.0/22)\n\nDebug Info:\n")
+    p = _sh(tmp_path, body)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.splitlines() == ["https://rr1---sn-hufg0-n8ve.googlevideo.com/generate_204", "https://i.ytimg.com/generate_204"]
+    # kept for an hour: not fetched again
+    assert _sh(tmp_path, body).stdout == p.stdout and (tmp_path / "fetched").read_text().count("\n") == 1
+    # one that cannot be learnt (or answers something odd) is left out, it is not a failed address
+    (tmp_path / "zapret/youtube.urls").unlink()
+    (tmp_path / "line").write_text("<html>$(reboot) `id` ../../x</html>\n")
+    assert _sh(tmp_path, body).stdout.splitlines() == ["https://i.ytimg.com/generate_204"]
+    (tmp_path / "zapret/youtube.urls").unlink()
+    (tmp_path / "line").unlink()
+    assert _sh(tmp_path, body).stdout.splitlines() == ["https://i.ytimg.com/generate_204"]
+
+
+@pytest.mark.parametrize("urls, ok", [
+    (["https://youtubei.googleapis.com/generate_204", NODE], True),
+    ([dict(NODE, tr=["ab", "c"])], False),
+    ([dict(NODE, tr=["a-z", "0-9"])], False),
+    ([dict(NODE, url="https://rr1.googlevideo.com/")], False),
+    ([dict(NODE, field=0)], False),
+    (["ftp://x/"], False),
+    (["https://x/"] * 9, False)])
+def test_set_and_check_take_check_addresses(tmp_path, urls, ok):
+    rules = {"youtube": {"args": ["--x=1"], "url": "https://www.youtube.com/generate_204", "urls": urls}}
+    p = _sh(tmp_path, SET_STUBS + "\nzapret_set", json.dumps({"rules": rules}))
+    assert ("not_installed" in p.stderr) == ok and ("bad_request" in p.stderr) == (not ok), p.stderr
+    if len(urls) <= 8:
+        (tmp_path / "zapret").mkdir()
+        nf = tmp_path / "zapret/nfqws2"
+        nf.write_text("#!/bin/sh\n")
+        nf.chmod(0o755)
+        p = _sh(tmp_path, '\njob_new() { echo 1-1; }\nspawn() { :; }\ncmd_zapret check',
+                json.dumps({"urls": urls, "strategies": [{"name": "a", "args": ["--x=1"]}]}))
+        assert (p.returncode == 0 and '"job"' in p.stdout) == ok, p.stderr
+
+
+def test_the_manager_reads_an_address_learnt_on_the_line_from_a_line_of_text():
+    assert zapret.check_url(json.dumps(NODE)) == NODE and zapret.check_url(zapret.url_text(NODE)) == NODE
+    for bad in ("{", "x", dict(NODE, tr=["a", "bc"]), dict(NODE, field=True), dict(NODE, url="https://a/")):
+        with pytest.raises(ValueError):
+            zapret.check_url(bad)
+    r = zapret.check_rule("youtube", {"args": "--x=1", "url": "https://a/", "urls": ["https://b/", json.dumps(NODE)]})
+    assert r["urls"] == ["https://b/", NODE]
+    # YouTube's own: the API the apps use and the provider's video server are among them
+    urls = zapret.service_urls("youtube")
+    assert "https://youtubei.googleapis.com/generate_204" in urls and NODE in urls
+    assert zapret.DEFAULTS["services"]["youtube"]["test"] not in urls
+
+
+class RefitAgent(ZapretAgent):
+    """The strategy "fast" opens every address, the rule has "old"."""
+    def __init__(self):
+        super().__init__()
+        self.rules = {"youtube": {"args": ["--old=1"], "url": "https://www.youtube.com/generate_204", "name": "old", "service": "youtube", "n": 1},
+                      "meta": {"args": ["--m=1"], "url": "https://www.instagram.com/", "name": "m", "service": "meta", "urls": ["https://x/"], "n": 2}}
+
+
+def _hub(tmp_path):
+    from podkop_manager.db import DB
+    from podkop_manager.hub import Hub
+    hub = Hub(DB(tmp_path / "m.db"), tmp_path / "key", tmp_path)
+    hub.events = []
+    hub._event = lambda rt, typ, data: hub.events.append((typ, data))
+
+    async def refresh(rt):
+        return None
+    hub.refresh = refresh
+    return hub
+
+
+def test_a_partly_opening_rule_gets_its_addresses_and_a_new_strategy_by_itself(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(zapret, "POLL", 0)
+    hub = _hub(tmp_path)
+    rt = FakeRouter()
+    rt.id, rt.agent = 1, RefitAgent()
+    rt.status = {"agent": {"capabilities": ["zapret", "zapret-urls"]}, "zapret": {"youtube": "zapret", "meta": "zapret"}}
+
+    async def go():
+        # a rule of a known service set before 0.31 gets the service's addresses, once; meta has its own
+        await hub.zapret_tend(rt)
+        assert rt.agent.rules["youtube"]["urls"] == zapret.service_urls("youtube") and rt.agent.rules["meta"]["urls"] == ["https://x/"]
+        assert hub.events == [("zapret_addresses", {"rules": ["youtube"]})]
+        n = len(rt.agent.calls)
+        await hub.zapret_tend(rt)
+        assert len(rt.agent.calls) == n and hub.zapret_runs == {}
+        # the router moved it to its servers: the list is tried with all of its addresses, the fastest is set
+        rt.status["zapret"]["youtube"] = "partial"
+        await hub.zapret_tend(rt)
+        check = next(p for a, p in rt.agent.calls if a[:2] == ("zapret", "check"))
+        assert check["urls"] == ["https://www.youtube.com/generate_204", *zapret.service_urls("youtube")]
+        y = rt.agent.rules["youtube"]
+        assert (y["args"], y["name"], y["service"], y["urls"]) == (["--b=1"], "fast", "youtube", zapret.service_urls("youtube"))
+        assert rt.agent.rules["meta"]["args"] == ["--m=1"]
+        assert hub.events[-1] == ("zapret_fitted", {"section": "youtube", "strategy": "fast"})
+        assert hub.zapret_runs[1]["state"] == "done" and hub.zapret_runs[1]["outcome"]["youtube"]["on"]
+        # still partial a moment later: not searched again for hours
+        n = len(rt.agent.calls)
+        await hub.zapret_tend(rt)
+        assert not [a for a, _ in rt.agent.calls[n:] if a[:2] == ("zapret", "check")]
+    asyncio.run(go())
+
+
+def test_no_better_strategy_is_told_and_the_rule_stays(tmp_path, monkeypatch):
+    import asyncio
+    monkeypatch.setattr(zapret, "POLL", 0)
+    hub = _hub(tmp_path)
+    rt = FakeRouter()
+    rt.id, rt.agent = 1, RefitAgent()
+    rt.agent.rules["youtube"].update(args=["--b=1"], name="fast", urls=["https://y/"])
+    rt.status = {"agent": {"capabilities": ["zapret", "zapret-urls"]}, "zapret": {"youtube": "partial"}}
+    asyncio.run(hub.zapret_refit(rt, ["youtube"]))
+    assert rt.agent.rules["youtube"]["args"] == ["--b=1"] and not [a for a, _ in rt.agent.calls if a[:2] == ("zapret", "set")]
+    assert hub.events == [("zapret_unfit", {"section": "youtube", "why": "the strategy it has is still the best of the list"})]
+
+
+def test_a_rule_that_goes_to_its_servers_again_soon_stays_there(tmp_path):
+    # an address that opens now and then: every move is a reload of sing-box (a flash write on some routers)
+    _setup(tmp_path, rules={"youtube": YT})
+    for _ in range(3):
+        _parts(tmp_path)
+    for _ in range(6):
+        _parts(tmp_path, now=None, dead="nothing")
+    assert _events(tmp_path)[-1] == 'zapret_whole {"section":"youtube"}'
+    for _ in range(3):
+        parked = _parts(tmp_path)
+    assert parked == ["youtube"] and '"again":true' in _events(tmp_path)[-1]
+    applies = (tmp_path / "applies").read_text().count("\n")
+    (tmp_path / "probes").unlink()
+    for _ in range(8):
+        assert _parts(tmp_path, now=None, dead="nothing") == ["youtube"]
+    assert (tmp_path / "applies").read_text().count("\n") == applies == 3 and not (tmp_path / "probes").exists()
+    # a new strategy gets its try all the same
+    p = _sh(tmp_path, "\nzapret_forget youtube; ls \"$ZAPRET_PARK\"; [ -s \"$RUN/zapret/youtube.hold\" ] || echo free")
+    assert p.stdout.split() == ["free"], p.stderr

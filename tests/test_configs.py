@@ -62,7 +62,11 @@ def test_a_config_file_carries_its_rules_zapret_first():
     zap = {"main": {"args": ["--payload=tls_client_hello", "--lua-desync=fake:blob=fake_default_tls"],
                     "url": "https://www.instagram.com/", "name": "fake", "service": "meta"}}
     text = json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", zap))
-    assert configs.read(text)["zapret"] == zap
+    assert configs.read(text)["zapret"] == {"main": dict(zap["main"], urls=[])}
+    # its check addresses go along (one learnt on the router's line too)
+    node = {"from": "https://a/map", "field": 3, "tr": ["ab", "cd"], "url": "https://rr-{}.x/"}
+    more = {"main": dict(zap["main"], urls=["https://www.facebook.com/", node])}
+    assert configs.read(json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", more)))["zapret"] == more
     # a file without it (older ones, podkop's own) has none; the key is left out when empty
     assert configs.read(json.dumps(configs.to_file("x", cfg, {})))["zapret"] == {}
     assert "zapret" not in configs.to_file("x", cfg, {}) and configs.read(UCI)["zapret"] == {}

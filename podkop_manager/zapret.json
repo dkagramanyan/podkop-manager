@@ -50,9 +50,17 @@
    "default": true,
    "urls": [
     "https://www.youtube.com/",
-    "https://redirector.googlevideo.com/report_mapping"
+    "https://youtubei.googleapis.com/generate_204",
+    "https://i.ytimg.com/generate_204",
+    {
+     "from": "https://redirector.googlevideo.com/report_mapping?di=no",
+     "field": 3,
+     "tr": ["uzpkfa50vqlgb61wrmhc72xsnid83ytoje94", "0123456789abcdefghijklmnopqrstuvwxyz"],
+     "url": "https://rr1---sn-{}.googlevideo.com/generate_204"
+    }
    ],
-   "test": "https://www.youtube.com/generate_204"
+   "test": "https://www.youtube.com/generate_204",
+   "note": "The last address is the provider's own video server: its name is learnt on the router's line (word 3 of the first line of report_mapping, letters mapped as YouTube does)."
   },
   "meta": {
    "names": [

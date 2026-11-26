@@ -767,7 +767,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         return await router_or_404(rid).agent.call("job", job, timeout=30)
 
     # --- zapret (agent 0.29): the direct path first, the rule's servers as fallback ---
-    zapret_runs: dict[int, dict] = {}       # router -> the running or last strategy search
+    # router -> the running or last strategy search (the hub's own refits are among them)
+    zapret_runs: dict[int, dict] = getattr(hub, "zapret_runs", None)
+    if zapret_runs is None:
+        zapret_runs = {}
     ZAPRET_INTERVALS = zapret.INTERVALS
 
     def zapret_interval() -> int:
@@ -783,10 +786,15 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         except ValueError as e:
             raise HTTPException(400, str(e)) from None
 
-    def zapret_urls(name: str, urls) -> list[str]:
-        if not isinstance(urls, list) or not urls or len(urls) > 10 or not all(
-                isinstance(u, str) and re.fullmatch(r"https?://[!-~]{1,290}", u) for u in urls):
-            raise HTTPException(400, f"{name}: 1 to 10 http(s) test addresses expected")
+    def zapret_urls(name: str, urls) -> list:
+        try:
+            if not isinstance(urls, list) or not 0 < len(urls) <= zapret.MAX_URLS + 1:
+                raise ValueError
+            urls = [zapret.check_url(u) for u in urls]
+            if not any(isinstance(u, str) for u in urls):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(400, f"{name}: 1 to {zapret.MAX_URLS + 1} http(s) test addresses expected") from None
         return urls
 
     @app.get("/api/routers/{rid}/zapret", dependencies=[api])
@@ -798,8 +806,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         st = await rt.agent.call("zapret", "status", timeout=30)
         cfg = hub.cached_config(rt) or await hub.config(rid)
         run = zapret_runs.get(rid)
-        return {"router": st, "rules": zapret.rules_view(cfg["config"]),
-                "services": {k: {f: v.get(f) for f in ("urls", "test", "note")} for k, v in zapret.DEFAULTS["services"].items()},
+        text = lambda urls: [zapret.url_text(u) for u in urls or []]       # noqa: E731 - an address learnt on the line is a line of JSON
+        return {"router": st, "rules": [dict(r, urls=text(r["urls"])) for r in zapret.rules_view(cfg["config"])],
+                "services": {k: {"urls": text(v.get("urls")), "test": v.get("test"), "note": v.get("note")}
+                             for k, v in zapret.DEFAULTS["services"].items()},
                 "strategies": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
                 "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
                 "interval": st.get("interval") or zapret_interval(),
@@ -933,7 +943,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name):
                 raise HTTPException(400, f"bad rule {name!r}")
             urls = zapret_urls(name, r.get("urls"))
-            test = str(r.get("test") or "") or urls[0]
+            if "zapret-urls" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
+                # an agent before 0.31 takes plain addresses only: one learnt on the line waits for its update
+                urls = [u for u in urls if isinstance(u, str)]
+            test = str(r.get("test") or "") or next(u for u in urls if isinstance(u, str))
             if not re.fullmatch(r"https?://[!-~]{1,290}", test):
                 raise HTTPException(400, f"{name}: bad test address")
             service = str(r.get("service") or "")
