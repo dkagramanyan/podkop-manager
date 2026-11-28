@@ -6,7 +6,6 @@ import { drawSide, pageHead, routerList, routerState } from "./shell.js";
 import { S } from "./state.js";
 import { ago, api, h, longWhen, modal, put, shortWhen, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
-import { strategiesCard } from "./zapret.js";
 
 // --- settings (the manager's) -------------------------------------------------------------------------------
 
@@ -191,10 +190,8 @@ export async function viewSettings(main) {
             h("a", { class: "btn", href: "/api/backup", download: "" }, "Download backup"),
             h("button", { type: "button", class: "btn", onclick: restore }, "Restore…")),
           savedBackups()),
-        notifyCard(),
-        zapCard || (zapCard = strategiesCard())));
+        notifyCard()));
   };
-  let zapCard = null;      // kept across redraws (its text may be in the middle of an edit)
 
   // where alerts go; loaded once, edits live in notifyS until saved
   let notifyS = null, notifyEvents = [];
@@ -202,7 +199,7 @@ export async function viewSettings(main) {
     .then(([n, ev]) => { notifyS = n; notifyEvents = ev; if (!page.querySelector(":focus")) draw(); }).catch(() => {});
   // the events a message is sent for, in groups, each one can be switched off
   const eventGroups = () => {
-    const groups = [["Servers and rules", /^(group_|server_|strict_)/], ["zapret", /^zapret/], ["Changes and the probe", /^(revert|apply_|schedule_|change_|settings_|probe_|heal_)/],
+    const groups = [["Servers and rules", /^(group_|server_|strict_)/], ["Changes and the probe", /^(revert|apply_|schedule_|change_|settings_|probe_|heal_)/],
       ["Router, podkop and VPN", /./]];
     const out = groups.map(([name]) => [name, []]);
     for (const e of notifyEvents) out[groups.findIndex(([, re]) => re.test(e))][1].push(e);
@@ -228,7 +225,7 @@ export async function viewSettings(main) {
     };
     return h("section", { class: "card pad", "aria-labelledby": "s-ntf", style: "gap: 12px" },
       h("h2", { id: "s-ntf" }, "Notifications"),
-      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a watched server stops answering, a kill switch closes or opens, zapret falls back or is missing, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes. A message that could not be sent is sent later, with its time."),
+      h("span", { class: "small muted" }, "A message when a rule loses all its servers or gets them back, a watched server stops answering, a kill switch closes or opens, podkop goes down, a change is reverted or not applied, the nightly probe fails, or a router is out of reach for 5 minutes. A message that could not be sent is sent later, with its time."),
       field("telegram_token", "Telegram bot token", "password", "from @BotFather"),
       field("telegram_chat", "Telegram chat id", "text", "your id or a group's, e.g. 123456789"),
       field("webhook_url", "Webhook URL (JSON POST)", "url", "https://…"),

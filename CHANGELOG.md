@@ -3,6 +3,34 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.62.0 — 2026-11-28
+
+zapret is removed (agent 0.32.0, manager 0.49.0). Update the manager, then
+**Update agent** on each router (reserv first): the agent takes zapret away
+by itself within a minute, nothing to click.
+
+- **Rules that had zapret first now use their servers** (YouTube, Meta, X,
+  Discord and the others): more traffic goes through the keys. No setting
+  to change; the rules, kill switches and Protected stay as they were.
+- **QUIC works again for rules by domain.** While a router had zapret rules,
+  its firewall refused the devices' QUIC to every rule by domain, not only to
+  the zapret ones.
+- **Fewer reloads of sing-box.** zapret's checks moved rules between the
+  direct path and their servers and mended missing parts, each time with a
+  reload that cut every connection and made other changes answer "an apply
+  is in progress".
+- How the agent takes it away: sing-box first gets podkop's config without
+  the zapret outbounds (with them in and the table gone their traffic would
+  loop); only then nfqws2 stops and its table, `/etc/podkop-zapret`,
+  `/etc/init.d/podkop-zapret` and their lines in `/etc/sysupgrade.conf` go.
+  While sing-box cannot be reloaded (an apply runs) it tries again the next
+  round. One event, `zapret_removed`, says when it is done.
+- Gone from the web interface: Zapret first on a rule's page, the zapret
+  tags in the rules list, the strategy list and check interval in Settings,
+  the zapret file in Configs → Import, zapret's events and alerts. A config
+  file from 1.57–1.61 with a `zapret` part still imports (that part is
+  left out).
+
 ## 1.61.1 — 2026-11-26
 
 Manager 0.48.1 (no agent change). Update the manager; nothing else to do.

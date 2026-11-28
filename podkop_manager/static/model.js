@@ -103,9 +103,6 @@ export function ruleNow(rt, sec, devices) {
   const g = groups.find((x) => x.name === `${sec.name}-out`);
   if (!g) return { text: "–" };
   if (g.now === `${sec.name}-strict-out`) return { text: "kill switch closed: no server answers, connections refused", bad: true, mode: "kill switch" };
-  // zapret first (agent 0.29): its web traffic goes out direct while zapret's check passes
-  const zg = groups.find((x) => x.name === `${sec.name}-zapret-out`);
-  if (zg && zg.now === `${sec.name}-zapret-direct`) return { text: "web through zapret, the rest through its servers", mode: "zapret" };
   const ut = groups.find((x) => x.name === `${sec.name}-urltest-out`);
   const tag = g.now === `${sec.name}-urltest-out` && ut ? ut.now : g.now;
   const server = (rt.proxies.servers || []).find((x) => x.name === tag);
@@ -116,7 +113,7 @@ export function ruleNow(rt, sec, devices) {
 }
 
 // is the rule working now, in one word and one reason: {cls: ok|warn|bad|"", text}
-// (self-heal's dead groups, the kill switch, zapret's state, watched servers)
+// (self-heal's dead groups, the kill switch, watched servers)
 export function ruleHealth(rt, sec) {
   const o = sec.options || {}, st = (rt && rt.status) || {};
   if (!rt || !rt.online) return { cls: "", text: "" };
@@ -125,14 +122,10 @@ export function ruleHealth(rt, sec) {
   const g = groups.find((x) => x.name === `${sec.name}-out`);
   if (g && g.now === `${sec.name}-strict-out`) return { cls: "bad", text: "kill switch closed: no server answers" };
   if ((((st.heal || {}).groups || {})[sec.name] || {}).reported) return { cls: "bad", text: "none of its servers answers" };
-  const z = (st.zapret || {})[sec.name];
-  if (["missing", "stopped", "no_table", "not_installed"].includes(z)) return { cls: "bad", text: "zapret is on but not working (the router mends it)" };
   const down = ((st.watched || []).filter((x) => x.section === sec.name && x.state === "down"));
   if (down.length) return { cls: "warn", text: `watched server ${down.map((x) => x.name).join(", ")} does not answer` };
-  if (z === "servers") return { cls: "warn", text: "zapret does not open its sites: on its servers" };
-  if (z === "partial") return { cls: "warn", text: "zapret opens its sites only partly: on its servers" };
   if (o.connection_type === "proxy" && !g) return { cls: "", text: "" };
-  return { cls: "ok", text: z === "zapret" ? "working, web through zapret" : "working" };
+  return { cls: "ok", text: "working" };
 }
 
 // where a rule's traffic leaves to the internet: "DE, Germany · 203.0.113.5"
@@ -186,28 +179,12 @@ export const EVENT_TEXT = {
   vpn_allow: (d) => { const n = Object.values(d.allow || {}).flat().length; return n ? `VPN limited to ${n} device address${n === 1 ? "" : "es"}` : "VPN open to every device"; },
   vpn_down: (d) => `VPN is down${d.last ? `: ${d.last}` : ""}${d.running ? "" : " (OpenVPN is not running)"}`,
   vpn_up: (d) => `VPN is up again${d.address ? `, ${d.address}` : ""}`,
-  zapret_servers: (d) => `${d.section}: zapret does not open its sites now, the rule uses its servers`,
-  zapret_direct: (d) => `${d.section}: back on zapret (direct)`,
-  zapret_partial: (d) => `${d.section}: zapret opens it only partly (${(d.failed || []).join(", ")} did not open), the rule uses its servers`,
-  zapret_whole: (d) => `${d.section}: every check address opens again, back on zapret`,
-  zapret_fitted: (d) => `${d.section}: zapret has a new strategy, ${d.strategy}`,
-  zapret_unfit: (d) => `${d.section}: no better zapret strategy (${d.why}); the rule stays on its servers`,
-  zapret_addresses: (d) => `${(d.rules || []).join(", ")}: got the check addresses of their service`,
-  zapret_on: (d) => `${d.installed ? "zapret2 installed; " : ""}zapret first on ${(d.rules || []).join(", ") || "no rule"} (from the applied config)`
-    + ((d.refused || []).length ? `; not on ${d.refused.join(", ")}: kill switch or Protected` : ""),
   settings_on: (d) => `From the applied config: ${(d.done || []).join("; ")}`,
   settings_failed: (d) => `From the applied config: ${(d.done || []).join("; ") || "nothing"} set; not: ${(d.failed || []).join("; ")}`,
-  zapret_failed: (d) => `zapret first was not turned on for ${(d.rules || []).join(", ")}: ${d.message || ""}`,
   server_down: (d) => `${d.section}: watched server ${d.name || d.server} does not answer (3 tests in a row)`,
   server_up: (d) => `${d.section}: watched server ${d.name} answers again${d.down_for ? ` after ${Math.round(d.down_for / 60)} min` : ""}`,
   watched: (d) => (d.servers ? `${plural(d.servers, "server")} watched` : "No server watched"),
-  zapret: (d) => ((d.rules || []).length ? `zapret first on ${d.rules.join(", ")}` : "zapret first off on every rule"),
-  zapret_installed: (d) => `zapret2 ${d.nfqws2 || ""} installed on the router`.replace("  ", " "),
-  zapret_removed: () => "zapret2 removed from the router",
-  zapret_repaired: (d) => `${(d.rules || []).join(", ")}: zapret was missing in sing-box (after a podkop restart?) and was put back`,
-  zapret_missing: (d) => `${(d.rules || []).join(", ")}: zapret is missing in sing-box and could not be put back: ${d.reason || ""}`,
-  zapret_restarted: (d) => `${(d.rules || []).join(", ")}: zapret2 (nfqws2) did not run and was started again`,
-  zapret_dropped: (d) => `${(d.rules || []).join(", ")}: left zapret (the rule is gone or is no proxy rule any more)`,
+  zapret_removed: () => "zapret removed from the router (agent 0.32): its rules use their servers",
   vpn_restart: (d) => `VPN: gateway ${d.gateway} stopped answering, reconnecting`,
   strict: (d) => ((d.sections || []).length ? `Kill switch on for ${d.sections.join(", ")}` : "Kill switch off for every rule"),
   strict_closed: (d) => `${d.section}: kill switch closed, connections are refused${d.via ? " (the rule it sends through has no server of its own)" : ""}`,
@@ -258,13 +235,13 @@ export const EVENT_TEXT = {
 };
 export const EVENT_DOT = {
   applied: "ok", podkop_up: "ok", reverted: "bad", revert_failed: "bad", apply_interrupted: "bad", podkop_down: "bad", recovery_failed: "bad",
-  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", fds_high: "bad", fds_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", zapret_servers: "warn", zapret_direct: "ok", zapret_on: "ok", zapret_failed: "bad", settings_on: "ok", settings_failed: "bad", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
+  recovery_gave_up: "bad", change_not_applied: "bad", probe_failed: "bad", router_offline: "bad", router_online: "ok", clash_api_silent: "bad", group_stuck: "warn", agent_stuck: "bad", agent_ok: "ok", fds_high: "bad", fds_ok: "ok", safe_mode: "bad", safe_mode_confirmed: "warn", safe_mode_off: "ok", protect_refused: "bad", sentinel_restart: "warn", vpn_down: "bad", vpn_up: "ok", settings_on: "ok", settings_failed: "bad", vpn_restart: "warn", strict_closed: "bad", strict_open: "ok", probe_apply_failed: "bad", probe_not_started: "bad", keys_sync_failed: "bad", recovered: "warn", pin_dropped: "warn",
   auto_rule_empty: "warn", usage_threshold: "warn", usage_move_failed: "bad",
   group_down: "bad", group_recovered: "ok", heal_links: "warn", heal_links_failed: "bad", heal_failed: "bad",
   heal_probe_failed: "bad", heal_no_probe: "warn", stale_probe_not_used: "warn",
   agent_upgraded: "ok", agent_upgrade_failed: "bad", scheduled: "accent", schedule_failed: "bad",
   pinned: "accent", pin_cleared: "accent", pin_restored: "accent",
-  server_down: "bad", server_up: "ok", zapret_repaired: "warn", zapret_missing: "bad", zapret_partial: "warn", zapret_whole: "ok", zapret_fitted: "ok", zapret_unfit: "warn", zapret_restarted: "warn", zapret_dropped: "warn",
+  server_down: "bad", server_up: "ok",
 };
 
 export function serverName(section, tag) {

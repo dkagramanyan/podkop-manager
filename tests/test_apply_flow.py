@@ -97,7 +97,7 @@ def test_a_scheduled_change_carries_a_loaded_configs_switches(tmp_path):
     async def go():
         # scheduled: the switches wait for that change, not for the next draft
         db.set_draft(rid, target, "fp1", base_config=BASE)
-        db.set_setting(f"zapret_pending:{rid}", {"youtube": {"args": ["--a=1"], "url": "https://y/"}})
+        db.set_setting(f"router_pending:{rid}", {"kill_switch": ["youtube"]})
         vid = await hub.schedule(rid, "fp1", target, "", 2e9)
         assert db.get_setting(f"pending_version:{rid}") == vid
         other = changed(BASE, "youtube", urltest_proxy_links=["vless://o@h:1#O"])

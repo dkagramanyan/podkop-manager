@@ -57,42 +57,25 @@ def test_export_and_import_keep_rules():
         configs.read(json.dumps(configs.to_file("x", cfg, {"nope": rule})))
 
 
-def test_a_config_file_carries_its_rules_zapret_first():
+def test_a_file_of_1_57_to_1_61_with_a_zapret_part_still_imports_without_it():
     cfg = configs.check_config(configs.parse_uci(UCI))
-    zap = {"main": {"args": ["--payload=tls_client_hello", "--lua-desync=fake:blob=fake_default_tls"],
-                    "url": "https://www.instagram.com/", "name": "fake", "service": "meta"}}
-    text = json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", zap))
-    assert configs.read(text)["zapret"] == {"main": dict(zap["main"], urls=[])}
-    # its check addresses go along (one learnt on the router's line too)
-    node = {"from": "https://a/map", "field": 3, "tr": ["ab", "cd"], "url": "https://rr-{}.x/"}
-    more = {"main": dict(zap["main"], urls=["https://www.facebook.com/", node])}
-    assert configs.read(json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", more)))["zapret"] == more
-    # a file without it (older ones, podkop's own) has none; the key is left out when empty
-    assert configs.read(json.dumps(configs.to_file("x", cfg, {})))["zapret"] == {}
-    assert "zapret" not in configs.to_file("x", cfg, {}) and configs.read(UCI)["zapret"] == {}
-    for bad, msg in ((dict(zap, nope=zap["main"]), "proxy rules of this config only, not nope"),
-                     ({"main": dict(zap["main"], args=["--qnum=1 2"])}, "nfqws2 --options"),
-                     ({"main": dict(zap["main"], url="ftp://x")}, "http"),
-                     ({"main": dict(zap["main"], service="tiktok")}, "unknown service"),
-                     ([1], "zapret must be")):
-        with pytest.raises(ValueError, match=msg):
-            configs.read(json.dumps(dict(configs.to_file("x", cfg, {}), zapret=bad)))
+    old = dict(configs.to_file("prod", cfg, {}, "0.7.24"), zapret={"main": {"args": ["--x=1"], "url": "https://y/"}})
+    f = configs.read(json.dumps(old))
+    assert f["config"] == cfg and "zapret" not in f
+    assert "zapret" not in configs.to_file("x", cfg, {})
 
 
 def test_a_config_file_carries_the_routers_switches_and_probe_but_no_keys():
     cfg = configs.check_config(configs.parse_uci(UCI))
     router = {"kill_switch": ["main"], "protected": [], "heal_off": ["*"],
               "probe": {"schedule": "03:30", "auto_apply": True, "fix_fingerprint": 0, "test_from": "manager", "options": ["-x"]}}
-    f = configs.read(json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", None, router)))
+    f = configs.read(json.dumps(configs.to_file("prod", cfg, {}, "0.7.24", router)))
     assert f["router"] == dict(router, probe=dict(router["probe"], auto_apply=1))
     assert configs.read(json.dumps(configs.to_file("x", cfg, {})))["router"] == {}        # older files: none
-    zap = {"main": {"args": ["--payload=tls_client_hello"], "url": "https://x.com/", "name": "z", "service": ""}}
     for bad, msg in (({"kill_switch": ["nope"]}, "no rule nope"), ({"probe": {"keys": ["https://sub"]}}, "keys stay"),
                      ({"probe": {"schedule": "25:00"}}, "HH:MM"), ({"vpn": 1}, "only"), ({"protected": "main"}, "list")):
         with pytest.raises(ValueError, match=msg):
-            configs.read(json.dumps(configs.to_file("x", cfg, {}, "", None, bad)))
-    with pytest.raises(ValueError, match="does not go with a kill switch"):
-        configs.read(json.dumps(configs.to_file("x", cfg, {}, "", zap, {"kill_switch": ["main"]})))
+            configs.read(json.dumps(configs.to_file("x", cfg, {}, "", bad)))
 
 
 def test_backup_round_trip(tmp_path: Path):

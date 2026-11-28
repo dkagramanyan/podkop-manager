@@ -46,7 +46,7 @@ def conn(host, chains, dst=""):
 CONNS = {"connections": [
     conn("www.youtube.com", ["youtube-1-out", "youtube-urltest-out", "youtube-out"]),
     conn("api.github.com", ["github-out"]),
-    conn("www.instagram.com", ["meta-zapret-direct", "meta-zapret-out"]),   # zapret first (agent 0.29): still the rule meta
+    conn("www.instagram.com", ["meta-1-out", "meta-out"]),
     conn("", ["meta-2-out", "meta-out"], dst="157.240.1.35"),         # subnet list: address, no name
     conn("example.org", ["direct-out"]),                                # excluded: not a section
     conn("odd.example", ["main-out"], dst="198.18.0.99"),               # FakeIP is never a real address

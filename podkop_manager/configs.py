@@ -1,5 +1,5 @@
 """Config files: podkop's sections plus the rules that take servers from the
-probe, the rules' zapret first and the router's own switches (kill switch,
+probe and the router's own switches (kill switch,
 Protected, self-heal off, the nightly probe), as a JSON file the manager
 exports and imports. Keys never go in it: they stay in the manager's
 database. Import also reads podkop's own /etc/config/podkop (UCI)."""
@@ -10,27 +10,24 @@ import json
 import re
 import time
 
-from . import zapret as zapret_mod
 from .podkop import INTERNAL_OPTIONS, check_auto_rule
 
 FORMAT = "podkop-manager-config"
 
 
-def to_file(name: str, config: dict, rules: dict, podkop_version: str = "", zapret: dict | None = None,
-            router: dict | None = None) -> dict:
-    """The exported file: {format, name, saved, podkop, config, rules[, zapret][, router]}:
-    zapret is {rule: {args, url, name, service}}, the rules with zapret first;
+def to_file(name: str, config: dict, rules: dict, podkop_version: str = "", router: dict | None = None) -> dict:
+    """The exported file: {format, name, saved, podkop, config, rules[, router]}:
     router is check_router's."""
     out = {"format": FORMAT, "version": 1, "name": name,
            "saved": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "podkop": podkop_version,
            "config": config, "rules": rules}
-    return out | ({"zapret": zapret} if zapret else {}) | ({"router": router} if router else {})
+    return out | ({"router": router} if router else {})
 
 
 PROBE_FIELDS = ("schedule", "auto_apply", "fix_fingerprint", "test_from", "options", "main_section", "youtube_section")
 
 
-def check_router(r, config: dict, zapret: dict) -> dict:
+def check_router(r, config: dict) -> dict:
     """A config's router part: {"kill_switch", "protected", "heal_off": [rule],
     "probe": {schedule, auto_apply, fix_fingerprint, test_from, options,
     main_section, youtube_section}}, each one optional (left out: the
@@ -51,9 +48,6 @@ def check_router(r, config: dict, zapret: dict) -> dict:
         if bad:
             raise ValueError(f"router.{k}: no rule {', '.join(bad)} in this config")
         out[k] = sorted(set(v))
-    both = sorted(set(zapret) & (set(out.get("kill_switch", [])) | set(out.get("protected", []))))
-    if both:
-        raise ValueError(f"{', '.join(both)}: zapret first does not go with a kill switch or Protected")
     if "probe" in r:
         p = r["probe"]
         if not isinstance(p, dict) or set(p) - set(PROBE_FIELDS):
@@ -171,8 +165,9 @@ def check_config(config: dict) -> dict:
 
 
 def read(text: str) -> dict:
-    """An imported file -> {"name", "config", "rules", "podkop", "zapret", "router"}:
-    our JSON export or podkop's UCI file. Raises ValueError."""
+    """An imported file -> {"name", "config", "rules", "podkop", "router"}:
+    our JSON export or podkop's UCI file (a "zapret" part of a file from
+    1.57-1.61 is left out). Raises ValueError."""
     text = text.lstrip("\ufeff")       # a byte order mark from some editors
     stripped = text.lstrip()
     if stripped.startswith("{"):
@@ -187,8 +182,7 @@ def read(text: str) -> dict:
         names = {s["name"] for s in config["sections"] if s["type"] == "section"}
         if not isinstance(rules, dict) or set(rules) - names:
             raise ValueError("rules must be for sections of this config")
-        zap = zapret_mod.check_rules(data.get("zapret") or {}, config)
         return {"name": str(data.get("name") or ""), "config": config, "podkop": str(data.get("podkop") or ""),
-                "rules": {k: check_auto_rule(v) for k, v in rules.items()}, "zapret": zap,
-                "router": check_router(data.get("router"), config, zap)}
-    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": "", "zapret": {}, "router": {}}
+                "rules": {k: check_auto_rule(v) for k, v in rules.items()},
+                "router": check_router(data.get("router"), config)}
+    return {"name": "", "config": check_config(parse_uci(text)), "rules": {}, "podkop": "", "router": {}}

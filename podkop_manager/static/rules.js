@@ -10,7 +10,6 @@ import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDet
 import { EUROPE, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
 import { VPN_DEV } from "./vpn.js";
-import { zapretParts, zapretTag } from "./zapret.js";
 
 // --- routing rules -----------------------------------------------------------------------------------------
 
@@ -80,7 +79,7 @@ export async function viewRules(main, id, sub) {
         h("span", { class: "n" }, i + 1),
         h("div", { class: "col grow", style: "gap: 6px" },
           h("div", { class: "row" }, ((x) => (x.cls ? h("span", { class: `dot sm ${x.cls}`, title: x.text, "aria-label": x.text }) : null))(ruleHealth(S.routers[id], s)),
-            h("span", { class: "name" }, s.name), tag, zapretTag(S.routers[id], s),
+            h("span", { class: "name" }, s.name), tag,
             auto ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, "from probe")
               : keyRule(w, s) ? h("span", { class: "tag", style: "background: var(--line-soft); color: var(--text-2)" }, `from ${keyLabels(w, s.name)}`) : null),
           h("div", { class: "what" }, h("span", {}, ruleMatches(s)), icon("arrow", 14, { stroke: "var(--muted)" }),
@@ -318,10 +317,8 @@ export function ruleEditor(w, s, { onRename }) {
       lbl(b, "domain_resolver_dns_server", "DNS server"), h("div", { class: "ctl" }, comboField(b, "domain_resolver_dns_server", optionDef("x", "domain_resolver_dns_server").values), b.was("domain_resolver_dns_server"))) : null]);
 
   // the switches saved on the router at once, at the top: no scrolling to reach them
-  const zp = zapretParts(w, s, () => w.redraw && w.redraw());
-  const switches = [ct === "proxy" && (pt === "urltest" || via) ? strictField(w, s) : null, protectField(w, s), zp && zp.toggle].filter(Boolean);
+  const switches = [ct === "proxy" && (pt === "urltest" || via) ? strictField(w, s) : null, protectField(w, s)].filter(Boolean);
   const probe = ct === "proxy" && pt === "urltest" && auto ? panel("probe", "Probe", probeSummary(auto), autoRuleEditor(w, s, auto), false) : null;
-  const zapret = zp && zp.body ? panel("zapret", "Zapret first", zp.summary, zp.body, false) : null;
 
   const allOpen = () => [...ed.querySelectorAll("details.panel")].every((d) => d.open);
   const fold = h("button", { type: "button", class: "btn", onclick: () => {
@@ -340,7 +337,7 @@ export function ruleEditor(w, s, { onRename }) {
         h("button", { type: "button", class: "btn", onclick: duplicate }, "Duplicate"),
         h("button", { type: "button", class: "btn danger", onclick: remove }, "Delete rule"))),
     switches.length ? h("div", { class: "switches", role: "group", "aria-label": "Switches" }, switches) : null,
-    matches, sends, probe, zapret, advanced);
+    matches, sends, probe, advanced);
   fold.textContent = allOpen() ? "Collapse all" : "Expand all";
   return ed;
 }

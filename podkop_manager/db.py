@@ -111,7 +111,6 @@ COLUMNS = [
     ("auto_rules", "heal_fallback", "TEXT NOT NULL DEFAULT ''"),     # 1.40.0: self-heal's wider countries
     ("auto_rules", "unlock", "TEXT NOT NULL DEFAULT '[]'"),          # 1.54.0: services the probe asks through each server
     ("versions", "due", "REAL"),                 # a change scheduled for this time
-    ("configs", "zapret", "TEXT NOT NULL DEFAULT '{}'"),             # 1.57.0: zapret first of its rules
     ("configs", "router", "TEXT NOT NULL DEFAULT '{}'"),             # 1.58.0: kill switch, Protected, self-heal off, probe
     ("versions", "base_config", "TEXT"),         # ... and the router's settings it was made on
 ]
@@ -135,6 +134,8 @@ class DB:
         """Tables and columns of this version, also for a restored backup."""
         with self.lock:
             self.conn.executescript(SCHEMA)
+            # zapret (1.55-1.61) is gone: its settings with it (configs.zapret of an older database stays unused)
+            self.conn.execute("DELETE FROM settings WHERE key LIKE 'zapret%'")
             added = set()
             for table, col, decl in COLUMNS:
                 if col not in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
@@ -221,7 +222,7 @@ class DB:
         for name in ("traffic", "avoid", "moved", "lists_to_rules", "countries_to_rules", "rules_base", "imported",
                      "rule_keys", "rule_keys_base", "rule_links", "rule_links_base", "keys_synced",
                      "reliability", "server_health", "kuma_token", "heal_probe", "entry_ips",
-                     "zapret_pending", "router_pending", "pending_version", "last_undone", "watch"):
+                     "router_pending", "pending_version", "last_undone", "watch"):
             self.x("DELETE FROM settings WHERE key = ?", f"{name}:{rid}")
         self.x("DELETE FROM routers WHERE id = ?", rid)
 
@@ -564,18 +565,18 @@ class DB:
     def configs(self) -> list[dict]:
         rows = self.q("SELECT * FROM configs ORDER BY id DESC")
         for r in rows:
-            r["config"], r["rules"], r["zapret"] = json.loads(r["config"]), json.loads(r["rules"]), json.loads(r.get("zapret") or "{}")
+            r["config"], r["rules"] = json.loads(r["config"]), json.loads(r["rules"])
+            r.pop("zapret", None)
             r["router"] = json.loads(r.get("router") or "{}")
         return rows
 
     def saved_config(self, cid: int) -> dict | None:
         return next((r for r in self.configs() if r["id"] == cid), None)
 
-    def add_config(self, name: str, config: dict, rules: dict, source: str, podkop: str = "", zapret: dict | None = None,
+    def add_config(self, name: str, config: dict, rules: dict, source: str, podkop: str = "",
                    router: dict | None = None) -> int:
-        return self.x("INSERT INTO configs (name, t, source, podkop, config, rules, zapret, router) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                      name, time.time(), source, podkop, json.dumps(config), json.dumps(rules), json.dumps(zapret or {}),
-                      json.dumps(router or {}))
+        return self.x("INSERT INTO configs (name, t, source, podkop, config, rules, router) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      name, time.time(), source, podkop, json.dumps(config), json.dumps(rules), json.dumps(router or {}))
 
     def rename_config(self, cid: int, name: str) -> None:
         self.x("UPDATE configs SET name = ? WHERE id = ?", name, cid)

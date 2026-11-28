@@ -21,7 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import __version__, backup, configs, podkop, reliability, notify, report, usage, zapret
+from . import __version__, backup, configs, podkop, reliability, notify, report, usage
 from .agent import (AgentError, connection_support, forward_line, install_command, pair,
                     parse_pairing, release_tag, require_connection_support, upgrade_command)
 from .db import DB
@@ -379,7 +379,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if discard:
             hub.restore_rules(rid)
         db.delete_draft(rid)
-        # a loaded config's switches and zapret went with the draft (not those of a scheduled change)
+        # a loaded config's switches went with the draft (not those of a scheduled change)
         if db.get_setting(f"pending_version:{rid}") is None:
             hub.drop_pending(rid)
         hub.update_draft(rt)
@@ -479,8 +479,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
                            "list": lst, "type": "block" if m["outbound"] == "reject" else "exclusion" if lst else "excluded",
                            "server": None, "exit": None, "kill_switch": False}
         elif m:
-            section = re.sub(r"(-strict|-zapret)?-out$", "", m["outbound"])
-            zg = next((g for g in ((rt.proxies or {}).get("groups") or []) if g.get("name") == f"{section}-zapret-out"), None)
+            section = re.sub(r"(-strict)?-out$", "", m["outbound"])
             cfg = (rt.config or {}).get("config") or {"sections": []}
             sec = podkop.sections_by_name(cfg).get(section)
             tag = reliability.selections(cfg, rt.proxies).get(section) if sec else None
@@ -490,9 +489,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             out["rule"] = {"section": section, "known": bool(sec), "type": (sec or {}).get("options", {}).get("connection_type", "proxy"),
                            "by": kind, "list": lst[len(section) + 1:-len("-community-ruleset")] if kind == "community" else lst,
                            "server": (rt.names or {}).get(tag) or tag, "exit": (rt.exits or {}).get(section),
-                           "kill_switch": section in (((rt.status or {}).get("heal") or {}).get("strict") or []),
-                           # zapret rule (agent 0.29): out direct through zapret now, or on its servers
-                           "zapret": None if not zg else zg.get("now") == f"{section}-zapret-direct"}
+                           "kill_switch": section in (((rt.status or {}).get("heal") or {}).get("strict") or [])}
         return out
 
     # --- watched servers: an alert when one stops answering (agent 0.30) -------------
@@ -549,12 +546,6 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         with contextlib.suppress(AgentError):
             logs = await rt.agent.call("logs", "1000")
         extra: dict = {"Connection check": getattr(rt, "connection_check", None) or "none yet"}
-        if "zapret" in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
-            try:
-                extra["zapret"] = await rt.agent.call("zapret", "diag", timeout=40)
-            except AgentError as e:     # an agent before 0.30 has no diag
-                with contextlib.suppress(AgentError):
-                    extra["zapret"] = {"status": await rt.agent.call("zapret", "status", timeout=30), "diag": e.message}
         if at:
             m = max(1, min(int(minutes), 240)) * 60
             rows = db.logs(rid, limit=5000, since=at - m, until=at + m)
@@ -765,223 +756,6 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         if not re.fullmatch(r"[0-9]+-[0-9]+", job):
             raise HTTPException(400, "bad job id")
         return await router_or_404(rid).agent.call("job", job, timeout=30)
-
-    # --- zapret (agent 0.29): the direct path first, the rule's servers as fallback ---
-    # router -> the running or last strategy search (the hub's own refits are among them)
-    zapret_runs: dict[int, dict] = getattr(hub, "zapret_runs", None)
-    if zapret_runs is None:
-        zapret_runs = {}
-    ZAPRET_INTERVALS = zapret.INTERVALS
-
-    def zapret_interval() -> int:
-        return zapret.interval(db)
-
-    def zapret_strategies() -> list[dict]:
-        text = db.get_setting("zapret_strategies")
-        return zapret.parse_strategies(text) if text else zapret.default_strategies()
-
-    def zapret_rule(name: str, r) -> dict:
-        try:
-            return zapret.check_rule(name, r)
-        except ValueError as e:
-            raise HTTPException(400, str(e)) from None
-
-    def zapret_urls(name: str, urls) -> list:
-        try:
-            if not isinstance(urls, list) or not 0 < len(urls) <= zapret.MAX_URLS + 1:
-                raise ValueError
-            urls = [zapret.check_url(u) for u in urls]
-            if not any(isinstance(u, str) for u in urls):
-                raise ValueError
-        except ValueError:
-            raise HTTPException(400, f"{name}: 1 to {zapret.MAX_URLS + 1} http(s) test addresses expected") from None
-        return urls
-
-    @app.get("/api/routers/{rid}/zapret", dependencies=[api])
-    async def zapret_state(rid: int):
-        """zapret on the router, the rules it can serve (with their service and
-        default test addresses), the strategy list, the last search."""
-        rt = router_or_404(rid)
-        needs(rt, "zapret", "0.29")
-        st = await rt.agent.call("zapret", "status", timeout=30)
-        cfg = hub.cached_config(rt) or await hub.config(rid)
-        run = zapret_runs.get(rid)
-        text = lambda urls: [zapret.url_text(u) for u in urls or []]       # noqa: E731 - an address learnt on the line is a line of JSON
-        return {"router": st, "rules": [dict(r, urls=text(r["urls"])) for r in zapret.rules_view(cfg["config"])],
-                "services": {k: {"urls": text(v.get("urls")), "test": v.get("test"), "note": v.get("note")}
-                             for k, v in zapret.DEFAULTS["services"].items()},
-                "strategies": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
-                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
-                "interval": st.get("interval") or zapret_interval(),
-                "run": {k: v for k, v in run.items() if k != "task"} if run else None}
-
-    @app.get("/api/zapret/strategies", dependencies=[api])
-    async def zapret_strategies_get():
-        return {"text": db.get_setting("zapret_strategies") or zapret.strategies_text(zapret.DEFAULTS["strategies"]),
-                "custom": bool(db.get_setting("zapret_strategies")), "count": len(zapret_strategies()),
-                "interval": zapret_interval(), "intervals": list(ZAPRET_INTERVALS)}
-
-    @app.put("/api/zapret/strategies", dependencies=[api])
-    async def zapret_strategies_set(body: dict):
-        """The nfqws2 strategies every search tries, one per line ("name |
-        --options"); empty text goes back to the defaults."""
-        if "interval" in body:
-            try:
-                iv = int(body["interval"])
-            except (TypeError, ValueError):
-                iv = 0
-            if iv not in ZAPRET_INTERVALS:
-                raise HTTPException(400, f"interval: one of {', '.join(map(str, ZAPRET_INTERVALS))} seconds")
-            db.set_setting("zapret_interval", iv)
-            # routers with zapret rules take it now (one that is offline gets it with its next change)
-            told, missed = [], []
-            for rt in list(hub.routers.values()):
-                if "zapret" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
-                    continue
-                try:
-                    cur = await hub.zapret_current(rt)
-                    if cur:
-                        await rt.agent.call("zapret", "set", payload={"interval": iv, "rules": cur}, timeout=120)
-                        told.append(rt.row["name"])
-                except AgentError as e:
-                    missed.append(f"{rt.row['name']}: {e.message}")
-            if "text" not in body:
-                return {"interval": iv, "routers": told, "missed": missed}
-        text = str(body.get("text") or "").strip()
-        if text:
-            try:
-                n = len(zapret.parse_strategies(text))
-            except ValueError as e:
-                raise HTTPException(400, str(e)) from None
-            if not 0 < n <= 200:
-                raise HTTPException(400, "1 to 200 strategies expected")
-        db.set_setting("zapret_strategies", text or None)
-        return {"count": len(zapret_strategies()), "custom": bool(text), "interval": zapret_interval()}
-
-    @app.post("/api/routers/{rid}/zapret/install", dependencies=[api])
-    async def zapret_install(rid: int):
-        """nfqws2 from bol-van/zapret2's latest release (checked against its
-        sha256sum.txt), for the router's CPU."""
-        rt = router_or_404(rid)
-        needs(rt, "zapret", "0.29")
-        st = await rt.agent.call("zapret", "status", timeout=30)
-        try:
-            return await zapret.install(rt.agent, hub.key.parent / "zapret", st.get("arch") or "")
-        except (ValueError, OSError) as e:
-            raise HTTPException(502, f"zapret2 could not be installed: {e}") from None
-
-    @app.put("/api/routers/{rid}/zapret", dependencies=[api])
-    async def zapret_set(rid: int, body: dict):
-        """zapret first on or off for some rules: {"set": {rule: {args, url,
-        name, service}}, "off": [rule]}; the router's other zapret rules stay as
-        the router has them now (a page open for a while does not undo another
-        page's change). {"rules": {...}} replaces them all; {} turns zapret off."""
-        rt = router_or_404(rid)
-        needs(rt, "zapret", "0.29")
-        run = zapret_runs.get(rid)
-        if run and run.get("state") == "running":
-            raise HTTPException(409, "a strategy search is running on this router")
-        if "rules" in body:
-            rules = body.get("rules")
-            if not isinstance(rules, dict):
-                raise HTTPException(400, "rules must be {rule: {args, url, name}}")
-            rules = {k: zapret_rule(k, v) for k, v in rules.items()}
-        else:
-            on, off = body.get("set") or {}, body.get("off") or []
-            if not isinstance(on, dict) or not isinstance(off, list) or not (on or off):
-                raise HTTPException(400, 'expected {"set": {rule: {args, url, name}}, "off": [rule]}')
-            on = {k: zapret_rule(k, v) for k, v in on.items()}
-            cur = await hub.zapret_current(rt)
-            rules = {**{k: v for k, v in cur.items() if k not in off}, **on}
-        out = await rt.agent.call("zapret", "set", payload={"rules": rules, "interval": zapret_interval()}, timeout=120)
-        await hub.refresh(rt)
-        return out
-
-    @app.post("/api/routers/{rid}/zapret/import", dependencies=[api])
-    async def zapret_import(rid: int, body: dict):
-        """A zapret file ({"rules": {rule: {args, url, name, service}}}, from
-        Configs → Import file): those rules get zapret first with the file's
-        strategies, zapret2 is installed first if the router has none, and the
-        router's other zapret rules stay as they are. Rules the router does
-        not run yet are refused: apply the config first."""
-        rt = router_or_404(rid)
-        needs(rt, "zapret", "0.29")
-        rules = body.get("rules")
-        if not isinstance(rules, dict) or not rules or len(rules) > 20:
-            raise HTTPException(400, "the file has no zapret rules")
-        new = {k: zapret_rule(k, v) for k, v in rules.items()}
-        run = zapret_runs.get(rid)
-        if run and run.get("state") == "running":
-            raise HTTPException(409, "a strategy search is running on this router")
-        cfg = hub.cached_config(rt) or await hub.config(rid)
-        have = {r["name"] for r in zapret.rules_view(cfg["config"])}
-        missing = sorted(set(new) - have)
-        if missing:
-            raise HTTPException(400, f"{rt.row['name']} has no proxy rule {', '.join(missing)} yet: apply the config first")
-        try:
-            return await hub.zapret_on(rt, new)
-        except (ValueError, OSError) as e:
-            raise HTTPException(502, f"zapret2 could not be installed: {e}") from None
-
-    @app.post("/api/routers/{rid}/zapret/search", dependencies=[api])
-    async def zapret_search(rid: int, body: dict):
-        """Try the strategy list for each rule ({"rules": [{"name", "urls",
-        "test"}], "apply": bool}): with apply, each rule where a strategy opened
-        every test address gets zapret on with the fastest one. Runs in the
-        background; GET .../zapret shows how far it is."""
-        rt = router_or_404(rid)
-        needs(rt, "zapret", "0.29")
-        run = zapret_runs.get(rid)
-        if run and run.get("state") == "running":
-            raise HTTPException(409, "a strategy search is already running on this router")
-        items = body.get("rules")
-        if not isinstance(items, list) or not items or len(items) > 20:
-            raise HTTPException(400, "rules must be a list of {name, urls, test}")
-        rules = []
-        for r in items:
-            name = str((r or {}).get("name") or "")
-            if not re.fullmatch(r"[A-Za-z0-9_]{1,64}", name):
-                raise HTTPException(400, f"bad rule {name!r}")
-            urls = zapret_urls(name, r.get("urls"))
-            if "zapret-urls" not in (((rt.status or {}).get("agent") or {}).get("capabilities") or []):
-                # an agent before 0.31 takes plain addresses only: one learnt on the line waits for its update
-                urls = [u for u in urls if isinstance(u, str)]
-            test = str(r.get("test") or "") or next(u for u in urls if isinstance(u, str))
-            if not re.fullmatch(r"https?://[!-~]{1,290}", test):
-                raise HTTPException(400, f"{name}: bad test address")
-            service = str(r.get("service") or "")
-            if service and service not in zapret.DEFAULTS["services"] and service != "other":
-                raise HTTPException(400, f"{name}: unknown service {service!r}")
-            rules.append({"name": name, "urls": urls, "test": test, "service": service})
-        strategies = zapret_strategies()
-        if body.get("strategies"):        # only some of the list (the page's own pick)
-            names = set(body["strategies"]) if isinstance(body["strategies"], list) else set()
-            strategies = [s for s in strategies if s["name"] in names] or strategies
-        apply = bool(body.get("apply"))
-        state = {"state": "running", "started": time.time(), "now": None, "rules": [r["name"] for r in rules],
-                 "apply": apply, "jobs": {}, "outcome": {}, "error": ""}
-
-        async def go():
-            try:
-                cur = await hub.zapret_current(rt)
-                new = await zapret.auto(rt.agent, rules, strategies, cur, state)
-                found = {k: v for k, v in new.items() if k in state["rules"] and v != cur.get(k)}
-                if apply and found:
-                    state["now"] = "turning zapret on"
-                    # read again: the search took minutes, and another change may have come meanwhile
-                    fresh = await hub.zapret_current(rt)
-                    await rt.agent.call("zapret", "set", payload={"rules": {**fresh, **found}, "interval": zapret_interval()}, timeout=120)
-                    await hub.refresh(rt)
-                state["state"] = "done"
-            except Exception as e:        # noqa: BLE001 - shown on the page
-                state.update(state="failed", error=str(e))
-            finally:
-                state["now"] = None
-                state["finished"] = time.time()
-
-        zapret_runs[rid] = state
-        state["task"] = asyncio.create_task(go())
-        return {k: v for k, v in state.items() if k != "task"}
 
     @app.put("/api/routers/{rid}/ipv6", dependencies=[api])
     async def ipv6_block(rid: int, body: dict):
@@ -1336,7 +1110,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     def config_row(c: dict) -> dict:
         rules = [s for s in c["config"]["sections"] if s["type"] == "section"]
         return {k: c[k] for k in ("id", "name", "t", "source", "podkop")} | {
-            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"]), "zapret": sorted(c.get("zapret") or {}),
+            "rules": [s["name"] for s in rules], "from_probe": sorted(c["rules"]),
             "router": c.get("router") or {}}
 
     def router_part(rt, config: dict) -> dict:
@@ -1385,19 +1159,9 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         names = {s["name"] for s in config["sections"]}
         rules = {r["section"]: podkop.check_auto_rule(r) for r in db.auto_rules(rt.id) if r["section"] in names}
         version = (((rt.status or {}).get("podkop")) or {}).get("version") or ""
-        # the router's zapret first goes with its rules (a draft: the rules it has in both)
-        zap = {}
-        if "zapret" in ((((rt.status or {}).get("agent") or {}).get("capabilities")) or []):
-            with contextlib.suppress(AgentError, ValueError):
-                cur = (await rt.agent.call("zapret", "status", timeout=30)).get("rules") or {}
-                have = {r["name"] for r in zapret.rules_view(config)}
-                zap = {k: zapret.check_rule(k, v) for k, v in cur.items() if k in have}
         router = router_part(rt, config)
-        # a rule with a kill switch or Protected has no zapret first (the router refuses it)
-        guarded = set(router.get("kill_switch", [])) | set(router.get("protected", []))
-        zap = {k: v for k, v in zap.items() if k not in guarded}
         cid = db.add_config(config_name(body.get("name"), f"{source} {time.strftime('%Y-%m-%d %H:%M')}"),
-                            config, rules, source, version, zap, router)
+                            config, rules, source, version, router)
         return config_row(config_or_404(cid))
 
     @app.post("/api/configs/import", dependencies=[api])
@@ -1409,13 +1173,13 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
             raise HTTPException(400, str(e)) from None
         file = str(body.get("file") or "").strip()[:120]
         cid = db.add_config(config_name(body.get("name") or f["name"], file or "Imported"),
-                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"], f["zapret"], f["router"])
+                            f["config"], f["rules"], f"file {file}".strip(), f["podkop"], f["router"])
         return config_row(config_or_404(cid))
 
     @app.get("/api/configs/{cid}/file", dependencies=[api])
     async def export_config(cid: int):
         c = config_or_404(cid)
-        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"], c.get("zapret"), c.get("router"))
+        data = configs.to_file(c["name"], c["config"], c["rules"], c["podkop"], c.get("router"))
         fname = re.sub(r"[^A-Za-z0-9_.-]+", "-", c["name"]).strip("-")[:60] or "config"
         return Response(json.dumps(data, ensure_ascii=False, indent=1), media_type="application/json",
                         headers={"Content-Disposition": f'attachment; filename="podkop-{fname}.json"'})
@@ -1435,17 +1199,17 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
     @app.post("/api/routers/{rid}/configs/{cid}/load", dependencies=[api])
     async def load_config(rid: int, cid: int):
         """Puts a saved config into the router's draft, to review and apply.
-        Its zapret first and the router's switches follow the apply; when the
+        The router's switches follow the apply; when the
         router runs these very settings already (nothing to apply), they are set now."""
         rt = router_or_404(rid)
         saved = config_or_404(cid)
         config = hub.load_config(rid, saved)
-        if saved.get("zapret") or saved.get("router"):
+        if saved.get("router"):
             with contextlib.suppress(AgentError):
                 cur = hub.cached_config(rt) or await hub.config(rid)
                 if not podkop.diff(cur["config"], config):
                     hub.after_apply_now(rt)
-                    return {"ok": True, "zapret": "now", "now": True}
+                    return {"ok": True, "now": True}
         return {"ok": True}
 
     # --- the whole manager: backup and restore ---------------------------------------------

@@ -40,8 +40,6 @@ class FakeHub:
     auto_picks = Hub.auto_picks
     usage = Hub.usage
     load_config = Hub.load_config
-    zapret_on = Hub.zapret_on
-    zapret_current = Hub.zapret_current
     keep_rules = Hub.keep_rules
     restore_rules = Hub.restore_rules
     probe_config = Hub.probe_config
@@ -83,7 +81,7 @@ class FakeHub:
         pass
 
     def drop_pending(self, rid):
-        for name in ("zapret_pending", "router_pending", "pending_version"):
+        for name in ("router_pending", "pending_version"):
             self.db.set_setting(f"{name}:{rid}", None)
 
     def _set_undone(self, rt, value):
@@ -496,3 +494,40 @@ def test_login_tries_sent_at_once_all_count(tmp_path):
         assert got.count("/login?bad=locked") >= 2             # 10 tries per window, however they arrive
         r = c.post("/login", data={"user": "admin", "password": "secret-pass"}, follow_redirects=False)
         assert r.headers["location"] == "/login?bad=locked"
+
+
+def test_support_report_has_the_stored_log_of_a_moment(tmp_path, monkeypatch):
+    class ReportAgent:
+        async def call(self, *args, payload=None, timeout=60):
+            if args[0] == "logs":
+                return ["now line"]
+            raise AssertionError(args)
+
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        rt = FakeRouter()
+        rt.agent, rt.status, rt.row = ReportAgent(), {"agent": {"capabilities": ["route"]}}, {"name": "home"}
+        rt.config, rt.proxies = None, None
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        c.db.add_log(1, "stored-line-42", "agent")
+        t = c.db.logs(1)[0]["t"]
+        r = c.get(f"/api/routers/1/support-report?at={t + 600}", headers=H)
+        assert r.status_code == 200, r.text
+        assert "stored-line-42" in r.text and "now line" in r.text and "zapret" not in r.text
+        assert "stored-line-42" not in c.get(f"/api/routers/1/support-report?at={t + 7200}", headers=H).text
+
+
+def test_where_does_it_go_names_the_rule_of_a_domain(tmp_path, monkeypatch):
+    class RouteAgent:
+        async def call(self, *args, payload=None, timeout=60):
+            return {"target": "instagram.com", "kind": "domain", "match": {"rule": 3, "outbound": "meta-out", "list": "meta-user-domains-ruleset"}}
+
+    rt = FakeRouter()
+    rt.agent, rt.status = RouteAgent(), {"agent": {"capabilities": ["route"]}}
+    rt.config, rt.names, rt.exits = {"config": {"sections": [{"type": "section", "name": "meta", "options": {"connection_type": "proxy"}}]}}, {}, {}
+    rt.proxies = {"groups": [], "servers": []}
+    with client(tmp_path, with_router=True) as c:
+        c.post("/login", data={"user": "admin", "password": "secret-pass"})
+        monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
+        rule = c.post("/api/routers/1/route", headers=H, json={"target": "instagram.com"}).json()["rule"]
+        assert rule["section"] == "meta" and rule["by"] == "domains" and "zapret" not in rule
