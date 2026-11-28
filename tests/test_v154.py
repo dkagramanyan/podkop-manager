@@ -167,7 +167,7 @@ def test_route_answer_names_the_rule_its_server_and_exit(tmp_path, monkeypatch):
         c.post("/login", data=LOGIN)
         r = c.post("/api/routers/1/route", json={"target": "https://ChatGPT.com/c/123"}, headers=H).json()
         assert r["rule"] == {"section": "chatgpt", "known": True, "type": "proxy", "by": "domains", "list": "chatgpt-user-domains-ruleset",
-                             "server": "Latvia gRPC", "exit": {"ip": "1.2.3.4", "country": "LV"}, "kill_switch": True, "zapret": None}
+                             "server": "Latvia gRPC", "exit": {"ip": "1.2.3.4", "country": "LV"}, "kill_switch": True}
         assert c.post("/api/routers/1/route", json={"target": "a b"}, headers=H).status_code == 400
         answer["match"] = {"rule": 2, "outbound": "reject", "list": "ads-user-domains-ruleset", "every": False}
         assert c.post("/api/routers/1/route", json={"target": "chatgpt.com"}, headers=H).json()["rule"]["type"] == "block"

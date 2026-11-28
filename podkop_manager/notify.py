@@ -37,20 +37,8 @@ TEXT = {
     "server_down": lambda d: f"{d.get('section')}: watched server {d.get('name') or d.get('server')} does not answer (3 tests in a row)",
     "server_up": lambda d: f"{d.get('section')}: watched server {d.get('name')} answers again"
                            + (f" after {span(d['down_for'])}" if isinstance(d.get("down_for"), (int, float)) else ""),
-    "zapret_servers": lambda d: f"{d.get('section')}: zapret does not open its sites now, the rule uses its servers",
-    "zapret_direct": lambda d: f"{d.get('section')}: back on zapret (direct)",
-    "zapret_partial": lambda d: (f"{d.get('section')}: zapret opens it only partly "
-                                 f"({', '.join(d.get('failed') or [])} did not open), the rule uses its servers"),
-    "zapret_whole": lambda d: f"{d.get('section')}: every check address opens again, back on zapret",
-    "zapret_fitted": lambda d: f"{d.get('section')}: zapret has a new strategy, {d.get('strategy')}",
-    "zapret_unfit": lambda d: f"{d.get('section')}: no better zapret strategy ({d.get('why')}); the rule stays on its servers",
-    "zapret_missing": lambda d: f"{', '.join(d.get('rules') or [])}: zapret is missing in sing-box and could not be put back"
-                                f" ({d.get('reason') or ''}); the rule uses its servers",
-    "zapret_repaired": lambda d: f"{', '.join(d.get('rules') or [])}: zapret was missing in sing-box and was put back",
-    "zapret_restarted": lambda d: f"{', '.join(d.get('rules') or [])}: zapret2 did not run and was started again",
-    "zapret_dropped": lambda d: f"{', '.join(d.get('rules') or [])}: left zapret (the rule is gone or no proxy rule)",
+    "zapret_removed": lambda d: "zapret was removed from the router (agent 0.32): its rules use their servers",
     "settings_failed": lambda d: "the loaded config's settings were set only partly: " + "; ".join(d.get("failed") or []),
-    "zapret_failed": lambda d: f"zapret first was not turned on for {', '.join(d.get('rules') or [])}: {d.get('message') or ''}",
     "group_stuck": lambda d: f"{d.get('section')}: sing-box kept {d.get('server')}, which does not answer, although another server did; podkop is restarted",
     "clash_api_silent": lambda d: "sing-box runs but does not answer; podkop is restarted",
     "reverted": lambda d: f"a change was reverted: {d.get('reason') or d.get('message') or ''}",

@@ -78,17 +78,6 @@ that already runs there are taken into **Keys and usage** and the rules.
 
 ## Good to know
 
-- **Zapret first** (a rule's page, agent 0.29): a rule's web traffic can go
-  out without a server first, through zapret2 (nfqws2), and fall back to its
-  own servers while zapret's check fails. Turning it on tries the strategy
-  list (Settings) on the router and keeps the fastest that opens the rule's
-  check addresses (by service: YouTube, Meta, X, Telegram, Discord, Other).
-  The router keeps opening all of them: a site that opens only partly goes
-  to the rule's servers, and another strategy is searched for by itself
-  (agent 0.31). Sites on such a rule
-  see the router's own address; it helps against the provider's filter
-  (YouTube, Meta, X on many lines), not against sites that refuse a country
-  or addresses blocked outright (Telegram).
 - A change that touches only servers, a rule's own domains or its URLTest
   settings is applied in about a second (sing-box reloads in place); other
   changes restart podkop, 20–30 s without proxy (agent 0.14).
