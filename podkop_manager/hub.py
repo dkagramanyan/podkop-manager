@@ -33,6 +33,7 @@ ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", 
                 "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high",
                 "settings_failed", "server_down")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
+NOTIFY_KEEP = 2 * 86400  # a late alert older than this is not sent any more
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
 CALM_CHECKS = 5          # connection checks that found nothing wrong run this many times less often
@@ -168,6 +169,7 @@ class Hub:
         self.tasks: list[asyncio.Task] = []
         self.probes: dict[int, asyncio.Task] = {}
         self.jobs: set[asyncio.Task] = set()      # apply jobs being followed
+        self.flush_lock = asyncio.Lock()           # one sender of the late notifications at a time
         self._probe_rows: dict = {}               # router id -> (run id, its rows' links and verdicts)
 
     # --- lifecycle ------------------------------------------------------------------
@@ -700,6 +702,7 @@ class Hub:
             v = self.db.version(vid) or {}
             if v.get("trigger") == "web" or v.get("due"):
                 self._set_undone(rt, {"version": vid, "state": state, "t": time.time(), "message": message})
+            self.update_draft(rt)
             raise
         self.db.update_version(vid, job=job, state="running")
         self._follow_job(rt, vid, job)
@@ -786,7 +789,8 @@ class Hub:
             except AgentError as e:
                 if self.db.version(v["id"])["state"] != "scheduled":
                     continue                    # it failed on the router: run_scheduled told already
-                if e.code in ("unreachable", "timeout") and now - v["due"] < SCHEDULE_GRACE:
+                # the router away, busy or answering oddly for a moment (rpcd restarting)
+                if e.code in (*self.AGAIN_CODES, "podkop", "bad_answer") and now - v["due"] < SCHEDULE_GRACE:
                     continue
                 msg = f"not applied: {e.message}"
                 self.db.update_version(v["id"], state="failed", message=msg)
@@ -848,6 +852,12 @@ class Hub:
             else:
                 self.db.update_version(v["id"], state="unknown",
                                        message="the manager restarted while sending this change; check the router")
+        # a loaded config's switches whose tries a restart cut short: the change they waited
+        # for is on the router already (no draft, no scheduled change), so now, not with
+        # whatever draft comes next
+        for rt in self.routers.values():
+            if self.has_pending(rt.id) and not self.db.draft(rt.id) and self.db.get_setting(f"pending_version:{rt.id}") is None:
+                self.after_apply_now(rt)
         for r in self.db.q("SELECT id, router_id, trigger, sections, ran_on FROM probe_runs WHERE state = 'running'"):
             rt = self.routers.get(r["router_id"])
             # a probe run on this server ended with it (also one moved here for the router's memory)
@@ -858,6 +868,22 @@ class Hub:
                 self.db.finish_probe_run(r["id"], "failed", {}, None)
 
     async def _track_job(self, rt: RouterRuntime, vid: int, job: str) -> dict | None:
+        """Follows the job; whatever goes wrong here, the version ends (a draft
+        is never left "applying" until the manager restarts)."""
+        try:
+            return await self._track_job_steps(rt, vid, job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - a background task: nobody else would see it
+            log.exception("following change #%s on %s", vid, rt.row["host"])
+            data = {"state": "unknown", "message": f"the manager lost track of this change ({e}): look at the router's settings"}
+            if (self.db.version(vid) or {}).get("state") in ("pending", "running"):
+                self.db.update_version(vid, state="unknown", message=data["message"], details=data)
+            self._job_ended(rt, vid, "unknown", data)
+            self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
+            return data
+
+    async def _track_job_steps(self, rt: RouterRuntime, vid: int, job: str) -> dict | None:
         deadline = time.time() + 600
         data, lost = None, 0
         while time.time() < deadline:
@@ -865,9 +891,9 @@ class Hub:
             if v.get("state") not in ("pending", "running"):
                 # ended by the router's own word meanwhile (apply_interrupted after a reboot)
                 data = dict(v.get("details") or {}, state=v.get("state"), message=v.get("message"))
-                self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
                 await self._fresh_config(rt)
                 self._job_ended(rt, vid, v.get("state") or "unknown", data)
+                self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
                 return data
             try:
                 # short waits, so the browser sees checking -> restarting -> done
@@ -884,18 +910,20 @@ class Hub:
                     break
                 await asyncio.sleep(5)
                 continue
-            self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
             if data.get("state") in FINAL_JOB_STATES:
                 break
+            self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": data})
         state = (data or {}).get("state", "unknown")
         if state not in FINAL_JOB_STATES:
             state = "unknown"
         if (self.db.version(vid) or {}).get("state") in ("pending", "running"):
             self.db.update_version(vid, state=state, message=(data or {}).get("message", "no answer from the router"),
                                    details=data)
-        self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": dict(data or {}, state=state)})
+        # the draft is done with (or kept) before the browser hears the end: a page that
+        # reloads then must not find the applied draft still there
         await self._fresh_config(rt)
         self._job_ended(rt, vid, state, data)
+        self.publish({"type": "job", "router_id": rt.id, "version": vid, "job": dict(data or {}, state=state)})
         return data
 
     async def _fresh_config(self, rt: RouterRuntime) -> None:
@@ -1286,22 +1314,33 @@ class Hub:
         return list(errors.values())
 
     async def flush_notifications(self) -> None:
-        """Alerts that could not be sent, now that a channel may work again (oldest first, with their time)."""
+        """Alerts that could not be sent, now that a channel may work again (oldest first, with their time).
+        One flush at a time (two would send them twice); alerts older than NOTIFY_KEEP go unsent."""
+        async with self.flush_lock:
+            await self._flush_notifications()
+
+    async def _flush_notifications(self) -> None:
         q = self.db.get_setting("notify_queue") or []
         if not q:
             return
+        old = [m for m in q if time.time() - m["t"] > NOTIFY_KEEP]
+        if old:
+            log.warning("%d late notifications older than %d h dropped", len(old), NOTIFY_KEEP // 3600)
         settings = {**notify.DEFAULTS, **(self.db.get_setting("notify", {}) or {})}
-        left = []
-        for i, m in enumerate(q):
+        left, fresh = [], [m for m in q if m not in old]
+        for i, m in enumerate(fresh):
             when = dt.datetime.fromtimestamp(m["t"]).strftime("%d.%m %H:%M")
             errors = await asyncio.to_thread(notify.send, settings, f"(late, from {when}) {m['message']}", m.get("payload"),
                                              set(m.get("channels") or []) or None, notify.quiet_now(settings))
             if errors:
                 left.append(dict(m, channels=sorted(errors)))
                 if len(errors) == len(set(m.get("channels") or []) or notify.channels(settings)):
-                    left += q[i + 1:]          # still cut off: the rest waits too
+                    left += fresh[i + 1:]      # still cut off: the rest waits too
                     break
-        self.db.set_setting("notify_queue", left or None)
+        # alerts queued while these were being sent stay
+        sent_from = {(m["t"], m["message"]) for m in q}
+        new = [m for m in (self.db.get_setting("notify_queue") or []) if (m["t"], m["message"]) not in sent_from]
+        self.db.set_setting("notify_queue", left + new or None)
 
     def daily_summary(self) -> str:
         lines = []
