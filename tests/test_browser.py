@@ -184,6 +184,7 @@ def test_a_change_is_scheduled_from_the_apply_dialog(tmp_path):
             page.wait_for_selector("text=Apply now")
             page.screenshot(path=str(tmp_path / "schedule-history.png"), full_page=True)
             page.locator("text=Cancel").first.dispatch_event("click")
+            page.click(".dialog-foot >> text=Cancel the change")     # asked first (1.64)
             page.wait_for_selector("text=cancelled")
             assert db.scheduled(1) == [] and errors == [], errors
             browser.close()

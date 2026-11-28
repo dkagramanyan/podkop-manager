@@ -336,7 +336,8 @@ export function userListField(b, kind) {
       seg([["disabled", "Off"], ["dynamic", "List"], ["text", "Text"]], mode, (v) => b.set(type, v, true), { small: true, label: name })),
     mode === "dynamic" ? tokenField(b, list, { placeholder: kind === "domain" ? "Add domain, Enter" : "Add subnet, Enter" }) : null,
     mode === "text" ? h("textarea", { class: "input", rows: 5, "data-k": text, oninput: (e) => b.set(text, e.target.value) }, b.get(text) || "") : null,
-    mode === "dynamic" ? h("span", { class: "help" }, "Green: new in this draft") : null,
+    mode === "dynamic" && !b.isNew && asList(b.get(list)).some((x) => !asList(b.old(list)).includes(x))
+      ? h("span", { class: "help" }, "Green: new in this draft") : null,
     b.problemEls(list), b.problemEls(text));
 }
 

@@ -2,7 +2,7 @@
 
 import { draftChanges, pageHead } from "./shell.js";
 import { S } from "./state.js";
-import { api, h, modal, put, shortWhen, toast } from "./ui.js";
+import { api, h, modal, put, quietDraw, shortWhen, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 
 // --- saved configs: archive, export, import -------------------------------------------------------------------
@@ -97,5 +97,6 @@ export async function viewConfigs(main, id) {
 
   await load();
   draw();
-  S.view = { onRouter: (r) => { if (r.id === id) draw(); } };
+  const redraw = quietDraw(page, draw, () => { const rt = S.routers[id] || {}; return `${rt.name}|${rt.online}|${(rt.draft || {}).changes}`; });
+  S.view = { onRouter: (r) => { if (r.id === id) redraw(); } };
 }

@@ -5,7 +5,7 @@ import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segFi
 import { bySection, destChip, optionDef, ruleDest, ruleHealth, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
-import { agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
+import { askText, agentTime, api, asList, clone, fixFingerprint, h, icon, isLink, linkDetails, linkName, linkProto, modal,
   oldFingerprint, plural, put, shortWhen, spinner, toast } from "./ui.js";
 import { EUROPE, countriesText, countryName, flag, hasEurope } from "./usage.js";
 import { openRoute } from "./devices.js";
@@ -307,7 +307,8 @@ export function ruleEditor(w, s, { onRename }) {
 
   // the switches saved on the router at once, at the top: no scrolling to reach them
   const switches = [ct === "proxy" && (pt === "urltest" || via) ? strictField(w, s) : null, protectField(w, s)].filter(Boolean);
-  const probe = ct === "proxy" && pt === "urltest" && auto ? panel("probe", "Probe", probeSummary(auto), autoRuleEditor(w, s, auto), false) : null;
+  const probe = ct === "proxy" && pt === "urltest" && auto ? panel("probe", "Probe", probeSummary(auto),
+    [h("p", { class: "small muted" }, "Saved at once, not in the draft: the probe uses them from its next run."), autoRuleEditor(w, s, auto)], false) : null;
 
   const allOpen = () => [...ed.querySelectorAll("details.panel")].every((d) => d.open);
   const fold = h("button", { type: "button", class: "btn", onclick: () => {
@@ -325,7 +326,8 @@ export function ruleEditor(w, s, { onRename }) {
         fold,
         h("button", { type: "button", class: "btn", onclick: duplicate }, "Duplicate"),
         h("button", { type: "button", class: "btn danger", onclick: remove }, "Delete rule"))),
-    switches.length ? h("div", { class: "switches", role: "group", "aria-label": "Switches" }, switches) : null,
+    switches.length ? h("div", { class: "switches", role: "group", "aria-label": "Switches" }, switches,
+      h("span", { class: "now-note" }, "These switches act on the router at once; the rest of the page goes into the draft.")) : null,
     matches, sends, probe, advanced);
   fold.textContent = allOpen() ? "Collapse all" : "Expand all";
   return ed;
@@ -357,7 +359,7 @@ export function proxyAdvanced(w, b, s, ct, pt) {
   const changed = opts.filter((k) => b.changed(k)).length;
   const nondef = opts.filter((k) => o[k] !== undefined).length;
   const isUt = ct === "proxy" && pt === "urltest";
-  return panel("options", isUt ? "Testing and proxy options" : "Proxy options",
+  return panel("options", isUt ? "Testing and proxy options" : ct === "vpn" ? "VPN options" : "Proxy options",
     changed ? `${changed} changed${nondef > changed ? ", others set" : ", others default"}` : nondef ? `${nondef} set` : "all default",
     h("div", { class: "adv-body" },
       isUt ? h("div", { class: "field" }, h("span", { class: "label xs" }, b.dot("urltest_check_interval"), "Check every"),
@@ -640,9 +642,9 @@ export function autoRuleEditor(w, s, rule) {
               rule.countries.filter((c) => !eu || !EUROPE.includes(c)).map((c) => chip(`${c}, ${countryName(c)}`, countryName(c), [c])),
               h("label", { class: "sr", for: "add-cc" }, "Add a country"),
               h("select", { id: "add-cc", class: "input sm", style: "width: auto; height: 30px; border-style: dashed; border-radius: 15px",
-                onchange: (e) => {
+                onchange: async (e) => {
                   let v = e.target.value;
-                  if (v === "?") v = (prompt("Two-letter country code, e.g. PL") || "").trim().toUpperCase();
+                  if (v === "?") v = ((await askText("Another country", "Two-letter country code", "e.g. PL")) || "").trim().toUpperCase();
                   if (v === "europe") update({ countries: [...new Set([...rule.countries, ...EUROPE])].sort() }, true);
                   else if (/^[A-Z]{2}$/.test(v) && !rule.countries.includes(v)) update({ countries: [...rule.countries, v] }, true); else draw();
                 } },
@@ -692,9 +694,9 @@ export function autoRuleEditor(w, s, rule) {
             h("span", {}, "Mbit/s")),
           h("label", { for: "ytr", class: "lbl", style: "font-weight: 500; padding-top: 8px" }, "YouTube region"),
           h("div", { class: "ctl" },
-            h("select", { id: "ytr", class: "input mid", style: "width: auto", onchange: (e) => {
+            h("select", { id: "ytr", class: "input mid", style: "width: auto", onchange: async (e) => {
               let v = e.target.value;
-              if (v === "?") v = (prompt("Two-letter country code YouTube must detect, e.g. RU") || "").trim().toUpperCase();
+              if (v === "?") v = ((await askText("Another country", "Two-letter country code YouTube must detect", "e.g. RU")) || "").trim().toUpperCase();
               if (v === "" || v === "plays" || /^[A-Z]{2}$/.test(v)) update({ youtube: v }, true); else draw();
             } },
             [["", "Not checked"], ["plays", "Any, video plays"],

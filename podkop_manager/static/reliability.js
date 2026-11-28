@@ -3,7 +3,7 @@
 import { updateAgent } from "./agent.js";
 import { getRouter, pageHead, seg } from "./shell.js";
 import { S } from "./state.js";
-import { ago, api, h, icon, longWhen, put, spinner, toast } from "./ui.js";
+import { ago, api, confirmDialog, h, icon, longWhen, put, spinner, toast } from "./ui.js";
 
 export function healthPath(rows = []) {
   if (new Set(rows.map(r => r.target)).size < 2) return "unknown";
@@ -380,6 +380,7 @@ export async function viewReliability(main, id) {
         h("p", {}, "Use a Kuma Webhook notification with its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),
         h("p", { class: "small muted" }, data.kuma_connected ? "A webhook token is configured. Replacing it revokes the previous URL." : "No webhook token configured."),
         h("button", { class: "btn", onclick: async () => {
+          if (data.kuma_connected && !await confirmDialog("Replace the webhook token?", "The current webhook URL stops working: Uptime Kuma must get the new one.", "Replace")) return;
           try { const r = await api("POST", `/api/routers/${id}/kuma-token`, {});
             webhook = new URL(r.path, location.origin).href; data.kuma_connected = true; opened.add("kuma"); draw(); }
           catch (err) { toast(err.message, true); }

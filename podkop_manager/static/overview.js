@@ -4,7 +4,7 @@ import { openApply } from "./apply.js";
 import { EVENT_DOT, configDiff, destChip, diffSummary, eventText, ruleExit, ruleHealth, ruleMatches, ruleNow, rulesOf, runningVersion } from "./model.js";
 import { pageHead, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { agentTime, api, confirmDialog, duration, h, hhmm, icon, longWhen, plural, put, shortWhen, toast } from "./ui.js";
+import { agentTime, api, confirmDialog, duration, h, hhmm, icon, longWhen, plural, put, quietDraw, shortWhen, toast } from "./ui.js";
 import { countriesText, gb } from "./usage.js";
 
 // --- overview -------------------------------------------------------------------------------------
@@ -26,10 +26,14 @@ export async function viewOverview(main, id) {
   const service = (action, label, cls) => h("button", { type: "button", class: `btn ${cls || ""}`, onclick: async (e) => {
     const b = e.currentTarget;
     if (action === "stop" && !await confirmDialog("Stop podkop?", "Every rule stops: its sites go direct, or are blocked where a kill switch is on, until podkop is started again. The watchdog leaves it stopped.", "Stop podkop")) return;
+    if (action === "restart" && !await confirmDialog("Restart podkop?", "Every connection through podkop is cut, and the rules are off for 20–30 s while it starts.", "Restart", "primary")) return;
     b.disabled = true;
+    const text = b.textContent;
+    b.textContent = { restart: "Restarting…", stop: "Stopping…", start: "Starting…" }[action] || text;
     try { await api("POST", `/api/routers/${id}/service`, { action }); toast(`podkop: ${action} done`); }
     catch (err) { toast(err.message, true); }
-    b.disabled = false;
+    // (the page may have been drawn again meanwhile: then this button is gone anyway)
+    b.disabled = false; b.textContent = text;
   } }, label);
 
   const draw = () => {
@@ -166,7 +170,7 @@ export async function viewOverview(main, id) {
       h("div", {}, h("span", {}, "podkop-agent"),
         h("span", {}, `${st.agent.version}, ${pk.paused || !pk.enabled ? "watchdog paused" : "watchdog on"}`)),
       h("div", {}, h("span", {}, "Router"),
-        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), `up ${days ? days + " d" : hours + " h"}`,
+        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), Number.isFinite(st.uptime) ? `up ${days ? days + " d" : hours + " h"}` : null,
           st.router.mem_free != null ? `${st.router.mem_free} MB free` : null].filter(Boolean).join(", "))),
       st.failsafe && !pk.running ? h("div", { style: "grid-column: 1 / -1" }, h("span", {}, `Failsafe, ${st.failsafe.time}`),
         h("span", { class: "bad-text" }, st.failsafe.message)) : null);
@@ -185,7 +189,7 @@ export async function viewOverview(main, id) {
           h("span", { class: "small muted" }, "First match wins")),
         h("a", { class: "alink", href: `#/r/${id}/rules` }, "Edit rules")),
       !cfg ? h("p", { class: "empty" }, rt.online ? "Could not read podkop's settings." : "Shown when the router answers.")
-        : h("div", { class: "scroll-x" }, h("table", { class: "wide" },
+        : h("div", { class: "scroll-x" }, h("table", { class: "wide now-routing" },
           h("tr", {}, h("th", { scope: "col", style: "width: 24px" }, "#"), h("th", { scope: "col" }, "Rule"),
             h("th", { scope: "col" }, "Matches"), h("th", { scope: "col" }, "Goes to"), h("th", { scope: "col" }, "Now")),
           rules.map((sec, i) => {
@@ -254,11 +258,12 @@ export async function viewOverview(main, id) {
   draw();
   let timer;
   const later = () => { clearTimeout(timer); timer = setTimeout(async () => { await load(); draw(); }, 800); };
+  const redraw = quietDraw(page, draw);
   S.view = {
     leave: () => clearTimeout(timer),
     onRouter: (r) => {
       if (r.id !== id) return;
-      if (r.status && (data.config ? r.status.fingerprint !== data.config.fingerprint : r.online)) later(); else draw();
+      if (r.status && (data.config ? r.status.fingerprint !== data.config.fingerprint : r.online)) later(); else redraw();
     },
     onEvent: (m) => m.router_id === id && later(),
     onProbe: (m) => m.router_id === id && m.state !== "running" && later(),

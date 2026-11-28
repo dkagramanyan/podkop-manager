@@ -122,7 +122,13 @@ export async function render() {
     else if (sec) await sec.view(slot, r.rid, r.sub);
     else put(slot, h("div", { class: "page" }, h("p", {}, "Not found")));
   } catch (e) {
-    put(slot, h("div", { class: "page" }, h("div", { class: "card pad" }, h("p", { class: "bad-text" }, e.message))));
+    // the page's title stays, with what went wrong and a way to try again
+    const rt = r.rid && S.routers[r.rid];
+    put(slot, h("div", { class: "page" }, pageHead(r.settings ? "Settings" : sec ? sec.title : "Not found"),
+      h("div", { class: "card pad stack" },
+        h("p", { class: "bad-text" }, rt && !rt.online ? `${rt.name} cannot be reached now, so this page cannot be shown.` : "This page could not be loaded."),
+        h("p", { class: "small muted" }, e.message),
+        h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => render() }, "Try again")))));
   }
   if (token !== renders) {
     // a newer page was asked for meanwhile: drop this one

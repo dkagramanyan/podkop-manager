@@ -264,6 +264,9 @@ table.wide { min-width: 640px; }
 .search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font-size: 13.5px; }
 .logbox { max-height: 640px; overflow: auto; }
 .loglines { min-width: 760px; padding: 6px 0; }
+/* the empty-state text stays readable on a phone (the lines scroll sideways, it does not) */
+.loglines > .empty { position: sticky; left: 0; max-width: min(760px, calc(100vw - 64px)); }
+.report-at { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .logline { display: grid; grid-template-columns: 74px 72px 52px minmax(0, 1fr); gap: 12px; padding: 3px 16px;
   font-family: var(--mono); font-size: 12.5px; line-height: 1.55; }
 .logline > span:nth-child(1) { color: var(--muted); } .logline > span:nth-child(2) { color: var(--text-2); }
@@ -434,7 +437,7 @@ pre.out { margin: 0; padding: 12px 18px 16px; font-family: var(--mono); font-siz
 
 .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 50; max-width: min(560px, 90vw);
   padding: 10px 16px; border-radius: 8px; background: var(--text); color: var(--surface); font-size: 13.5px; box-shadow: var(--pop); }
-.toast.bad { background: var(--bad-dot); color: #FFFFFF; }
+.toast.bad { background: var(--bad-dot); color: #FFFFFF;  cursor: pointer; }
 
 /* --- login ---------------------------------------------------------------------------------------- */
 body.login { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 16px; }
@@ -496,6 +499,7 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
 /* a rule's page: switches at the top, parts that can be closed */
 .editor > .switches { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 12px 20px;
   padding: 14px 20px; border-bottom: 1px solid var(--line-soft); background: var(--chip); }
+.editor > .switches > .now-note { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
 .editor > .panel + .panel { border-top: 1px solid var(--line-soft); }
 .panel > summary { padding: 14px 20px; flex-wrap: wrap; gap: 4px 8px; }
 .panel > summary:hover { background: var(--chip); }
@@ -533,7 +537,7 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
   .nav-bottom { display: none; }
   .side.open .nav-bottom { display: flex; }
   /* Now routing: the rule, where it goes and what it uses now fit; "Matches" is on the rule's page */
-  table.wide th:nth-child(3), table.wide td:nth-child(3) { display: none; }
+  table.now-routing th:nth-child(3), table.now-routing td:nth-child(3) { display: none; }
 }
 @media (max-width: 520px) {
   .form-grid { grid-template-columns: minmax(0, 1fr) !important; }

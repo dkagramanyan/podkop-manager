@@ -4,7 +4,7 @@ import { openApply } from "./apply.js";
 import { optionLabel, ruleDest, ruleMatches, rulesOf, runningVersion } from "./model.js";
 import { pageHead, seg } from "./shell.js";
 import { S } from "./state.js";
-import { api, asList, h, icon, isLink, linkName, longWhen, plural, put, toast } from "./ui.js";
+import { api, asList, confirmDialog, h, icon, isLink, linkName, longWhen, plural, put, quietDraw, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 
 // --- changes, as shown in History and the apply dialog ----------------------------------------------
@@ -93,7 +93,8 @@ export function versionMeta(v, running) {
   return parts.join(" · ");
 }
 
-export const problemText = (p) => `${p.section}${p.option ? " / " + p.option : ""}${p.index !== undefined && p.index !== null ? " #" + (p.index + 1) : ""}: ${p.message}`;
+// "main / Proxy links #2: …" (the option as the pages name it, not podkop's own name)
+export const problemText = (p) => `${p.section}${p.option ? " / " + optionLabel(p.section, p.option) : ""}${p.index !== undefined && p.index !== null ? " #" + (p.index + 1) : ""}: ${p.message}`;
 
 export function versionReason(v) {
   if (v.state === "reverted") return ["podkop did not start with these settings", v.reason || v.message, ""];
@@ -157,7 +158,9 @@ export async function viewHistory(main, id) {
       }) }, "Show older") : null);
   };
 
-  const act = (path, body, done) => busyClick(async () => {
+  // ask: [title, text, label, class] of the confirmation first
+  const act = (path, body, done, ask) => busyClick(async () => {
+    if (ask && !await confirmDialog(...ask)) return;
     try { await api("POST", path, body); toast(done); } catch (e) { toast(e.message, true); }
     await load(); draw();
   });
@@ -172,9 +175,11 @@ export async function viewHistory(main, id) {
           h("button", { type: "button", class: "btn ghost sm", "aria-expanded": String(isOpen), onclick: () => {
             if (isOpen) open.delete(v.id); else open.add(v.id); draw();
           } }, isOpen ? "Hide changes" : "Show changes", icon(isOpen ? "up" : "down", 14, { width: 1.6 })),
-          h("button", { type: "button", class: "btn sm", onclick: act(`/api/versions/${v.id}/run`, undefined, `#${v.id}: applying now`) }, "Apply now"),
+          h("button", { type: "button", class: "btn sm", onclick: act(`/api/versions/${v.id}/run`, undefined, `#${v.id}: applying now`,
+            [`Apply #${v.id} now?`, "It goes to the router now instead of at its time.", "Apply now", "primary"]) }, "Apply now"),
           h("button", { type: "button", class: "btn sm", onclick: act(`/api/versions/${v.id}/cancel`, { to_draft: true }, `#${v.id} is the draft again: edit it in Rules`) }, "Back to draft"),
-          h("button", { type: "button", class: "btn sm danger", onclick: act(`/api/versions/${v.id}/cancel`, {}, `#${v.id} cancelled`) }, "Cancel"))),
+          h("button", { type: "button", class: "btn sm danger", onclick: act(`/api/versions/${v.id}/cancel`, {}, `#${v.id} cancelled`,
+            [`Cancel #${v.id}?`, "The scheduled change goes away; it is not applied. Back to draft keeps it as the draft instead.", "Cancel the change"]) }, "Cancel"))),
       isOpen ? h("div", { class: "changes-grid" }, changeRows(v.diff).map(([sec, lbl, val]) => [
         h("span", { class: "mono xs" }, sec), h("span", { class: "muted" }, lbl), val])) : null);
   };
@@ -191,6 +196,8 @@ export async function viewHistory(main, id) {
 
   await load();
   draw();
+  // (which version runs now: the router's settings; nothing else of an update shows here)
+  const redraw = quietDraw(page, draw, () => { const rt = S.routers[id] || {}; return `${rt.online}|${(rt.status || {}).fingerprint}`; });
   S.view = {
     onRouter: (r) => {
       if (r.id !== id) return;
@@ -199,7 +206,7 @@ export async function viewHistory(main, id) {
       const oldest = list.length ? list[list.length - 1].id : 0;
       const ids = (r.scheduled || []).map((x) => x.id).filter((x) => x >= oldest).sort((a, b) => a - b).join();
       if (ids !== list.filter((v) => v.state === "scheduled").map((v) => v.id).sort((a, b) => a - b).join()) load().then(draw).catch((e) => toast(e.message, true));
-      else draw();
+      else redraw();
     },
     onJob: (m) => { if (m.router_id === id && FINAL_STATES.includes(m.job.state)) load().then(draw).catch((e) => toast(e.message, true)); },
   };
