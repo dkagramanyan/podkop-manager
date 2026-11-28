@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS observations_router ON observations(router_id, id);
 CREATE INDEX IF NOT EXISTS observations_router_time ON observations(router_id, t);
+-- 1.65: the hourly prune and the scheduled changes' check (every 30 s) without whole-table scans
+CREATE INDEX IF NOT EXISTS events_t ON events (t);
+CREATE INDEX IF NOT EXISTS key_usage_t ON key_usage (t);
+CREATE INDEX IF NOT EXISTS traffic_hour ON traffic (hour);
+CREATE INDEX IF NOT EXISTS checks_t ON connection_checks (t);
+CREATE INDEX IF NOT EXISTS observations_t ON observations (t);
 """
 
 KEY_FIELDS = {"label", "limit_source", "limit_gb", "period", "reset_time", "action", "threshold",
@@ -141,6 +147,8 @@ class DB:
                 if col not in [r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")]:
                     self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                     added.add((table, col))
+            # (after the columns: "due" is one of them)
+            self.conn.execute("CREATE INDEX IF NOT EXISTS versions_scheduled ON versions (state, due)")
             if ("logs", "source") in added:
                 rows = self.conn.execute("SELECT id, line FROM logs").fetchall()
                 parsed = [(p["source"], p["level"], r[0]) for r in rows for p in [parse_log(r[1])]]
@@ -366,7 +374,20 @@ class DB:
             r["seconds"] = _seconds(d.get("started"), d.get("finished"))
         return rows
 
-    def version(self, vid: int) -> dict | None:
+    def version_state(self, vid: int) -> str | None:
+        """Only the state: the ones that ask every few seconds do not parse two configs each time."""
+        r = self.one("SELECT state FROM versions WHERE id = ?", vid)
+        return r["state"] if r else None
+
+    def version(self, vid: int, brief: bool = False) -> dict | None:
+        """brief: without the configs and the diff (the apply dialog's state)."""
+        if brief:
+            r = self.one("SELECT * FROM versions WHERE id = ?", vid)
+            if r:
+                for k in ("config", "base_config", "diff"):
+                    r.pop(k, None)
+                r["details"] = json.loads(r["details"]) if r["details"] else None
+            return r
         r = self.one("SELECT * FROM versions WHERE id = ?", vid)
         if r:
             for k in ("config", "diff", "details", "base_config"):
