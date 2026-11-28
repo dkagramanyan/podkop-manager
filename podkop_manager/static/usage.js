@@ -307,11 +307,28 @@ export async function viewUsage(main, id) {
 }
 
 // The router's nightly probe: one run for every rule that takes links from it.
-// A card of its own at the bottom of Keys and usage; saved right away, not in the draft.
+// Its one place: a card at the bottom of Keys and usage, with how its last run went
+// and when the next one is; saved right away, not in the draft.
 export function nightlyProbeCard(id) {
   const card = h("section", { class: "card pad", id: "nightly-probe", "aria-labelledby": "u-probe", style: "gap: 14px" },
     h("h2", { id: "u-probe" }, "Nightly probe"), h("span", { class: "small muted" }, "…"));
-  const c = { settings: null, downloading: false };
+  const c = { settings: null, runs: [], downloading: false };
+  // "Last nightly run yesterday applied as #12. Next run in 5 h."
+  const when = () => {
+    const last = c.runs.find((r) => r.trigger === "schedule"), ps = c.settings, out = [];
+    if (last) {
+      const day = longWhen(last.started).replace(/,? \d\d:\d\d$/, "").toLowerCase();
+      out.push(last.state !== "done" ? `Last nightly run ${day}: ${last.state}.`
+        : last.version_id ? `Last nightly run ${day} applied as #${last.version_id}.` : `Last nightly run ${day} finished, not applied.`);
+    }
+    if (ps.schedule) {
+      const [hh, mm] = ps.schedule.split(":").map(Number);
+      const t = new Date(); t.setHours(hh, mm, 0, 0);
+      if (t <= new Date()) t.setDate(t.getDate() + 1);
+      out.push(`Next run in ${duration((t - new Date()) / 1000)}.`);
+    }
+    return out.join(" ");
+  };
   const draw = () => {
     if (!c.settings) return;
     const probe = c.settings;
@@ -341,7 +358,8 @@ export function nightlyProbeCard(id) {
       h("div", { class: "row", style: "justify-content: space-between" },
         h("div", { class: "col", style: "gap: 2px" }, h("h2", { id: "u-probe" }, "Nightly probe"),
           h("span", { class: "small muted" }, `${probe.schedule ? `Every night at ${probe.schedule}${probe.auto_apply ? ", applies the result by itself" : ", the result waits for you"}` : "Off"}. `
-            + "One run tests your keys' servers for every rule that takes links from the probe. Saved right away.")),
+            + "One run tests your keys' servers for every rule that takes links from the probe. Saved right away."),
+          when() ? h("span", { class: "small muted" }, when()) : null),
         h("button", { type: "button", class: "btn", onclick: run }, icon("probe", 14), "Run now")),
       h("div", { class: "form-grid" },
         h("label", { class: "lbl", for: "probe-sched" }, "Every night at"),
@@ -377,7 +395,7 @@ export function nightlyProbeCard(id) {
         }) }, "Check the router"))) : null);
   };
   Promise.all([api("GET", `/api/routers/${id}/probe?settings=1`), S.manager || api("GET", "/api/manager")])
-    .then(([p, m]) => { c.settings = p.settings; S.manager = m; draw(); })
+    .then(([p, m]) => { c.settings = p.settings; c.runs = p.runs || []; S.manager = m; draw(); })
     .catch((e) => put(card, h("h2", { id: "u-probe" }, "Nightly probe"), h("span", { class: "small bad-text" }, e.message)));
   return card;
 }

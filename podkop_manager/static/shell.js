@@ -162,9 +162,15 @@ export function drawSide() {
     h("div", { class: "brand" }, h("b", {}, "podkop-manager"),
       h("span", { class: `live${S.live ? " on" : ""}`, title: S.live ? "live updates on" : "reconnecting" },
         h("span", { class: "dot sm" }), S.live ? "live" : "offline"),
+      // a phone: the router's name here, the switcher and the other routers' alerts fold into the menu
+      rt ? h("span", { class: "brand-router", title: `${rt.name}: ${routerState(rt).label}` },
+        h("span", { class: `dot sm ${routerState(rt).cls}` }), rt.name) : null,
       // a phone: the menu folds into this button, the page starts at the top of the screen
       h("button", { type: "button", class: "btn menu-btn", "aria-expanded": String(menuOpen), "aria-controls": "side-nav",
-        onclick: () => { menuOpen = !menuOpen; drawSide(); } }, menuOpen ? "Close" : `Menu${n ? ` · ${n}` : ""}`)),
+        onclick: () => { menuOpen = !menuOpen; drawSide(); } },
+        // another router offline or alerting: a red dot here, its line inside the menu
+        !menuOpen && routerList().some((x) => x.id !== S.rid && (!x.online || recentAlert(x))) ? h("span", { class: "dot sm bad", "aria-label": "another router needs a look" }) : null,
+        menuOpen ? "Close" : `Menu${n ? ` · ${n}` : ""}`)),
     rt ? switcher(rt) : null,
     rt ? h("div", { class: "nav", id: "side-nav" },
       link("", "Overview", "overview"),
@@ -207,7 +213,7 @@ export function switcher(rt) {
       x.id === rt.id ? icon("check", 16, { stroke: "var(--accent)", width: 2 }) : null);
     }),
     h("hr"),
-    h("a", { href: "#/settings", onclick: () => { switchOpen = false; } }, icon("plus", 15), "Add router"),
+    h("a", { href: "#/settings", onclick: () => { switchOpen = false; S.addRouter = true; } }, icon("plus", 15), "Add router"),
     h("a", { href: "#/settings", onclick: () => { switchOpen = false; } }, icon("settings", 15), "Manage routers")) : null;
   return h("div", { class: "switch" }, btn, pop,
     alerts.map((a) => h("a", { href: `#/r/${a.x.id}`, class: "alert-line" }, h("span", { class: "dot sm bad" }), a.text)));

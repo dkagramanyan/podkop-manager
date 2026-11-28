@@ -4,7 +4,7 @@ import { openApply } from "./apply.js";
 import { EVENT_DOT, configDiff, destChip, diffSummary, eventText, ruleExit, ruleHealth, ruleMatches, ruleNow, rulesOf, runningVersion } from "./model.js";
 import { pageHead, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { agentTime, api, confirmDialog, duration, h, hhmm, icon, longWhen, plural, put, quietDraw, shortWhen, toast } from "./ui.js";
+import { agentTime, api, confirmDialog, h, hhmm, icon, plural, put, quietDraw, shortWhen, toast } from "./ui.js";
 import { countriesText, gb } from "./usage.js";
 
 // --- overview -------------------------------------------------------------------------------------
@@ -69,8 +69,7 @@ export async function viewOverview(main, id) {
       st ? statusStrip(st) : null,
       h("div", { class: "split" },
         h("div", { class: "stack", style: "flex: 2 1 600px; min-width: 0" },
-          nowRouting(rt, cfg),
-          nightly(rt)),
+          nowRouting(rt, cfg)),
         eventsCard(rt)));
   };
 
@@ -94,7 +93,8 @@ export async function viewOverview(main, id) {
     return h("div", { class: `banner${worst === "ok" ? "" : ` ${worst}`}`, role: "status", "aria-label": "Verdict" },
       h("span", { class: `dot ${worst}` }),
       h("div", { class: "col grow", style: "gap: 4px" },
-        h("b", {}, bad.length ? `${bad.length} of ${plural(rules.length, "rule")} ${bad.length === 1 ? "needs" : "need"} a look` : `All ${plural(rules.length, "rule")} working`),
+        h("b", {}, bad.length ? `${bad.length} of ${plural(rules.length, "proxy or VPN rule")} ${bad.length === 1 ? "needs" : "need"} a look`
+          : rules.length === 1 ? "The proxy or VPN rule is working" : `All ${rules.length} proxy and VPN rules working`),
         bad.map(([s, x]) => h("span", { class: "small" }, h("a", { href: `#/r/${id}/rules/${s.name}`, class: "mono" }, s.name), `: ${x.text}`))));
   };
 
@@ -210,40 +210,6 @@ export async function viewOverview(main, id) {
           h("tr", {}, h("td", {}), h("td", { class: "nowrap", style: "color: var(--text-2)" }, "Everything else"),
             h("td", { class: "muted" }, "no rule matched"), h("td", {}, h("span", { class: "dest direct" }, "Direct")),
             h("td", { class: "muted" }, "not through podkop")))));
-  };
-
-  const nightly = () => {
-    const p = data.probe;
-    const ps = p && p.settings;
-    if (!ps) return null;
-    const last = (p.runs || []).find((r) => r.trigger === "schedule");
-    let lastText = "";
-    if (last) {
-      const day = longWhen(last.started).replace(/ \d\d:\d\d$/, "").replace(/, \d\d:\d\d$/, "");
-      lastText = last.state !== "done" ? `Last nightly run ${day.toLowerCase()}: ${last.state}.`
-        : last.version_id ? `Last nightly run ${day.toLowerCase()} applied as #${last.version_id}.`
-          : `Last nightly run ${day.toLowerCase()} finished, not applied.`;
-    }
-    let next = "";
-    if (ps.schedule) {
-      const [hh, mm] = ps.schedule.split(":").map(Number);
-      const t = new Date(); t.setHours(hh, mm, 0, 0);
-      if (t <= new Date()) t.setDate(t.getDate() + 1);
-      next = `Next run in ${duration((t - new Date()) / 1000)}.`;
-    }
-    return h("section", { class: "card note", "aria-labelledby": "nightly", style: "padding: 16px 18px" },
-      h("div", { class: "col", style: "flex: 1 1 320px; gap: 3px" },
-        h("h2", { id: "nightly", class: "h2" }, "Nightly probe"),
-        h("span", { style: "font-size: 13.5px; color: var(--text-2); font-weight: 400" }, ps.schedule
-          ? `Every night at ${ps.schedule}, ${ps.auto_apply ? "applied by itself if podkop starts with it" : "results wait for you to apply them"}.`
-          : "Off"),
-        lastText || next ? h("span", { class: "small muted" }, [lastText, next].filter(Boolean).join(" ")) : null),
-      // its settings are on Keys and usage, at the bottom: the page opens there
-      h("a", { class: "btn", href: `#/r/${id}/usage`, onclick: () => {
-        let n = 0;
-        const go = () => { const el = document.getElementById("nightly-probe"); if (el) el.scrollIntoView({ block: "start" }); else if (n++ < 20) setTimeout(go, 150); };
-        setTimeout(go, 150);
-      } }, "Schedule"));
   };
 
   const eventsCard = () => h("aside", { class: "card events", "aria-label": "Events", style: "flex: 1 1 300px; min-width: 0" },

@@ -527,11 +527,25 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
 .banner.sticky-bar { position: sticky; top: 8px; z-index: 5; box-shadow: 0 6px 18px rgba(20, 24, 28, .10); }
 
 /* --- 1.60: phones: the menu folds into a button, forms stack, bigger targets --- */
-.menu-btn { display: none; }
+.menu-btn, .brand-router { display: none; }
 @media (max-width: 800px) {
   .side { padding: 10px 12px; gap: 10px; }
   .side .nav { display: none; }
   .side.open .nav { display: flex; }
+  .app { align-content: flex-start; }      /* a short page does not stretch the header */
+  /* Devices: each device in two lines (name and address, then where its traffic goes) */
+  table.devices { min-width: 0; width: 100%; }
+  table.devices tr:first-child { display: none; }
+  table.devices tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; border-bottom: 1px solid var(--line-soft); }
+  table.devices td { border: 0; min-width: 0; overflow-wrap: anywhere; }
+  table.devices td:nth-child(3) { grid-column: 1 / -1; padding-top: 0; }
+  table.devices td:nth-child(3) select { width: 100%; }
+  .side .switch { display: none; }
+  .side.open .switch { display: flex; }
+  .side .live { display: none; }
+  .brand-router { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-size: 13.5px; font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .side.open .brand-router { display: none; }
   .menu-btn { display: inline-flex; height: 32px; margin-left: auto; }
   .brand { gap: 10px; }
   .nav-bottom { display: none; }
@@ -551,3 +565,11 @@ body.login { display: flex; align-items: center; justify-content: center; min-he
   .btn.xs, .btn.sm { min-height: 32px; }
   .btn.icon { min-width: 36px; min-height: 36px; }
 }
+
+/* Settings: Add router folds away once there is a router */
+.add-router > summary { cursor: pointer; list-style: none; }
+.add-router > summary::-webkit-details-marker { display: none; }
+.add-router > summary h2::after { content: " +"; color: var(--muted); font-weight: 400; }
+.add-router[open] > summary h2::after { content: ""; }
+.add-router > summary h2 { margin: 0; }
+.add-router[open] > summary { margin-bottom: 12px; }

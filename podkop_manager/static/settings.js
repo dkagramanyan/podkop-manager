@@ -102,7 +102,7 @@ export async function viewSettings(main) {
   };
   const addOut = h("div");
   const addBtn = h("button", { type: "submit", class: "btn primary lg" }, "Add");
-  const addForm = h("form", { class: "card pad", "aria-labelledby": "s-add", onsubmit: async (e) => {
+  const addForm = h("form", { class: "stack", "aria-labelledby": "s-add", onsubmit: async (e) => {
     e.preventDefault();
     if (!f.pairing.value.trim()) { f.pairing.focus(); return; }
     addBtn.disabled = true; put(addOut, h("p", { class: "small muted" }, "Checking the router…"));
@@ -113,8 +113,7 @@ export async function viewSettings(main) {
       location.hash = `#/r/${r.id}`;
     } catch (err) { put(addOut, h("p", { class: "problem-box" }, err.message)); addBtn.disabled = false; }
   } },
-  h("div", { class: "col" }, h("h2", { id: "s-add" }, "Add router"),
-    h("span", { class: "small muted" }, "podkop stays as it is: its settings are kept in Configs. The probe needs podkop-engine.")),
+  h("span", { class: "small muted" }, "podkop stays as it is: its settings are kept in Configs. The probe needs podkop-engine."),
   commandPart("a"),
   h("div", { class: "field" }, h("label", { for: "a-pair" }, "The line the command printed at the end"), f.pairing),
   h("div", { class: "auto-grid", style: "grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr))" },
@@ -168,7 +167,9 @@ export async function viewSettings(main) {
                 h("button", { type: "button", class: "btn xs", onclick: () => reinstall(rt) }, "Reinstall agent"),
                 h("button", { type: "button", class: "btn xs danger", onclick: () => remove(rt) }, "Remove"))));
           }))) : null),
-      addForm,
+      // folded once there is a router (open when asked for from the router switcher)
+      h("details", { class: "card pad add-router", open: !list.length || S.addRouter, ontoggle: (e) => { S.addRouter = e.target.open; } },
+        h("summary", {}, h("h2", { id: "s-add" }, "Add router")), addForm),
       h("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; align-items: start" },
         h("section", { class: "card pad", "aria-labelledby": "s-mgr", style: "gap: 12px" },
           h("div", { class: "col" }, h("h2", { id: "s-mgr" }, "This manager"), h("span", { class: "small muted" }, `podkop-manager ${info.release || ""} (manager ${info.version})`.replace("  ", " "))),

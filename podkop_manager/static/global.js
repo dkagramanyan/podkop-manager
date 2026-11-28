@@ -1,6 +1,6 @@
 // global.js: part of podkop-manager's web interface (see app.js)
 
-import { binder, comboField, discardWork, flagField, followRouter, keepFocus, lbl, reviewWork, segField, selectField, textField, tokenField, workChanges, workFor } from "./draft.js";
+import { binder, comboField, draftBar, flagField, followRouter, keepFocus, lbl, segField, selectField, textField, tokenField, workFor } from "./draft.js";
 import { bySection, optionDef, rulesOf, sectionsOf } from "./model.js";
 import { pageHead } from "./shell.js";
 import { S } from "./state.js";
@@ -14,11 +14,8 @@ export async function viewGlobal(main, id) {
   const page = h("div", { class: "page" });
   put(main, page);
   const defs = S.schema.settings;
-  const headBtn = h("span", { style: "display: contents" });
-  w.drawBar = () => {
-    const n = workChanges(w).length;
-    put(headBtn, n ? h("button", { type: "button", class: "btn primary", disabled: w.base !== w.fp, onclick: () => reviewWork(w) }, `Review and apply, ${n}`) : null);
-  };
+  // the draft's bar, as on Rules: Discard, Check, Review and apply, problems
+  const bar = draftBar(w);
   w.redraw = () => keepFocus(draw);
 
   const draw = () => {
@@ -35,10 +32,8 @@ export async function viewGlobal(main, id) {
       h("div", { class: "ctl" }, control, b.was(opt), b.problemEls(opt))];
     const devices = asList(b.val("source_network_interfaces"));
     put(page,
-      pageHead("Global settings", "Dots mark values that differ from podkop's defaults", headBtn),
-      w.base !== w.fp ? h("div", { class: "banner bad" }, h("span", { class: "dot bad" }),
-        h("span", { class: "small bad-text grow" }, "podkop's settings changed on the router after this draft was started. Applying it would undo that, so the router refuses it."),
-        h("button", { type: "button", class: "btn ghost", onclick: () => discardWork(w) }, "Discard draft")) : null,
+      pageHead("Global settings", "Dots mark values that differ from podkop's defaults"),
+      bar,
       h("div", { class: "cards-2" },
         card("DNS", null,
           h("div", { class: "form-grid" },
