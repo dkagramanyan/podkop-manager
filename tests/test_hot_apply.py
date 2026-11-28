@@ -55,3 +55,29 @@ def test_a_reload_selects_the_pinned_servers_again(tmp_path):
     assert p.returncode == 0, p.stdout + p.stderr
     assert calls == ["hup", "pins quiet"]
     assert json.loads((tmp_path / "config.json").read_text()) == CFG
+
+
+def test_a_reload_waits_until_sing_box_shows_every_new_server(tmp_path):
+    # 0.34: one jq for all outbounds; one missing keeps it waiting, then it fails naming it
+    cfg = {"outbounds": CFG["outbounds"] + [{"tag": "main-2-out"}, {"tag": "main-urltest-out"}]}
+    (tmp_path / "build.json").write_text(json.dumps(cfg))
+    (tmp_path / "config.json").write_text("{}")
+    p, calls = _run(tmp_path, "'protected rules changed'")
+    assert p.returncode == 1 and "did not take the new servers: main-2-out" in p.stdout
+    assert not list((tmp_path / "run").glob("hot.*"))          # nothing left behind
+
+
+def test_lists_are_fetched_with_curl_first(tmp_path):
+    # 0.34: on reserv wget failed every HTTPS download after its whole 30 s, curl took 1 s:
+    # "Where does it go?" spent its 40 s on one list
+    rel = Path(__file__).resolve().parents[1] / "router/reliability.sh"
+    code = subprocess.run(["sed", "-n", "/^guard_fetch() {/,/^}/p", str(rel)], capture_output=True, text=True, check=True).stdout
+    script = f'''
+curl() {{ echo curl >> "{tmp_path}/calls"; shift 3; printf data > "$2"; }}
+wget() {{ echo wget >> "{tmp_path}/calls"; return 4; }}
+{code}
+guard_fetch https://example.com/x.srs "{tmp_path}/out"
+'''
+    p = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "calls").read_text().split() == ["curl"] and (tmp_path / "out").read_text() == "data"

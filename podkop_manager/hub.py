@@ -33,6 +33,7 @@ ALERT_EVENTS = ("reverted", "revert_failed", "apply_interrupted", "group_down", 
                 "probe_failed", "probe_not_started", "clash_api_silent", "vpn_down", "agent_stuck", "safe_mode", "fds_high",
                 "settings_failed", "server_down")
 OFFLINE_SECONDS = 300    # a router the manager cannot reach for this long is reported
+WAKE_GAP = 5             # seconds at least between two status calls woken by events
 NOTIFY_KEEP = 2 * 86400  # a late alert older than this is not sent any more
 POLL_SECONDS = 30        # a router's status while someone has the web interface open ...
 POLL_IDLE_SECONDS = 120  # ... and while nobody looks (its events still come at once, on their own stream)
@@ -422,7 +423,14 @@ class Hub:
             self.publish({"type": "router", "router": rt.snapshot()})
 
     async def _poll_loop(self, rt: RouterRuntime) -> None:
+        last = 0.0
         while True:
+            # a burst of events (a reload: groups down and up, servers…) is one status call, not
+            # one each: "status" starts a few dozen programs on the router
+            gap = WAKE_GAP - (time.monotonic() - last)
+            if gap > 0:
+                await asyncio.sleep(gap)
+            last = time.monotonic()
             rt.wake.clear()         # before: a wake during the refresh starts the next one at once
             try:
                 await self.refresh(rt)
@@ -887,7 +895,10 @@ class Hub:
         deadline = time.time() + 600
         data, lost = None, 0
         while time.time() < deadline:
-            v = self.db.version(vid) or {}
+            if self.db.version_state(vid) in ("pending", "running"):
+                v = {"state": "running"}
+            else:
+                v = self.db.version(vid) or {}
             if v.get("state") not in ("pending", "running"):
                 # ended by the router's own word meanwhile (apply_interrupted after a reboot)
                 data = dict(v.get("details") or {}, state=v.get("state"), message=v.get("message"))
@@ -971,9 +982,8 @@ class Hub:
     async def wait_version(self, vid: int, timeout: float = 600) -> dict:
         end = time.time() + timeout
         while time.time() < end:
-            v = self.db.version(vid)
-            if v and v["state"] not in ("pending", "running"):
-                return v
+            if self.db.version_state(vid) not in ("pending", "running"):
+                return self.db.version(vid)
             await asyncio.sleep(2)
         return self.db.version(vid)
 

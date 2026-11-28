@@ -388,11 +388,10 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
 
     @app.get("/api/versions/{vid}", dependencies=[api])
     async def version(vid: int, brief: bool = False):
-        v = db.version(vid)
+        # brief: the apply dialog asks every 3 s for the state only
+        v = db.version(vid, brief=brief)
         if not v:
             raise HTTPException(404, "no such version")
-        if brief:       # the apply dialog asks every 3 s for the state only
-            v = {k: x for k, x in v.items() if k not in ("config", "base_config", "diff")}
         return v
 
     @app.post("/api/routers/{rid}/pin", dependencies=[api])

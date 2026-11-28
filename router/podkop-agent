@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.33.0"
+AGENT_VERSION="0.34.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -489,22 +489,22 @@ hot_apply() {
       rm -f "$_hb" "$_cp.agent-new"; echo "could not write $_cp"; return 1
     fi
   fi
-  _tags=$(jq -r '.outbounds[].tag' "$_hb")
+  # the outbounds sing-box must show after the reload (groups of urltest are its own)
+  jq -c '[.outbounds[].tag | select(. != "direct-out" and (endswith("-urltest-out") | not))]' "$_hb" > "$_hb.tags"
   rm -f "$_hb" "$_hb.err"
-  kill -HUP "$_hp" 2>/dev/null || { echo "sing-box did not take the signal"; return 1; }
+  kill -HUP "$_hp" 2>/dev/null || { rm -f "$_hb.tags"; echo "sing-box did not take the signal"; return 1; }
   # the same sing-box, with every outbound of the new config
   _w=0
   while :; do
     sleep 1; _w=$((_w + 1))
-    [ "$(singbox_pid)" = "$_hp" ] || { echo "sing-box stopped while reloading"; return 1; }
+    [ "$(singbox_pid)" = "$_hp" ] || { rm -f "$_hb.tags"; echo "sing-box stopped while reloading"; return 1; }
+    # one jq for all of them (one per outbound took a second per round on 66 outbounds)
     _p=$(proxies); _miss=""
-    for _t in $_tags; do
-      case "$_t" in direct-out|*-urltest-out) continue ;; esac
-      printf '%s' "$_p" | jq -e --arg t "$_t" '.proxies[$t]' >/dev/null 2>&1 || _miss="$_miss $_t"
-    done
+    [ -n "$_p" ] && _miss=$(printf '%s' "$_p" | jq -r --slurpfile w "$_hb.tags" '[$w[0][] as $t | select(.proxies[$t] == null) | $t] | join(" ")' 2>/dev/null || echo "?")
     [ -n "$_p" ] && [ -z "$_miss" ] && break
-    [ "$_w" -ge 15 ] && { echo "sing-box did not take the new servers:${_miss:- no Clash API}"; return 1; }
+    [ "$_w" -ge 15 ] && { rm -f "$_hb.tags"; echo "sing-box did not take the new servers: ${_miss:-no Clash API}"; return 1; }
   done
+  rm -f "$_hb.tags"
   # a reload puts every selector back on its default member: pinned servers
   # are selected again (not only after a restart), and kill switches that were
   # closed are closed again now, not at the next self-heal round
@@ -2400,8 +2400,8 @@ cmd_devices() {
 # {"target": "name or IPv4", "from": "a device's IPv4, optional"}
 ROUTE_KEEP=86400
 ROUTE_BUDGET=${PODKOP_ROUTE_BUDGET:-40}
-route_list() {       # route_list <config> <tag> -> "<format>\t<file>" or nothing
-  _rl=$(jq -r --arg t "$2" '.route.rule_set[]? | select(.tag == $t) | [.type, (.format // "binary"), (.path // .url // "")] | join("\t")' "$1" 2>/dev/null)
+route_list() {       # route_list <sets table> <tag> -> "<format>\t<file>" or nothing
+  _rl=$(awk -F "$TAB" -v t="$2" '$1 == t { print $2 "\t" $3 "\t" $4; exit }' "$1" 2>/dev/null)
   IFS="$TAB" read -r _rt _rf _rp <<EOF_RL
 $_rl
 EOF_RL
@@ -2434,6 +2434,8 @@ cmd_route() {
   _c=$(uci -q get podkop.settings.config_path); [ -n "$_c" ] || _c=/etc/sing-box/config.json
   [ -s "$_c" ] || fail not_running "sing-box has no configuration: podkop has not started yet"
   mkdir -p "$RUN/route"; ROUTE_T0=$(date +%s)
+  # the rule-sets once ("<tag> <type> <format> <path or URL>", tabs), not a parse of the whole config per set
+  jq -r '.route.rule_set[]? | [.tag, .type, (.format // "binary"), (.path // .url // "")] | join("\t")' "$_c" > "$RUN/route/sets.$$" 2>/dev/null
   # one line per routing rule: index, outbound, does the device fit, does an
   # entry written in the rule itself match, has it any destination, its lists
   jq -r --arg t "$_t" --arg k "$_kind" --arg from "$_from" '
@@ -2454,19 +2456,19 @@ cmd_route() {
     | [$i, .outbound, (if $ok then 1 else 0 end), (if $own then 1 else 0 end),
        (if ([.domain, .domain_suffix, .domain_keyword, .domain_regex, .ip_cidr, .rule_set] | map(lst | length) | add) > 0 then 1 else 0 end),
        (.rule_set | lst | join(" "))] | join("\t")' "$_c" > "$RUN/route/rules.$$" 2>/dev/null ||
-    { rm -f "$RUN/route/rules.$$"; fail internal "cannot read sing-box's routing rules"; }
+    { rm -f "$RUN/route/rules.$$" "$RUN/route/sets.$$"; fail internal "cannot read sing-box's routing rules"; }
   _hit=""; _bad=""
   while IFS="$TAB" read -r _i _o _ok _own _dest _sets; do
     [ "$_ok" = 1 ] || continue
     if [ "$_own" = 1 ]; then _hit="$_i$TAB$_o$TAB"; break; fi
     if [ "$_dest" = 0 ]; then _hit="$_i$TAB$_o$TAB*"; break; fi
     for _s in $_sets; do
-      _lf=$(route_list "$_c" "$_s")
+      _lf=$(route_list "$RUN/route/sets.$$" "$_s")
       if [ -z "$_lf" ]; then _bad="$_bad $_s"; continue; fi
       if route_match "${_lf%%"$TAB"*}" "${_lf#*"$TAB"}" "$_t"; then _hit="$_i$TAB$_o$TAB$_s"; break 2; fi
     done
   done < "$RUN/route/rules.$$"
-  rm -f "$RUN/route/rules.$$"
+  rm -f "$RUN/route/rules.$$" "$RUN/route/sets.$$"
   # what the router itself says: a name podkop routes gets a FakeIP address
   # from the router's DNS; an address is routed only when podkop's nft sets hold it
   _dns=""; _set=""

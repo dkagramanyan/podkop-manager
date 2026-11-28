@@ -3,6 +3,28 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.65.0 — 2026-11-28
+
+Faster (agent 0.34.0, manager 0.52.0). Update the manager, then **Update
+agent** on each router. Measured on openwrt-reserv (66 outbounds, 40 rule
+lists):
+
+- **"Where does it go?" in under a second** once its lists are on the router
+  (was 63 s every time), about 20 s for the very first question. The router's
+  wget failed every HTTPS download only after its whole 30 s, so the
+  question's 40 s were spent on one list; lists are now fetched with curl
+  first (1 s each), which also speeds up the kill switch's daily list
+  update. The answer now also reads every community list (before, most of
+  them were "not read" and a rule's own domains matched instead).
+- **A reload in place checks sing-box's servers with one jq** instead of one
+  per server: 0.05 s instead of 1.3 s per second of waiting on reserv, more
+  on routers with many keys. The router's other commands wait less for it.
+- **Fewer status calls**: a burst of router events (a reload brings several)
+  is one status call, at most one every 5 s, not one per event.
+- The manager's database has indexes for its hourly clean-up and the
+  scheduled changes' check (every 30 s); the apply dialog's state check no
+  longer reads two whole configs every 3 s.
+
 ## 1.64.0 — 2026-11-28
 
 The web interface, easier to use (manager 0.51.0, no agent change). Update

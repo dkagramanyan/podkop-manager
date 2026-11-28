@@ -372,8 +372,12 @@ guard_dnsmasq_dir() {
 # podkop), through a server that answers now: a sing-box run of just that
 # outbound, like "exit-ip"
 guard_fetch() {
+  # curl first: on some routers wget (uclient-fetch) fails every HTTPS download
+  # only after its whole 30 s timeout, while curl gets the same file in a second
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 30 -o "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+  fi
   wget -q -T 30 -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
-  curl -fsSL --max-time 30 -o "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
   _fc=$(uci -q get podkop.settings.config_path); [ -n "$_fc" ] || _fc=/etc/sing-box/config.json
   proxies > "$2.px" 2>/dev/null
   jq -c --slurpfile p "$2.px" '.outbounds as $all
