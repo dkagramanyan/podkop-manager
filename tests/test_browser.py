@@ -627,3 +627,44 @@ def test_on_a_phone_the_menu_folds_and_the_page_starts_at_the_top(tmp_path):
     finally:
         srv.should_exit = True
         t.join(timeout=10)
+
+
+def test_a_switch_turned_on_and_off_again_is_no_change(tmp_path):
+    # 1.62: "Disable QUIC" on and off left disable_quic "0" in the draft: "1 change not applied"
+    from playwright.sync_api import sync_playwright
+
+    class OnlineHub(Hub):
+        def _start_router(self, row):
+            rt = super()._start_router(row)
+            rt.agent = OnlineAgent()
+            return rt
+
+    db = DB(tmp_path / "m.db")
+    db.add_router("home", "192.0.2.1", 22, "ssh-ed25519 AAAA host")
+    srv, t, base = _serve(OnlineHub(db, tmp_path / "id_ed25519", ROOT), db)
+    try:
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.launch()
+            except Exception as e:  # noqa: BLE001
+                pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+            page = browser.new_page()
+            errors = []
+            page.on("pageerror", lambda e: errors.append(f"pageerror: {e}"))
+            page.goto(f"{base}/login")
+            page.fill("#user", "admin")
+            page.fill("#pw", "secret-pass")
+            page.click("button[type=submit]")
+            page.wait_for_selector("#side a")
+            page.goto(f"{base}/#/r/1/global")
+            box = page.locator("[data-k='disable_quic']")
+            box.check()
+            page.wait_for_selector("text=Review and apply, 1")
+            page.locator("[data-k='disable_quic']").uncheck()
+            page.wait_for_selector("text=Review and apply", state="detached")
+            page.wait_for_timeout(1200)           # the draft's save (500 ms later) went out
+            assert db.draft(1) is None and errors == [], errors
+            browser.close()
+    finally:
+        srv.should_exit = True
+        t.join(timeout=10)

@@ -1,6 +1,6 @@
 // global.js: part of podkop-manager's web interface (see app.js)
 
-import { binder, comboField, discardWork, flagField, keepFocus, lbl, reviewWork, segField, selectField, textField, tokenField, workChanges, workFor } from "./draft.js";
+import { binder, comboField, discardWork, flagField, followRouter, keepFocus, lbl, reviewWork, segField, selectField, textField, tokenField, workChanges, workFor } from "./draft.js";
 import { bySection, optionDef, rulesOf, sectionsOf } from "./model.js";
 import { pageHead } from "./shell.js";
 import { S } from "./state.js";
@@ -107,7 +107,7 @@ export async function viewGlobal(main, id) {
   };
 
   draw();
-  S.view = { leave: () => { w.drawBar = null; }, onRouter: (r) => { if (r.id === id && r.status && r.status.fingerprint !== w.fp) { w.fp = r.status.fingerprint; draw(); } } };
+  S.view = { leave: () => { w.drawBar = null; }, onRouter: followRouter(w, id, `${id}/global`) };
 }
 
 export function settingsOther(o, defs) {
