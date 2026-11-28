@@ -163,3 +163,15 @@ def test_alerts_switched_off_quiet_hours_and_late_ones(tmp_path, monkeypatch):
     down.clear(); sent.clear()
     asyncio.run(hub.flush_notifications())
     assert sent[0][0].startswith("(late, from ") and sent[0][1] == ["telegram"] and db.get_setting("notify_queue") is None
+
+
+def test_a_watched_server_without_a_name_is_tested_not_gone(tmp_path):
+    # 0.30: with an empty name, read with IFS=tab moved the tag into the name: always "gone"
+    (tmp_path / "cfg.json").write_text(json.dumps(CFG))
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc/watched").write_text(f"main\t{MD5}\t\n")
+    (tmp_path / "up").write_text("")
+    p = _sh(tmp_path, "\nfor i in 1 2 3 4; do swatch_round; done\nswatch_status")
+    assert p.returncode == 0, p.stderr
+    st = json.loads(p.stdout)[0]
+    assert st["state"] == "up" and st["server"] == "main-2-out" and st["name"] == ""
