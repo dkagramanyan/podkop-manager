@@ -25,6 +25,14 @@ by itself within a minute, nothing to click.
   `/etc/init.d/podkop-zapret` and their lines in `/etc/sysupgrade.conf` go.
   While sing-box cannot be reloaded (an apply runs) it tries again the next
   round. One event, `zapret_removed`, says when it is done.
+- **Devices' own DNS is opt-in again** (Connection health): a new router
+  gets it off, and while it is on the router no longer answers the public
+  resolvers' names (dns.google, cloudflare-dns.com, mask.icloud.com…) with
+  "no such name". That part of 1.60.2 broke iCloud Private Relay and apps
+  with a fixed DNS name; the agent removes its dnsmasq file by itself. A
+  router where the switch is on keeps it on (port 53 to the router, DNS over
+  TLS/HTTPS to the known resolvers refused): untick it there if you don't
+  need it.
 - Gone from the web interface: Zapret first on a rule's page, the zapret
   tags in the rules list, the strategy list and check interval in Settings,
   the zapret file in Configs → Import, zapret's events and alerts. A config

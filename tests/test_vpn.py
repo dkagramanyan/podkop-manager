@@ -376,27 +376,21 @@ fail() {{ echo "$*" >&2; exit 1; }}
     assert code_run("cmd_dns_guard maybe").returncode == 1
 
 
-def test_dns_guard_keeps_the_resolvers_names_without_an_address(tmp_path):
-    """1.60.2: a rule by domain may carry dns.google.com through its server;
-    while the guard is on dnsmasq answers the resolvers' names NXDOMAIN."""
+def test_the_resolvers_names_file_of_0_30_2_goes_once(tmp_path):
+    """0.32: the resolvers' names get an address again; the dnsmasq file of 0.30.2-0.31 goes."""
     code = _agent_code("# --- the router.s DNS for every device", "# --- OpenVPN client")
     script = f'''
-uci() {{ [ -f "{tmp_path}/on" ]; }}
 guard_dnsmasq_dir() {{ printf %s "{tmp_path}/d"; }}
 guard_dnsmasq_restart() {{ echo r >> "{tmp_path}/restarts"; }}
 {code}
-dns_names_sync
+dns_names_leftover
 '''
     run = lambda: subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)  # noqa: E731
     f, restarts = tmp_path / "d/podkop-agent-doh.conf", tmp_path / "restarts"
-    assert run().returncode == 0 and not f.exists() and not restarts.exists()      # guard off: nothing
-    (tmp_path / "on").write_text("")
+    assert run().returncode == 0 and not restarts.exists()                         # none: dnsmasq is left alone
+    f.parent.mkdir()
+    f.write_text("address=/dns.google/\n")
     run()
-    lines = f.read_text().splitlines()
-    assert "address=/dns.google.com/" in lines and "address=/cloudflare-dns.com/" in lines and "address=/mask.icloud.com/" in lines
+    assert not f.exists() and restarts.read_text().count("r") == 1
     run()
-    assert restarts.read_text().count("r") == 1                                    # unchanged: dnsmasq is left alone
-    f.unlink(); run()                                                              # lost (a boot): put back
-    assert f.exists() and restarts.read_text().count("r") == 2
-    (tmp_path / "on").unlink(); run()
-    assert not f.exists() and restarts.read_text().count("r") == 3
+    assert restarts.read_text().count("r") == 1

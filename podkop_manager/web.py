@@ -235,15 +235,7 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         rid = db.add_router(str(body.get("name") or "").strip() or host, host, port, p["host_key"])
         hub.add_router(db.router(rid))
         # podkop as it is: kept in Configs, and the probe it runs by itself taken into Keys and rules
-        async def found():
-            await hub.import_found(rid)
-            # rules by domain need the devices to ask the router's DNS: on for a
-            # new router (Connection health turns it off)
-            try:
-                await hub.routers[rid].agent.call("dns-guard", "on", timeout=60)
-            except AgentError as e:
-                log.warning("dns guard on the new router %s: %s", host, e)
-        task = asyncio.create_task(found())
+        task = asyncio.create_task(hub.import_found(rid))
         hub.jobs.add(task)
         task.add_done_callback(hub.jobs.discard)
         return {"id": rid}
