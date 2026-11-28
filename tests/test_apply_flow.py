@@ -196,3 +196,58 @@ def test_a_revert_after_a_poll_saw_the_new_settings_keeps_the_draft_and_its_swit
         assert db.draft(rid)["config"] == target and fired == []
         assert db.get_setting(f"router_pending:{rid}") == {"kill_switch": ["main"]}
     asyncio.run(go())
+
+
+def test_the_browser_hears_the_end_only_once_the_applied_draft_is_gone(tmp_path):
+    # 1.62: the final job message went out before the draft was deleted: a page that reloaded
+    # then found the draft and showed "settings changed on the router" or "N changes not applied"
+    db, hub, rt, rid = _hub(tmp_path)
+    target = changed(BASE, "main", user_domains=["a.com"])
+    db.set_draft(rid, target, "fp1", base_config=BASE)
+    seen = []
+    hub.publish = lambda m: seen.append((m.get("type"), (m.get("job") or {}).get("state"), db.draft(rid) is not None))
+
+    async def go():
+        await hub.apply(rid, "fp1", target)
+        for t in list(hub.jobs):
+            await t
+    asyncio.run(go())
+    final = [s for s in seen if s[0] == "job" and s[1] == "applied"]
+    assert final == [("job", "applied", False)]
+
+
+def test_a_tracker_that_dies_ends_its_change_so_the_draft_is_not_applying_for_ever(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path)
+    target = changed(BASE, "main", user_domains=["a.com"])
+    db.set_draft(rid, target, "fp1", base_config=BASE)
+
+    class Odd(Agent):
+        async def call(self, name, *args, **kw):
+            if name == "job":
+                return ["not", "a", "dict"]
+            return await super().call(name, *args, **kw)
+
+    rt.agent = Odd(BASE)
+
+    async def go():
+        r = await hub.apply(rid, "fp1", target)
+        for t in list(hub.jobs):
+            await t
+        return r
+    r = asyncio.run(go())
+    assert db.version(r["version"])["state"] == "unknown"
+    assert not (rt.draft or {}).get("applying")
+
+
+def test_switches_left_by_a_restart_are_set_at_start_not_with_the_next_draft(tmp_path):
+    db, hub, rt, rid = _hub(tmp_path)
+    db.set_setting(f"router_pending:{rid}", {"kill_switch": ["main"]})
+    fired = []
+    hub.after_apply_now = lambda r: fired.append(r.id)
+    hub._resume()
+    assert fired == [rid]
+    # with a draft it waits for that draft
+    fired.clear()
+    db.set_draft(rid, BASE, "fp1", base_config=BASE)
+    hub._resume()
+    assert fired == []

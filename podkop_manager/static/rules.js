@@ -1,7 +1,7 @@
 // rules.js: part of podkop-manager's web interface (see app.js)
 
 import { LINK_RE, binder, comboField, draftBar, flagField, keepFocus, lbl, segField, selectField, serversField,
-  loadWork, tokenField, touch, userListField, watchButton, workChanges, workFor } from "./draft.js";
+  followRouter, tokenField, touch, userListField, watchButton, workChanges, workFor } from "./draft.js";
 import { bySection, destChip, optionDef, ruleDest, ruleHealth, ruleMatches, rulesOf, same, sectionsOf } from "./model.js";
 import { pageHead, render, seg } from "./shell.js";
 import { S } from "./state.js";
@@ -111,18 +111,7 @@ export async function viewRules(main, id, sub) {
   S.view = {
     scroll: () => (wide ? was : sub ? editBox.getBoundingClientRect().top + window.scrollY - 12 : 0),
     leave: () => { w.drawBar = null; },
-    onRouter: (r) => {
-      if (r.id !== id || !r.status) return;
-      // the router's settings moved (an apply, the probe, self-heal) or the manager moved
-      // the draft onto them: read both again, unless an edit is still on its way
-      const moved = r.status.fingerprint !== w.fp || (r.draft && r.draft.updated !== w.rev && !(r.draft || {}).applying);
-      if (moved && !w.saving && !w.putting && S.work[id] === w && !(r.status.podkop || {}).busy) {
-        w.fp = r.status.fingerprint;
-        loadWork(id).then(() => { if (S.at === `${id}/rules`) render(); }).catch(() => {});
-        return;
-      }
-      w.drawBar && w.drawBar();
-    },
+    onRouter: followRouter(w, id, `${id}/rules`),
     // a probe started or finished: the rules that take its servers read them again
     onProbe: (m) => {
       if (m.router_id !== id || m.state === probeState) return;

@@ -1,8 +1,9 @@
 // devices.js: part of podkop-manager's web interface (see app.js)
 
-import { reviewWork, touch, workChanges, workFor } from "./draft.js";
+import { followRouter, reviewWork, touch, workChanges, workFor } from "./draft.js";
 import { rulesOf, sectionsOf } from "./model.js";
 import { pageHead } from "./shell.js";
+import { S } from "./state.js";
 import { api, asList, h, modal, plural, put, toast } from "./ui.js";
 
 // --- a device's whole traffic through one rule, or never through podkop ---------------------
@@ -93,6 +94,7 @@ export async function viewDevices(main, id) {
     w.drawBar();
   };
   draw();
+  S.view = { leave: () => { w.drawBar = null; }, onRouter: followRouter(w, id, `${id}/devices`) };
 }
 
 // --- where does a name or an address go -------------------------------------------------------

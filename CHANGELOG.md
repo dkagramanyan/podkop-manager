@@ -3,6 +3,39 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.63.0 — 2026-11-28
+
+Bug fixes (agent 0.33.0, manager 0.50.0). Update the manager, then
+**Update agent** on each router.
+
+- **No more "N changes not applied" that only Discard clears.** A podkop
+  option set back to its default (a switch turned on and off again, a DNS
+  protocol changed and changed back) counted as a change.
+- **After an apply the pages show the router's new settings**, not "podkop's
+  settings changed on the router after this draft was started" or the
+  applied draft: the browser hears that the change ended only once the
+  draft is done with. Global settings and Devices also read the draft again
+  when the router's settings move (Rules already did).
+- **A draft no longer stays "applying" until the manager restarts** when the
+  manager loses track of a change: the change ends as "unknown" (look at
+  the router's settings), and a timed-out apply recounts the draft.
+- **A scheduled change is tried again** within its grace hour when the
+  router is busy or answers oddly for a moment (rpcd restarting), not
+  failed at once.
+- **Late Telegram alerts** are sent once (two flushes at the same time sent
+  them twice), alerts that came in meanwhile are kept, and alerts older
+  than 2 days are dropped instead of arriving in a flood.
+- **A loaded config's switches** (kill switch, Protected, self-heal off)
+  that a manager restart left waiting are set at its start, not with the
+  next, unrelated draft.
+- **The router reloads sing-box only when its settings change.** Self-heal,
+  eligibility, kill switch, Protected and VPN changes that leave the config
+  as it is no longer cut every connection.
+- **Pinned servers stay pinned** after a reload in place (self-heal, kill
+  switch, Protected, eligibility, VPN devices); before, they were put back
+  only after a podkop restart.
+- **A watched server without a name** is tested; it was always "gone".
+
 ## 1.62.0 — 2026-11-28
 
 zapret is removed (agent 0.32.0, manager 0.49.0). Update the manager, then

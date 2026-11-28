@@ -531,3 +531,28 @@ def test_where_does_it_go_names_the_rule_of_a_domain(tmp_path, monkeypatch):
         monkeypatch.setattr(FakeHub, "get", lambda self, rid: rt)
         rule = c.post("/api/routers/1/route", headers=H, json={"target": "instagram.com"}).json()["rule"]
         assert rule["section"] == "meta" and rule["by"] == "domains" and "zapret" not in rule
+
+
+def test_late_notifications_are_sent_once_and_ones_queued_meanwhile_stay(tmp_path, monkeypatch):
+    import time as _time
+    from podkop_manager import notify
+    db = DB(tmp_path / "m.db")
+    hub = Hub(db, tmp_path / "id_ed25519", Path("."))
+    db.set_setting("notify", {"telegram_token": "t", "telegram_chat": "c"})
+    now = _time.time()
+    db.set_setting("notify_queue", [{"t": now - 60, "message": "a"}, {"t": now - 3 * 86400, "message": "old"}])
+    sent = []
+
+    def send(settings, message, payload, only, silent):
+        sent.append(message)
+        if message.endswith(" a"):      # while it goes, another alert is queued
+            db.set_setting("notify_queue", (db.get_setting("notify_queue") or []) + [{"t": now, "message": "b"}])
+        return {}
+    monkeypatch.setattr(notify, "send", send)
+
+    async def go():
+        await asyncio.gather(hub.flush_notifications(), hub.flush_notifications())
+    asyncio.run(go())
+    assert len([m for m in sent if m.endswith(" a")]) == 1 and not any("old" in m for m in sent)
+    # b, queued while a went, was kept and sent by the second flush (which waited for the first)
+    assert len([m for m in sent if m.endswith(" b")]) == 1 and db.get_setting("notify_queue") is None

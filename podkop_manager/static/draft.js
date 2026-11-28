@@ -50,6 +50,22 @@ export async function workFor(id) {
 
 export const workChanges = (w) => configDiff(w.orig, w.config);
 
+// a page's onRouter for the draft: the router's settings moved (an apply, the probe,
+// self-heal), the manager moved the draft onto them, or the draft ended (applied
+// elsewhere): read both again, unless an edit is still on its way; page = S.at of the page
+export function followRouter(w, id, page) {
+  return (r) => {
+    if (r.id !== id || !r.status) return;
+    const moved = r.status.fingerprint !== w.fp || (r.draft ? r.draft.updated !== w.rev && !r.draft.applying : w.rev !== null);
+    if (moved && !w.saving && !w.putting && S.work[id] === w && !(r.status.podkop || {}).busy) {
+      w.fp = r.status.fingerprint;
+      loadWork(id).then(() => { if (S.at === page) render(); }).catch(() => {});
+      return;
+    }
+    if (w.drawBar) w.drawBar();
+  };
+}
+
 // one save at a time: each PUT goes after the one before, with the rev that one returned
 export function saveWork(w) {
   clearTimeout(w.saving);
@@ -202,7 +218,10 @@ export function binder(w, section, defs, { defaults = true } = {}) {
     get: (opt) => o()[opt],
     val: (opt) => (o()[opt] !== undefined ? o()[opt] : def(opt)),
     set: (opt, v, redraw) => {
-      if (v === "" || v === null || v === undefined || (Array.isArray(v) && !v.length)) delete o()[opt];
+      // an option the router does not set, set back to podkop's default, is no change:
+      // left in, a switch turned on and off again counted as "1 change not applied"
+      const back = orig && b.old(opt) === undefined && def(opt) !== undefined && same(asList(v), asList(def(opt)));
+      if (back || v === "" || v === null || v === undefined || (Array.isArray(v) && !v.length)) delete o()[opt];
       else o()[opt] = v;
       touch(w);
       if (redraw) w.redraw();

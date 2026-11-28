@@ -12,7 +12,7 @@
 # $SSH_ORIGINAL_COMMAND, requests come as JSON on stdin, answers go as JSON to
 # stdout: {"v":1,"ok":true,"data":...} or {"v":1,"ok":false,"error":{...}}.
 
-AGENT_VERSION="0.32.0"
+AGENT_VERSION="0.33.0"
 PROTO=1
 ETC=/etc/podkop-agent
 RUN=/tmp/podkop-agent
@@ -443,9 +443,11 @@ podkop_build() (
   sing_box_init_config
 )
 
-# hot_apply <marker>: podkop runs; its new sing-box config goes in and
+# hot_apply <marker> [force]: podkop runs; its new sing-box config goes in and
 # sing-box reloads it; fails (and the caller restarts podkop) when anything
-# is off. On failure the reason goes to stdout.
+# is off. On failure the reason goes to stdout. A config sing-box already has
+# is no reload (a reload cuts every connection), unless "force" (an apply:
+# its rule-set files changed).
 hot_apply() {
   _hp=$(singbox_pid)
   if [ -z "$_hp" ] || [ "$(podkop_start_state)" != 0 ]; then echo "podkop is not fully running"; return 1; fi
@@ -478,6 +480,9 @@ hot_apply() {
   fi
   if ! protect_ok "$_hb.base" "$_hb"; then rm -f "$_hb" "$_hb.base" "$_hb.err"; echo "the change would alter a protected rule"; return 1; fi
   rm -f "$_hb.base"
+  if [ "${2:-}" != force ] && cmp -s "$_hb" "$_cp"; then
+    rm -f "$_hb" "$_hb.err"; logger -t podkop-agent "$1: sing-box has these settings already, not reloaded"; return 0
+  fi
   logger -t podkop-agent "$1"
   if ! cmp -s "$_hb" "$_cp"; then
     if ! { cp "$_hb" "$_cp.agent-new" && mv "$_cp.agent-new" "$_cp"; }; then
@@ -500,8 +505,10 @@ hot_apply() {
     [ -n "$_p" ] && [ -z "$_miss" ] && break
     [ "$_w" -ge 15 ] && { echo "sing-box did not take the new servers:${_miss:- no Clash API}"; return 1; }
   done
-  # a reload puts every selector back on its default member: kill switches
-  # that were closed are closed again now, not at the next self-heal round
+  # a reload puts every selector back on its default member: pinned servers
+  # are selected again (not only after a restart), and kill switches that were
+  # closed are closed again now, not at the next self-heal round
+  reapply_pins quiet >/dev/null 2>&1 || :
   if command -v strict_enforce >/dev/null 2>&1 && [ -s "$ETC/strict" ]; then
     mkdir -p "$RUN/heal"; printf '%s' "$_p" > "$RUN/heal/proxies.json"; strict_enforce "$RUN/heal/proxies.json" "$_cp"
   fi
@@ -608,8 +615,9 @@ link_tag() {
 
 select_server() { podkop clash_api set_group_proxy "$1-out" "$2" 2>/dev/null | jq -e '.success' >/dev/null 2>&1; }
 
-# reapply_pins: after a restart podkop's selectors start on their default
-# fails when a pinned server could not be selected (Clash API not up yet)
+# reapply_pins [quiet]: after a restart or a reload podkop's selectors start on
+# their default; fails when a pinned server could not be selected (Clash API
+# not up yet). quiet: no pin_restored events (a reload in place)
 reapply_pins() {
   [ -s "$ETC/pins" ] || return 0
   mkdir -p "$RUN"
@@ -623,7 +631,7 @@ reapply_pins() {
     fi
     printf '%s\t%s\n' "$_s" "$_h" >> "$RUN/pins.new"
     if select_server "$_s" "$_t"; then
-      event pin_restored "$(jq -nc --arg s "$_s" --arg t "$_t" '{section: $s, server: $t}')"
+      [ "${1:-}" = quiet ] || event pin_restored "$(jq -nc --arg s "$_s" --arg t "$_t" '{section: $s, server: $t}')"
     else
       _rp=1
     fi
@@ -709,9 +717,9 @@ run_apply() {
     for _ds in $(domain_sections "$RUN/jobs/$_id.old" "$_new"); do
       [ -f "$_rd/$_ds-user-domains-ruleset.json" ] && mv "$_rd/$_ds-user-domains-ruleset.json" "$RUN/rulesets.bak/"
     done
-    if _hw=$(hot_apply "apply $_id ($_hk)"); then
+    if _hw=$(hot_apply "apply $_id ($_hk)" force); then
       rm -rf "$RUN/rulesets.bak"
-      save_last_good; rm -f "$ETC/apply-pending"; reapply_pins
+      save_last_good; rm -f "$ETC/apply-pending"
       job_end "$_id" applied "applied without restarting podkop ($_hk)" "$(printf '%s' "$_x" | jq -c '. + {hot: true}')"
       event applied "$(jq -nc --arg j "$_id" '{job: $j, restarted: true, hot: true}')"
       return
@@ -1621,18 +1629,22 @@ swatch_tag() {
   done
 }
 
-# swatch_tags: "<section> <md5> <name> <tag or empty>" (tabs) for each watched
-# server; looked up again only after podkop's settings or the list changed
+# swatch_tags: "<section> <md5> <tag or -> <name>" (tabs) for each watched
+# server; looked up again only after podkop's settings or the list changed.
+# The name last and no empty tag: read with IFS=tab, an empty field in the
+# middle would vanish and shift the next one into its place
 swatch_tags() {
   _wfp=$(seen_fp) || return 1
-  if [ "$(cat "$RUN/swatch/tags.fp" 2>/dev/null)" != "$_wfp" ] || [ "$WATCH" -nt "$RUN/swatch/tags" ]; then
+  # ("2": the order of 0.33; a file of an older agent is made again)
+  if [ "$(cat "$RUN/swatch/tags.fp" 2>/dev/null)" != "2 $_wfp" ] || [ "$WATCH" -nt "$RUN/swatch/tags" ]; then
     _wcfg=$(seen_json) || return 1
     : > "$RUN/swatch/tags.t"
     while IFS="$TAB" read -r _ws _wm _wn; do
       [ -n "$_wm" ] || continue
-      printf '%s\t%s\t%s\t%s\n' "$_ws" "$_wm" "$_wn" "$(swatch_tag "$_wcfg" "$_ws" "$_wm")" >> "$RUN/swatch/tags.t"
+      _wt=$(swatch_tag "$_wcfg" "$_ws" "$_wm")
+      printf '%s\t%s\t%s\t%s\n' "$_ws" "$_wm" "${_wt:--}" "$_wn" >> "$RUN/swatch/tags.t"
     done < "$WATCH"
-    mv "$RUN/swatch/tags.t" "$RUN/swatch/tags"; echo "$_wfp" > "$RUN/swatch/tags.fp"
+    mv "$RUN/swatch/tags.t" "$RUN/swatch/tags"; echo "2 $_wfp" > "$RUN/swatch/tags.fp"
   fi
   cat "$RUN/swatch/tags"
 }
@@ -1647,8 +1659,8 @@ swatch_round() {
   _wpx=$(proxies 2>/dev/null); [ -n "$_wpx" ] || return 0
   swatch_tags > "$RUN/swatch/now" || return 0
   _wpids=""; _wcp=$(uci -q get podkop.settings.config_path)
-  while IFS="$TAB" read -r _ws _wm _wn _wt; do
-    if [ -z "$_wt" ] || ! printf '%s' "$_wpx" | jq -e --arg t "$_wt" '.proxies[$t]' >/dev/null 2>&1; then
+  while IFS="$TAB" read -r _ws _wm _wt _wn; do
+    if [ "$_wt" = - ] || ! printf '%s' "$_wpx" | jq -e --arg t "$_wt" '.proxies[$t]' >/dev/null 2>&1; then
       echo gone > "$RUN/swatch/$_wm.r"; continue
     fi
     # the address its rule's group tests with: sing-box's URLTest picks by the history these tests leave
@@ -1661,7 +1673,8 @@ swatch_round() {
   for _wpid in $_wpids; do wait "$_wpid" 2>/dev/null; done
   _wnow=$(date +%s); _wan=""
   : > "$RUN/swatch/status.t"
-  while IFS="$TAB" read -r _ws _wm _wn _wt; do
+  while IFS="$TAB" read -r _ws _wm _wt _wn; do
+    [ "$_wt" != - ] || _wt=""
     _wres=$(cat "$RUN/swatch/$_wm.r" 2>/dev/null); rm -f "$RUN/swatch/$_wm.r"
     read -r _wst _wf _wsince 2>/dev/null < "$RUN/swatch/$_wm.s" || { _wst=up; _wf=0; _wsince=$_wnow; }
     case "$_wres" in
