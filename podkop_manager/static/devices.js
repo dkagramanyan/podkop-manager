@@ -1,6 +1,6 @@
 // devices.js: part of podkop-manager's web interface (see app.js)
 
-import { followRouter, reviewWork, touch, workChanges, workFor } from "./draft.js";
+import { draftBar, followRouter, touch, workFor } from "./draft.js";
 import { rulesOf, sectionsOf } from "./model.js";
 import { pageHead } from "./shell.js";
 import { S } from "./state.js";
@@ -46,11 +46,7 @@ export async function viewDevices(main, id) {
     touch(w); draw();
   };
 
-  const headBtn = h("span", { style: "display: contents" });
-  w.drawBar = () => {
-    const n = workChanges(w).length;
-    put(headBtn, n ? h("button", { type: "button", class: "btn primary", disabled: w.base !== w.fp, onclick: () => reviewWork(w) }, `Review and apply, ${n}`) : null);
-  };
+  const bar = draftBar(w);      // as on Rules
   w.redraw = () => draw();
 
   const draw = () => {
@@ -70,12 +66,13 @@ export async function viewDevices(main, id) {
     add.onkeydown = (e) => { if (e.key === "Enter") addIt(); };
     const n = rows.filter((d) => choice(d.ip) !== "").length;
     put(page,
-      pageHead("Devices", `${plural(rows.length, "device")}${n ? `, ${n} with a route of ${n === 1 ? "its" : "their"} own` : ""}`, headBtn),
+      pageHead("Devices", `${plural(rows.length, "device")}${n ? `, ${n} with a route of ${n === 1 ? "its" : "their"} own` : ""}`),
+      bar,
       why ? h("div", { class: "banner" }, h("span", { class: "dot accent" }), h("span", { class: "grow small" }, `The router's device list could not be read (${why}). Addresses can still be set by hand.`)) : null,
       h("section", { class: "card clip", "aria-labelledby": "d-list" },
         h("div", { class: "card-head" }, h("div", { class: "col" }, h("h2", { id: "d-list" }, "Where each device's traffic goes"),
           h("span", { class: "small muted" }, "By the rules: only what the rules list goes through their servers. Through one rule: everything the device sends. Never through podkop: everything direct, the rules do not apply."))),
-        rows.length ? h("div", { class: "scroll-x" }, h("table", { class: "wide" },
+        rows.length ? h("div", { class: "scroll-x" }, h("table", { class: "wide devices" },
           h("tr", {}, h("th", { scope: "col" }, "Device"), h("th", { scope: "col" }, "Address"), h("th", { scope: "col" }, "Traffic")),
           rows.map((d) => {
             const v = choice(d.ip);

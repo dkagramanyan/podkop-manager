@@ -3,7 +3,7 @@
 import { updateAgent } from "./agent.js";
 import { getRouter, pageHead, seg } from "./shell.js";
 import { S } from "./state.js";
-import { ago, api, h, icon, longWhen, put, spinner, toast } from "./ui.js";
+import { ago, api, confirmDialog, h, icon, longWhen, put, spinner, store, toast } from "./ui.js";
 
 export function healthPath(rows = []) {
   if (new Set(rows.map(r => r.target)).size < 2) return "unknown";
@@ -30,7 +30,7 @@ export function healthVerdict(data, router = {}, now = Date.now() / 1000) {
     title = "Last check could not finish"; tone = "warn";
     tips.push(`${data.latest.error} Run Check now after resolving the collector error.`);
   } else if (stale) {
-    title = last ? "Results are out of date" : "No baseline yet"; tone = "warn";
+    title = last ? "Results are out of date" : "Not checked yet"; tone = "warn";
     tips.push("Run Check now to get current DNS, direct internet and proxy results.");
   } else {
     if (report.wan?.up === false || healthPath(report.direct) === "down") {
@@ -138,13 +138,13 @@ export async function viewReliability(main, id) {
   const filter = (label, values, change) => h("label", { class: "row small" }, label,
     h("select", { class: "input", onchange: e => change(e.target.value) }, values.map(([value, title]) => h("option", { value }, title))));
   const activityTools = h("div", { class: "row" },
-    h("label", { class: "search grow" }, icon("search", 15), h("span", { class: "sr" }, "Search grouped observations"),
+    h("label", { class: "search grow" }, icon("search", 15), h("span", { class: "sr" }, "Search the repeated problems"),
       h("input", { placeholder: "Search server, destination or latest message", oninput: e => { query = e.target.value.toLowerCase().trim(); drawActivity(); } })),
     filter("Source", [["all", "All sources"], ["router", "Router logs"], ["active check", "Active checks"], ["kuma", "Uptime Kuma"]], v => { source = v; drawActivity(); }),
     filter("Type", [["all", "All types"], ...Object.entries(labels)], v => { kind = v; drawActivity(); }));
-  const activity = h("section", { class: "card pad stack", "aria-label": "Grouped observations" },
-    h("div", { class: "col" }, h("h2", {}, "Grouped observations"),
-      h("p", { class: "small muted" }, "Repeated messages are grouped by source, type and target. Counts are observations, not outages. Expand a group for its latest evidence.")), activityTools, activityBody);
+  const activity = h("section", { class: "card pad stack", "aria-label": "Repeated problems" },
+    h("div", { class: "col" }, h("h2", {}, "Repeated problems"),
+      h("p", { class: "small muted" }, "Log messages of the same kind about the same target, counted together. A count is how often it was seen, not how long it was down. Open one for its latest message.")), activityTools, activityBody);
   const drawActivity = () => {
     const summary = data.summary;
     const names = getRouter(id).names || {};
@@ -162,8 +162,8 @@ export async function viewReliability(main, id) {
           sample.reported_time ? h("p", { class: "small muted" }, `Source timestamp: ${sample.reported_time}`) : null,
           sample.rows ? endpointTable(sample.rows) : null,
           h("a", { href: `#/r/${id}/logs`, class: "link-btn" }, "Open full logs")], `${g.count.toLocaleString()} × · ${ago(g.last)}`);
-    }) : h("p", { class: "empty" }, summary.total ? "No groups match these filters." : "No observations in this time window. Run a check to establish current health."),
-    h("p", { class: "small muted" }, `Showing ${groups.length} of ${summary.group_count} groups · ${summary.total.toLocaleString()} observations in this window.`
+    }) : h("p", { class: "empty" }, summary.total ? "No groups match these filters." : "Nothing seen in this time window. Check now tells how things are now."),
+    h("p", { class: "small muted" }, `Showing ${groups.length} of ${summary.group_count} groups · ${summary.total.toLocaleString()} messages in this window.`
       + (summary.group_count > summary.groups.length ? " Only the 100 most frequent groups are shown; totals include all groups." : "")));
   };
   const host = target => { try { return new URL(target).hostname; } catch { return target || "Unknown target"; } };
@@ -273,6 +273,7 @@ export async function viewReliability(main, id) {
     catch (err) { toast(err.message, true); await load().catch(() => {}); }
     finally { checking = false; if (!left) draw(); }
   };
+  let tab = store("health-tab") === "protect" ? "protect" : "checks";
   const draw = () => {
     const focused = page.contains(document.activeElement) ? document.activeElement : null;
     const focusKey = focused?.closest("details")?.dataset.healthKey;
@@ -313,7 +314,7 @@ export async function viewReliability(main, id) {
           } }, "Refresh router")) : null),
       h("div", { class: "health-grid" },
         card("Direct internet", freshBadge(healthPath(report.direct)), "Two independent HTTPS endpoints"),
-        card("Router DNS", freshBadge(report.router_dns), "Resolution through Podkop"),
+        card("Router DNS", freshBadge(report.router_dns), "Names resolved through podkop"),
         card("Upstream DNS", h("div", { class: "row" }, freshBadge(report.primary_dns?.ok)),
           `Primary: ${report.primary_dns?.method || "not checked"} · provider: ${report.provider_dns === true ? "responding" : report.provider_dns === false ? "failed" : "not checked"}`),
         card("Proxy sample", h("strong", { class: "num" }, `${Object.values(report.nodes || {}).filter(rows => healthPath(rows) === "up").length} / ${Object.keys(report.nodes || {}).length} responding`),
@@ -325,13 +326,13 @@ export async function viewReliability(main, id) {
             hours = Number(v); load().catch(err => toast(err.message, true));
           }, { label: "History window" })),
         h("div", { class: "health-totals" },
-          h("span", {}, h("b", {}, data.summary.total.toLocaleString()), " observations"),
-          h("span", {}, h("b", {}, data.summary.failures.toLocaleString()), " failure observations"),
+          h("span", {}, h("b", {}, data.summary.total.toLocaleString()), " messages"),
+          h("span", {}, h("b", {}, data.summary.failures.toLocaleString()), " about failures"),
           h("span", {}, h("b", {}, data.summary.group_count.toLocaleString()), " groups")),
         h("p", { class: "small muted" }, `Received ${longWhen(data.summary.since)} — ${longWhen(data.summary.until)}. Log volume alone does not establish current health.`)),
       activity,
       h("section", { class: "card pad stack" }, h("h2", {}, "Servers and recovery"),
-        h("p", { class: "small muted" }, "Excluded means the latest completed check confirmed a runtime exclusion. Cooldown alone is a recommendation. Last selections are from that check; stale rows are labelled."),
+        h("p", { class: "small muted" }, "Excluded: the last check found the server failing and took it out of its group for now. Cooldown alone is only a suggestion. The servers in use are as that check saw them; older rows are marked."),
         servers.length ? table(["Server", "Last result", "Response", "Confirmed failures", "Recovery", "Checked"], servers.map(s => {
           const old = Date.now() / 1000 - s.checked > Math.max(180, opts.interval * 3);
           return [h("div", { class: "col" }, h("b", {}, name(s.tag)),
@@ -344,7 +345,7 @@ export async function viewReliability(main, id) {
             s.quarantined ? h("span", { class: "small muted" }, `${Date.now() / 1000 < s.until ? `Until at least ${longWhen(s.until)}; then ` : "Awaiting "}${opts.recovery_successes} successful recovery checks`) : null),
           h("div", { class: "col" }, ago(s.checked), old ? h("span", { class: "pill warn" }, "Stale") : null)];
         })) : h("p", { class: "empty" }, "No server checks yet. Run Check now to test the selected servers and backups.")),
-      h("section", { class: "card pad stack" }, h("h2", {}, "Diagnostic evidence"),
+      h("section", { class: "card pad stack" }, h("h2", {}, "What the last check saw"),
         h("p", { class: "small muted" }, last ? `Last completed ${longWhen(last.t)}. These tests use an isolated engine on the router; LAN forwarding and existing application sessions need separate checks.` : "No completed diagnostics yet."),
         disclose("router-checks", "WAN, DNS and router resources", table(["Check", "Result"], [
           ["WAN", h("div", { class: "row" }, badge(report.wan?.up), report.wan?.device || "")],
@@ -362,30 +363,37 @@ export async function viewReliability(main, id) {
               h("p", { class: "small muted" }, "HTTP 401, 403 and 429 indicate access rejection. They do not confirm a transport failure.")], healthPath(rows))) : []),
         Object.keys(report.selected || {}).length ? disclose("selections", "Routing at last completed check",
           table(["Rule", "Selected server"], Object.entries(report.selected).map(([rule, tag]) => [rule, name(tag)]))) : null),
-      h("section", { class: "card pad stack" }, disclose("incidents", "Correlated incidents",
+      h("section", { class: "card pad stack" }, disclose("incidents", "Problems at the same time",
         [h("p", { class: "small muted" }, "Network failures received within 30 seconds are correlated. Last observation is not a measured recovery time. Incidents overlapping this window can include earlier observations. Showing up to 100 incidents."),
           data.incidents.length ? table(["First / last received", "Type", "Observations", "Selected servers at first observation"], data.incidents.map(i => [
             `${longWhen(i.started)} — ${longWhen(i.last)}`, i.category, i.count,
             Object.entries(i.context.selected || {}).map(([rule, tag]) => `${rule}: ${i.context.server_names?.[tag] || tag}`).join(", ") || "Unknown"]))
             : h("p", { class: "empty" }, "No incidents in this window.")], `${data.incidents.length}${data.incidents.length === 100 ? "+" : ""}`),
-        disclose("observations", "Individual observations",
+        disclose("observations", "Every message",
           [h("p", { class: "small muted" }, "Newest 300 observations in this window; grouped counts above include the full window."),
             data.observations.length ? table(["Received", "Source", "Type / target", "Message"], data.observations.map(o => [longWhen(o.t), o.source,
               h("div", { class: "col" }, labels[o.data.kind] || o.data.kind, o.data.scope), h("span", { class: "health-message" }, o.data.message)]))
-              : h("p", { class: "empty" }, "No observations in this window.")], String(data.observations.length))));
+              : h("p", { class: "empty" }, "Nothing seen in this window.")], String(data.observations.length))));
     drawActivity();
-    put(page, content, healCard(), ipv6Card(), dnsCard(),
+    // two parts: what the checks found, and the switches and settings that protect the rules
+    const tabs = h("div", { class: "row health-tabs" }, seg([["checks", "Checks"], ["protect", "Protection and settings"]], tab,
+      (v) => { tab = v; store("health-tab", v); draw(); }, { label: "Part of the page" }));
+    const kids = [...content.children];         // the head, the verdict, then the checks' cards
+    kids[1].after(tabs);
+    if (tab !== "checks") for (const k of kids.slice(2)) k.remove();
+    put(page, content, tab === "checks" ? null : [healCard(), ipv6Card(), dnsCard(),
       h("section", { class: "card pad stack" }, disclose("settings", "Monitoring and recovery settings", settingsForm)),
       h("section", { class: "card pad stack" }, disclose("kuma", "Uptime Kuma integration", [
         h("p", {}, "Use a Kuma Webhook notification with its default JSON body. Events are correlated with router checks; notifications alone never trigger proxy changes."),
         h("p", { class: "small muted" }, data.kuma_connected ? "A webhook token is configured. Replacing it revokes the previous URL." : "No webhook token configured."),
         h("button", { class: "btn", onclick: async () => {
+          if (data.kuma_connected && !await confirmDialog("Replace the webhook token?", "The current webhook URL stops working: Uptime Kuma must get the new one.", "Replace")) return;
           try { const r = await api("POST", `/api/routers/${id}/kuma-token`, {});
             webhook = new URL(r.path, location.origin).href; data.kuma_connected = true; opened.add("kuma"); draw(); }
           catch (err) { toast(err.message, true); }
         } }, data.kuma_connected ? "Replace webhook token" : "Create webhook URL"),
         webhook ? h("input", { class: "input mono", value: webhook, readonly: true, "aria-label": "Kuma webhook URL", onclick: e => e.target.select() }) : null,
-        h("p", { class: "small muted" }, "Use separate monitors for the router, direct internet, DNS and application access. Keep 403 responses as access failures and try two retries before notifying.")])));
+        h("p", { class: "small muted" }, "Use separate monitors for the router, direct internet, DNS and application access. Keep 403 responses as access failures and try two retries before notifying.")]))]);
     if (focused?.isConnected) {
       focused.focus({ preventScroll: true });
       if (selection && selection[0] !== null) focused.setSelectionRange(...selection);

@@ -22,14 +22,16 @@ export async function viewLogs(main, id) {
   const report = h("a", { class: "btn", href: `/api/routers/${id}/support-report`, download: "",
     title: "Versions, state, settings, last changes, events and the log as one text file. Servers become host-1, host-2…; ids, keys, passwords and subscription addresses are taken out. The rules' own domains stay: read it before sending" },
   "Support report");
-  const when = h("input", { type: "datetime-local", class: "input", "aria-label": "Also the stored log around this moment",
+  const when = h("input", { type: "datetime-local", class: "input", id: "report-at",
     title: "Something happened earlier? Pick when: the report adds the stored log lines from 30 minutes before to 30 minutes after",
     onchange: (e) => {
       const t = e.target.value ? new Date(e.target.value).getTime() / 1000 : 0;
       report.href = `/api/routers/${id}/support-report${t ? `?at=${t}` : ""}`;
     } });
   const page = h("div", { class: "page" },
-    pageHead("Logs", null, h("span", { class: "xs muted" }, "Around"), when, report),
+    // the moment is the report's, not a filter of the lines below
+    pageHead("Logs", null, h("span", { class: "report-at" },
+      h("label", { for: "report-at", class: "xs muted" }, "Report with the stored log around"), when), report),
     toolbar,
     h("section", { class: "card clip", "aria-label": "Log lines" }, box, foot));
   put(main, page);

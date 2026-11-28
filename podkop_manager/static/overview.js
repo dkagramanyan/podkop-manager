@@ -4,7 +4,7 @@ import { openApply } from "./apply.js";
 import { EVENT_DOT, configDiff, destChip, diffSummary, eventText, ruleExit, ruleHealth, ruleMatches, ruleNow, rulesOf, runningVersion } from "./model.js";
 import { pageHead, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { agentTime, api, confirmDialog, duration, h, hhmm, icon, longWhen, plural, put, shortWhen, toast } from "./ui.js";
+import { agentTime, api, confirmDialog, h, hhmm, icon, plural, put, quietDraw, shortWhen, toast } from "./ui.js";
 import { countriesText, gb } from "./usage.js";
 
 // --- overview -------------------------------------------------------------------------------------
@@ -26,10 +26,14 @@ export async function viewOverview(main, id) {
   const service = (action, label, cls) => h("button", { type: "button", class: `btn ${cls || ""}`, onclick: async (e) => {
     const b = e.currentTarget;
     if (action === "stop" && !await confirmDialog("Stop podkop?", "Every rule stops: its sites go direct, or are blocked where a kill switch is on, until podkop is started again. The watchdog leaves it stopped.", "Stop podkop")) return;
+    if (action === "restart" && !await confirmDialog("Restart podkop?", "Every connection through podkop is cut, and the rules are off for 20–30 s while it starts.", "Restart", "primary")) return;
     b.disabled = true;
+    const text = b.textContent;
+    b.textContent = { restart: "Restarting…", stop: "Stopping…", start: "Starting…" }[action] || text;
     try { await api("POST", `/api/routers/${id}/service`, { action }); toast(`podkop: ${action} done`); }
     catch (err) { toast(err.message, true); }
-    b.disabled = false;
+    // (the page may have been drawn again meanwhile: then this button is gone anyway)
+    b.disabled = false; b.textContent = text;
   } }, label);
 
   const draw = () => {
@@ -65,8 +69,7 @@ export async function viewOverview(main, id) {
       st ? statusStrip(st) : null,
       h("div", { class: "split" },
         h("div", { class: "stack", style: "flex: 2 1 600px; min-width: 0" },
-          nowRouting(rt, cfg),
-          nightly(rt)),
+          nowRouting(rt, cfg)),
         eventsCard(rt)));
   };
 
@@ -90,7 +93,8 @@ export async function viewOverview(main, id) {
     return h("div", { class: `banner${worst === "ok" ? "" : ` ${worst}`}`, role: "status", "aria-label": "Verdict" },
       h("span", { class: `dot ${worst}` }),
       h("div", { class: "col grow", style: "gap: 4px" },
-        h("b", {}, bad.length ? `${bad.length} of ${plural(rules.length, "rule")} ${bad.length === 1 ? "needs" : "need"} a look` : `All ${plural(rules.length, "rule")} working`),
+        h("b", {}, bad.length ? `${bad.length} of ${plural(rules.length, "proxy or VPN rule")} ${bad.length === 1 ? "needs" : "need"} a look`
+          : rules.length === 1 ? "The proxy or VPN rule is working" : `All ${rules.length} proxy and VPN rules working`),
         bad.map(([s, x]) => h("span", { class: "small" }, h("a", { href: `#/r/${id}/rules/${s.name}`, class: "mono" }, s.name), `: ${x.text}`))));
   };
 
@@ -166,7 +170,7 @@ export async function viewOverview(main, id) {
       h("div", {}, h("span", {}, "podkop-agent"),
         h("span", {}, `${st.agent.version}, ${pk.paused || !pk.enabled ? "watchdog paused" : "watchdog on"}`)),
       h("div", {}, h("span", {}, "Router"),
-        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), `up ${days ? days + " d" : hours + " h"}`,
+        h("span", {}, [st.router.model, (st.router.openwrt || "").replace(/ r\d+-\w+$/, ""), Number.isFinite(st.uptime) ? `up ${days ? days + " d" : hours + " h"}` : null,
           st.router.mem_free != null ? `${st.router.mem_free} MB free` : null].filter(Boolean).join(", "))),
       st.failsafe && !pk.running ? h("div", { style: "grid-column: 1 / -1" }, h("span", {}, `Failsafe, ${st.failsafe.time}`),
         h("span", { class: "bad-text" }, st.failsafe.message)) : null);
@@ -185,7 +189,7 @@ export async function viewOverview(main, id) {
           h("span", { class: "small muted" }, "First match wins")),
         h("a", { class: "alink", href: `#/r/${id}/rules` }, "Edit rules")),
       !cfg ? h("p", { class: "empty" }, rt.online ? "Could not read podkop's settings." : "Shown when the router answers.")
-        : h("div", { class: "scroll-x" }, h("table", { class: "wide" },
+        : h("div", { class: "scroll-x" }, h("table", { class: "wide now-routing" },
           h("tr", {}, h("th", { scope: "col", style: "width: 24px" }, "#"), h("th", { scope: "col" }, "Rule"),
             h("th", { scope: "col" }, "Matches"), h("th", { scope: "col" }, "Goes to"), h("th", { scope: "col" }, "Now")),
           rules.map((sec, i) => {
@@ -208,40 +212,6 @@ export async function viewOverview(main, id) {
             h("td", { class: "muted" }, "not through podkop")))));
   };
 
-  const nightly = () => {
-    const p = data.probe;
-    const ps = p && p.settings;
-    if (!ps) return null;
-    const last = (p.runs || []).find((r) => r.trigger === "schedule");
-    let lastText = "";
-    if (last) {
-      const day = longWhen(last.started).replace(/ \d\d:\d\d$/, "").replace(/, \d\d:\d\d$/, "");
-      lastText = last.state !== "done" ? `Last nightly run ${day.toLowerCase()}: ${last.state}.`
-        : last.version_id ? `Last nightly run ${day.toLowerCase()} applied as #${last.version_id}.`
-          : `Last nightly run ${day.toLowerCase()} finished, not applied.`;
-    }
-    let next = "";
-    if (ps.schedule) {
-      const [hh, mm] = ps.schedule.split(":").map(Number);
-      const t = new Date(); t.setHours(hh, mm, 0, 0);
-      if (t <= new Date()) t.setDate(t.getDate() + 1);
-      next = `Next run in ${duration((t - new Date()) / 1000)}.`;
-    }
-    return h("section", { class: "card note", "aria-labelledby": "nightly", style: "padding: 16px 18px" },
-      h("div", { class: "col", style: "flex: 1 1 320px; gap: 3px" },
-        h("h2", { id: "nightly", class: "h2" }, "Nightly probe"),
-        h("span", { style: "font-size: 13.5px; color: var(--text-2); font-weight: 400" }, ps.schedule
-          ? `Every night at ${ps.schedule}, ${ps.auto_apply ? "applied by itself if podkop starts with it" : "results wait for you to apply them"}.`
-          : "Off"),
-        lastText || next ? h("span", { class: "small muted" }, [lastText, next].filter(Boolean).join(" ")) : null),
-      // its settings are on Keys and usage, at the bottom: the page opens there
-      h("a", { class: "btn", href: `#/r/${id}/usage`, onclick: () => {
-        let n = 0;
-        const go = () => { const el = document.getElementById("nightly-probe"); if (el) el.scrollIntoView({ block: "start" }); else if (n++ < 20) setTimeout(go, 150); };
-        setTimeout(go, 150);
-      } }, "Schedule"));
-  };
-
   const eventsCard = () => h("aside", { class: "card events", "aria-label": "Events", style: "flex: 1 1 300px; min-width: 0" },
     h("div", { class: "row", style: "justify-content: space-between; margin-bottom: 8px" },
       h("h2", {}, "Events"), h("a", { class: "small", href: `#/r/${id}/history` }, "History")),
@@ -254,11 +224,12 @@ export async function viewOverview(main, id) {
   draw();
   let timer;
   const later = () => { clearTimeout(timer); timer = setTimeout(async () => { await load(); draw(); }, 800); };
+  const redraw = quietDraw(page, draw);
   S.view = {
     leave: () => clearTimeout(timer),
     onRouter: (r) => {
       if (r.id !== id) return;
-      if (r.status && (data.config ? r.status.fingerprint !== data.config.fingerprint : r.online)) later(); else draw();
+      if (r.status && (data.config ? r.status.fingerprint !== data.config.fingerprint : r.online)) later(); else redraw();
     },
     onEvent: (m) => m.router_id === id && later(),
     onProbe: (m) => m.router_id === id && m.state !== "running" && later(),

@@ -83,18 +83,34 @@ export async function api(method, path, body) {
 }
 
 export let toastTimer;
+// a short note at the bottom; an error stays until clicked (or the next note), and is read out at once
 export function toast(msg, bad) {
   const t = document.getElementById("toast");
   t.textContent = msg; t.className = "toast" + (bad ? " bad" : ""); t.hidden = false;
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), bad ? 8000 : 3500);
+  t.setAttribute("role", bad ? "alert" : "status");
+  t.title = bad ? "Click to close" : "";
+  t.onclick = () => { t.hidden = true; clearTimeout(toastTimer); };
+  clearTimeout(toastTimer);
+  if (!bad) toastTimer = setTimeout(() => (t.hidden = true), 3500);
 }
+
+const openModals = [];      // the top one is the one Escape closes
 
 // a dialog over the page; returns {close, el}; Escape and a click outside close it
 export function modal({ title, sub, body, foot, narrow, onclose }) {
   const titleId = `dlg-${Date.now()}`;
   let bg;
-  const close = () => { bg.remove(); document.removeEventListener("keydown", onkey); onclose && onclose(); };
-  const onkey = (e) => { if (e.key === "Escape") close(); };
+  const before = document.activeElement;
+  const close = () => {
+    if (!bg.isConnected) return;
+    bg.remove(); document.removeEventListener("keydown", onkey);
+    openModals.splice(openModals.indexOf(close), 1);
+    // focus goes back where it was (the button that opened it), unless that went away
+    if (before && before.isConnected && before.focus) before.focus();
+    if (onclose) onclose();
+  };
+  // Escape closes the top dialog only (not the one under "Remove key?")
+  const onkey = (e) => { if (e.key === "Escape" && openModals[openModals.length - 1] === close) { e.stopPropagation(); close(); } };
   const dialog = h("div", { class: `dialog${narrow ? " narrow" : ""}`, role: "dialog", "aria-modal": "true", "aria-labelledby": titleId },
     h("div", { class: "dialog-head" },
       h("div", { class: "col" }, h("h1", { id: titleId }, title), sub ? h("p", {}, sub) : null),
@@ -103,6 +119,7 @@ export function modal({ title, sub, body, foot, narrow, onclose }) {
     foot ? h("div", { class: "dialog-foot" }, foot) : null);
   bg = h("div", { class: "modal-bg", onmousedown: (e) => { if (e.target === bg) close(); } }, dialog);
   document.body.append(bg);
+  openModals.push(close);
   document.addEventListener("keydown", onkey);
   const first = dialog.querySelector("input, textarea, select, .dialog-foot button");
   (first || dialog.querySelector("button")).focus();
@@ -117,6 +134,39 @@ export function confirmDialog(title, text, label = "OK", cls = "danger") {
     const m = modal({ title, narrow: true, body: h("p", { class: "small" }, text), onclose: () => end(false),
       foot: [h("span"), h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => m.close() }, "Cancel"),
         h("button", { type: "button", class: `btn ${cls}`, onclick: () => { end(true); m.close(); } }, label))] });
+  });
+}
+
+// a page drawn again on a router update, but not under the pointer or while something in it has
+// focus (a button replaced under the cursor loses the click): then a moment later.
+// key: () => what the page shows of the update; unchanged, nothing is drawn
+export const steadyRouter = (x) => JSON.stringify(x && { ...x, checked: 0, proxies: 0, usage: 0, names: 0, exits: 0,
+  status: x.status && { ...x.status, time: 0, uptime: 0, router: 0, proxies: 0, heal: 0, traffic: 0 } });
+export function quietDraw(page, draw, key = () => Math.random()) {
+  let t = null, last = key();
+  const go = () => {
+    t = null;
+    if (!page.isConnected) return;
+    if (page.querySelector("button:hover, a:hover, summary:hover, label:hover, :focus")) { t = setTimeout(go, 1500); return; }
+    const k = key();
+    if (k === last) return;
+    last = k; draw();
+  };
+  return () => { if (!t) go(); };
+}
+
+// the app's own one-line question (not the browser's prompt): resolves the text, or null when cancelled
+export function askText(title, label, placeholder = "") {
+  return new Promise((resolve) => {
+    let done = false;
+    const end = (v) => { if (!done) { done = true; resolve(v); } };
+    const input = h("input", { class: "input", id: "ask-text", placeholder, autocomplete: "off" });
+    const ok = () => { end(input.value); m.close(); };
+    input.onkeydown = (e) => { if (e.key === "Enter") ok(); };
+    const m = modal({ title, narrow: true, onclose: () => end(null),
+      body: h("div", { class: "field" }, h("label", { for: "ask-text" }, label), input),
+      foot: [h("span"), h("div", { class: "row" }, h("button", { type: "button", class: "btn", onclick: () => m.close() }, "Cancel"),
+        h("button", { type: "button", class: "btn primary", onclick: ok }, "OK"))] });
   });
 }
 

@@ -94,7 +94,7 @@ d.summary = {failures:100000}; assert.equal(verdict(d).tone, 'ok'); // log volum
 assert.equal(healthVerdict(d, {}, 1300).tone, 'ok');       // calm checks come every 300 s
     assert.equal(healthVerdict(d, {}, 2000).title, 'Results are out of date');
 d.latest = {error:'collector failed'}; assert.equal(verdict(d).title, 'Last check could not finish');
-d = make(); d.checks = []; assert.equal(verdict(d).title, 'No baseline yet');
+d = make(); d.checks = []; assert.equal(verdict(d).title, 'Not checked yet');
 d = make(); d.agent.supported = false; assert.equal(verdict(d).title, 'Diagnostics unavailable');
 d = make(); d.checks[0].report.direct.forEach(r => {r.exit = 28; r.code = 0;});
 assert.equal(verdict(d).title, 'Direct internet is failing');

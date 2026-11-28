@@ -3,6 +3,34 @@
 Versions are podkop-probe's (`probe.sh`); a release also carries
 podkop-agent and podkop-manager.
 
+## 1.64.0 — 2026-11-28
+
+The web interface, easier to use (manager 0.51.0, no agent change). Update
+the manager; nothing else to do. The look stays; four parts are laid out
+anew.
+
+- **One draft bar on Rules, Global settings and Devices**: "N changes not
+  applied" with Discard, Check and Review and apply, and the problems
+  Check found, on all three pages.
+- **Connection health in two parts**: Checks (what the router's checks
+  found) and Protection and settings (self-heal, IPv6, devices' own DNS,
+  monitoring, Uptime Kuma). Plainer words: "Repeated problems", "What the
+  last check saw", "Problems at the same time".
+- **Phones**: the header is one line (the router's name and Menu); the
+  router switcher and other routers' alerts are inside the menu, with a red
+  dot on Menu when another router needs a look. Devices shows each device
+  in two lines with its Traffic choice (it was cut off). Settings → Add
+  router is folded once there is a router.
+- **Nightly probe in one place**: its card at the bottom of Keys and usage
+  now also says how the last run went and when the next one is; Overview
+  no longer has a card of its own.
+- Smaller fixes: a page that cannot load keeps its title and has Try
+  again; error messages stay until clicked; Escape closes only the top
+  dialog; Restart podkop, Apply now and Cancel of a scheduled change, and
+  replacing the Kuma token ask first; a rule's page says which switches act
+  at once; option and event names as the pages name them; "Other…" country
+  in the app's own dialog; pages are not redrawn under the pointer.
+
 ## 1.63.0 — 2026-11-28
 
 Bug fixes (agent 0.33.0, manager 0.50.0). Update the manager, then

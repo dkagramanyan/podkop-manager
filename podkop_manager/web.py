@@ -827,8 +827,8 @@ def create_app(db: DB, hub: Hub, public_key: str, password: str, username: str =
         ps = db.probe_settings(rid)
         # subscription addresses are secrets nobody needs to read back: masked on the way out
         ps = dict(ps, keys=[usage.mask(k) for k in ps["keys"]])
-        if settings:        # a rule's page needs only these
-            return {"settings": ps}
+        if settings:        # a rule's page and the Nightly probe card need only these
+            return {"settings": ps, "runs": db.probe_runs(rid, 10)}
         rules = db.auto_rules(rid)
         with contextlib.suppress(AgentError):
             st = await hub.probe_status(rt)

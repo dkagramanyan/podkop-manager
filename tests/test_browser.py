@@ -94,7 +94,7 @@ def test_every_page_opens_without_script_errors(server):
         assert errors == [], errors
         # the Settings page shows this router and its agent update dialog opens
         page.goto(f"{server}/#/settings")
-        page.wait_for_selector("text=home")
+        page.wait_for_selector("#main >> text=home")
         # the page redraws when the router's status arrives: a plain click can find the button replaced
         page.locator("text=Update agent").first.dispatch_event("click")
         page.wait_for_selector("text=Update from this manager")
@@ -184,6 +184,7 @@ def test_a_change_is_scheduled_from_the_apply_dialog(tmp_path):
             page.wait_for_selector("text=Apply now")
             page.screenshot(path=str(tmp_path / "schedule-history.png"), full_page=True)
             page.locator("text=Cancel").first.dispatch_event("click")
+            page.click(".dialog-foot >> text=Cancel the change")     # asked first (1.64)
             page.wait_for_selector("text=cancelled")
             assert db.scheduled(1) == [] and errors == [], errors
             browser.close()
@@ -659,9 +660,9 @@ def test_a_switch_turned_on_and_off_again_is_no_change(tmp_path):
             page.goto(f"{base}/#/r/1/global")
             box = page.locator("[data-k='disable_quic']")
             box.check()
-            page.wait_for_selector("text=Review and apply, 1")
+            page.wait_for_selector("text=1 change not applied")      # the draft bar, as on Rules (1.64)
             page.locator("[data-k='disable_quic']").uncheck()
-            page.wait_for_selector("text=Review and apply", state="detached")
+            page.wait_for_selector("[aria-label='Unapplied changes']", state="detached")
             page.wait_for_timeout(1200)           # the draft's save (500 ms later) went out
             assert db.draft(1) is None and errors == [], errors
             browser.close()

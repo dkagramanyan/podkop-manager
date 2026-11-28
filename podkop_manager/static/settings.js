@@ -4,7 +4,7 @@ import { updateAgent } from "./agent.js";
 import { loadRouters } from "./app.js";
 import { drawSide, pageHead, routerList, routerState } from "./shell.js";
 import { S } from "./state.js";
-import { ago, api, h, longWhen, modal, put, shortWhen, toast } from "./ui.js";
+import { ago, api, h, longWhen, modal, put, quietDraw, shortWhen, steadyRouter, toast } from "./ui.js";
 import { busyClick } from "./usage.js";
 
 // --- settings (the manager's) -------------------------------------------------------------------------------
@@ -102,7 +102,7 @@ export async function viewSettings(main) {
   };
   const addOut = h("div");
   const addBtn = h("button", { type: "submit", class: "btn primary lg" }, "Add");
-  const addForm = h("form", { class: "card pad", "aria-labelledby": "s-add", onsubmit: async (e) => {
+  const addForm = h("form", { class: "stack", "aria-labelledby": "s-add", onsubmit: async (e) => {
     e.preventDefault();
     if (!f.pairing.value.trim()) { f.pairing.focus(); return; }
     addBtn.disabled = true; put(addOut, h("p", { class: "small muted" }, "Checking the router…"));
@@ -113,8 +113,7 @@ export async function viewSettings(main) {
       location.hash = `#/r/${r.id}`;
     } catch (err) { put(addOut, h("p", { class: "problem-box" }, err.message)); addBtn.disabled = false; }
   } },
-  h("div", { class: "col" }, h("h2", { id: "s-add" }, "Add router"),
-    h("span", { class: "small muted" }, "podkop stays as it is: its settings are kept in Configs. The probe needs podkop-engine.")),
+  h("span", { class: "small muted" }, "podkop stays as it is: its settings are kept in Configs. The probe needs podkop-engine."),
   commandPart("a"),
   h("div", { class: "field" }, h("label", { for: "a-pair" }, "The line the command printed at the end"), f.pairing),
   h("div", { class: "auto-grid", style: "grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr))" },
@@ -168,7 +167,9 @@ export async function viewSettings(main) {
                 h("button", { type: "button", class: "btn xs", onclick: () => reinstall(rt) }, "Reinstall agent"),
                 h("button", { type: "button", class: "btn xs danger", onclick: () => remove(rt) }, "Remove"))));
           }))) : null),
-      addForm,
+      // folded once there is a router (open when asked for from the router switcher)
+      h("details", { class: "card pad add-router", open: !list.length || S.addRouter, ontoggle: (e) => { S.addRouter = e.target.open; } },
+        h("summary", {}, h("h2", { id: "s-add" }, "Add router")), addForm),
       h("div", { style: "display: grid; grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); gap: 16px; align-items: start" },
         h("section", { class: "card pad", "aria-labelledby": "s-mgr", style: "gap: 12px" },
           h("div", { class: "col" }, h("h2", { id: "s-mgr" }, "This manager"), h("span", { class: "small muted" }, `podkop-manager ${info.release || ""} (manager ${info.version})`.replace("  ", " "))),
@@ -194,7 +195,10 @@ export async function viewSettings(main) {
   };
 
   // where alerts go; loaded once, edits live in notifyS until saved
-  let notifyS = null, notifyEvents = [];
+  let notifyS = null, notifyEvents = [], eventsOpen = false;      // (the list stays open across redraws)
+  // an event's name in the words the pages use: "strict_closed" -> "kill switch closed"
+  const WORDS = { strict: "kill switch", heal: "self-heal", group: "rule", fds: "open files", vpn: "VPN", api: "API", clash: "sing-box", dns: "DNS" };
+  const eventName = (e) => e.split("_").map((w) => WORDS[w] || w).join(" ");
   Promise.all([api("GET", "/api/notify"), api("GET", "/api/notify/events").catch(() => [])])
     .then(([n, ev]) => { notifyS = n; notifyEvents = ev; if (!page.querySelector(":focus")) draw(); }).catch(() => {});
   // the events a message is sent for, in groups, each one can be switched off
@@ -232,7 +236,7 @@ export async function viewSettings(main) {
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: notifyS.daily, onchange: (e) => { notifyS.daily = e.target.checked; } }),
         h("span", {}, "A daily summary at 9:00")),
       field("quiet", "Quiet hours", "text", "e.g. 23:00-08:00: Telegram messages come without a sound then"),
-      notifyEvents.length ? h("details", { class: "small" },
+      notifyEvents.length ? h("details", { class: "small", open: eventsOpen, ontoggle: (ev) => { eventsOpen = ev.target.open; } },
         h("summary", {}, `Which events send a message: ${notifyEvents.length - (notifyS.off || []).length} of ${notifyEvents.length}`),
         eventGroups().map(([name, list]) => h("div", { class: "stack", style: "gap: 4px; margin-top: 10px" },
           h("b", {}, name),
@@ -241,7 +245,7 @@ export async function viewSettings(main) {
               const off = new Set(notifyS.off || []);
               if (ev.target.checked) off.delete(e); else off.add(e);
               notifyS.off = [...off];
-            } }), h("span", {}, e.replace(/_/g, " ")))))))) : null,
+            } }), h("span", { title: e }, eventName(e)))))))) : null,
       h("span", { style: "font-size: 13px; font-weight: 500" }, "Watched servers"),
       watchedList(),
       h("div", { class: "row" },
@@ -267,5 +271,6 @@ export async function viewSettings(main) {
   };
 
   draw();
-  S.view = { onRouter: () => { if (!page.querySelector(":focus")) draw(); } };
+  const redraw = quietDraw(page, draw, () => Object.values(S.routers).map(steadyRouter).join());
+  S.view = { onRouter: () => redraw() };
 }
